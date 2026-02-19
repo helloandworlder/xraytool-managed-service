@@ -53,15 +53,6 @@ jobs:
           cp README.md dist/release/README.md
           tar -C dist -czf dist/xraytool-linux-amd64.tar.gz release
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: xraytool-linux-amd64
-          path: |
-            dist/xraytool-linux-amd64
-            dist/xraytoolctl-linux-amd64
-            dist/xraytool-linux-amd64.tar.gz
-
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
