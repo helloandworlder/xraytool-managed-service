@@ -70,7 +70,7 @@ func (s *OrderService) ListOrders() ([]model.Order, error) {
 
 func (s *OrderService) GetOrder(orderID uint) (*model.Order, error) {
 	var order model.Order
-	err := s.db.Preload("Customer").Preload("Items").Preload("Items.Resources").Preload("Resources").First(&order, orderID).Error
+	err := s.db.Preload("Customer").Preload("Items").Preload("Items.Resources").First(&order, orderID).Error
 	if err != nil {
 		return nil, err
 	}

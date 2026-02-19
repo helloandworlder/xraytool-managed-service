@@ -64,9 +64,8 @@ type Order struct {
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 
-	Customer  Customer    `json:"customer"`
-	Items     []OrderItem `json:"items"`
-	Resources []XrayResource
+	Customer Customer    `json:"customer"`
+	Items    []OrderItem `json:"items"`
 }
 
 type OrderItem struct {

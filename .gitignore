@@ -3,6 +3,8 @@ bin/
 dist/
 *.test
 *.out
+xraytool
+xraytoolctl
 
 # Runtime
 data/
