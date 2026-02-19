@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-canvas text-ink;
+  background-image:
+    radial-gradient(circle at 8% 6%, rgba(3, 105, 161, 0.14), transparent 26%),
+    radial-gradient(circle at 84% 12%, rgba(15, 118, 110, 0.15), transparent 32%);
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.panel {
+  @apply rounded-2xl border border-slate-200/80 bg-white/90 shadow-panel backdrop-blur;
+}
+
+.chip {
+  @apply inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold;
+}
+
+.input {
+  @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition;
+}
+
+.input:focus {
+  @apply border-sea ring-2 ring-sea/20;
+}
+
+.table-head {
+  @apply text-left text-xs font-semibold uppercase tracking-wide text-slate-500;
+}
+
+.table-cell {
+  @apply border-t border-slate-100 py-2 text-sm;
+}

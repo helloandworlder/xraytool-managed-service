@@ -1,0 +1,20 @@
+# Go
+bin/
+dist/
+*.test
+*.out
+
+# Runtime
+data/
+*.log
+
+# Frontend
+frontend/node_modules/
+frontend/.pnpm-store/
+.pnpm-store/
+
+# Build output
+web/dist/
+
+# macOS
+.DS_Store

@@ -1,0 +1,44 @@
+body {
+  background:
+    radial-gradient(circle at 10% 5%, rgba(2, 132, 199, 0.15), transparent 30%),
+    radial-gradient(circle at 85% 12%, rgba(15, 118, 110, 0.15), transparent 35%),
+    #f8fafc;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+}
+
+.input {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 0.55rem 0.75rem;
+  outline: none;
+  background: #fff;
+}
+
+.input:focus {
+  border-color: #0284c7;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.16);
+}
+
+.btn {
+  border-radius: 10px;
+  padding: 0.55rem 0.9rem;
+  font-weight: 700;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #0284c7, #0f766e);
+  color: #fff;
+}
+
+.btn-muted {
+  background: #e2e8f0;
+  color: #0f172a;
+}

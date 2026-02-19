@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CTL_BIN="${ROOT_DIR}/xraytoolctl"
+
+if [[ ! -x "${CTL_BIN}" ]]; then
+  echo "xraytoolctl not found: ${CTL_BIN}"
+  echo "Please build first: go build -o xraytoolctl ./cmd/xtoolctl"
+  exit 1
+fi
+
+echo "=============================="
+echo " XrayTool CLI (xtool)"
+echo "=============================="
+echo "1) Reset admin username/password"
+echo "2) Exit"
+read -r -p "Select [1-2]: " choice
+
+case "${choice}" in
+  1)
+    "${CTL_BIN}" -mode reset-admin
+    ;;
+  2)
+    exit 0
+    ;;
+  *)
+    echo "Invalid selection"
+    exit 1
+    ;;
+esac

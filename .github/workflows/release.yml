@@ -1,0 +1,72 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 go build -o dist/xraytool-linux-amd64 ./cmd/xraytool
+          GOOS=linux GOARCH=amd64 go build -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
+
+      - name: Package release bundle
+        run: |
+          mkdir -p dist/release
+          cp dist/xraytool-linux-amd64 dist/release/xraytool
+          cp dist/xraytoolctl-linux-amd64 dist/release/xraytoolctl
+          cp -R deploy dist/release/deploy
+          cp -R web/dist dist/release/web-dist
+          cp .env.example dist/release/.env.example
+          cp README.md dist/release/README.md
+          tar -C dist -czf dist/xraytool-linux-amd64.tar.gz release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xraytool-linux-amd64
+          path: |
+            dist/xraytool-linux-amd64
+            dist/xraytoolctl-linux-amd64
+            dist/xraytool-linux-amd64.tar.gz
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/xraytool-linux-amd64
+            dist/xraytoolctl-linux-amd64
+            dist/xraytool-linux-amd64.tar.gz

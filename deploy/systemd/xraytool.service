@@ -1,0 +1,16 @@
+[Unit]
+Description=XrayTool Managed Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/xraytool
+EnvironmentFile=-/etc/default/xraytool
+ExecStart=/opt/xraytool/xraytool
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
