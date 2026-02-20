@@ -53,6 +53,13 @@ if [[ -z "${ADMIN_PASS}" ]]; then
 fi
 INSTALL_DIR="$(get_install_dir)"
 
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+  set +a
+fi
+
 if [[ ! -x "${CTL_BIN}" ]]; then
   echo "xraytoolctl not found: ${CTL_BIN}"
   echo "Please build first: go build -o xraytoolctl ./cmd/xtoolctl"

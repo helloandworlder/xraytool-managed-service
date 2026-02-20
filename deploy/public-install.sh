@@ -169,6 +169,13 @@ random_alnum() {
   (set +o pipefail; LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$n")
 }
 
+read_existing_env() {
+  local key="$1"
+  local env_file="/etc/default/${SERVICE_NAME}"
+  [[ -f "$env_file" ]] || return 0
+  awk -F'=' -v k="$key" '$1==k {print substr($0, index($0,$2)); exit}' "$env_file"
+}
+
 port_in_use() {
   local port="$1"
   ss -lntH | awk -v p=":${port}" '$4 ~ p"$" {found=1} END {exit found ? 0 : 1}'
@@ -234,7 +241,14 @@ resolve_runtime_values() {
 
   is_valid_port "$LISTEN_PORT" || fail "Invalid port: $LISTEN_PORT"
   if port_in_use "$LISTEN_PORT"; then
-    fail "Port is already in use: $LISTEN_PORT"
+    local existing_port
+    existing_port="$(read_existing_env XTOOL_LISTEN || true)"
+    existing_port="${existing_port#:}"
+    if [[ -n "$existing_port" && "$existing_port" == "$LISTEN_PORT" ]]; then
+      log "port ${LISTEN_PORT} is currently used by existing xraytool service, reusing it"
+    else
+      fail "Port is already in use: $LISTEN_PORT"
+    fi
   fi
 
   if [[ -n "$ADMIN_USER_INPUT" ]]; then
