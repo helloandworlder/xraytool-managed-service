@@ -54,8 +54,8 @@ func Run() error {
 
 	xrayManager := service.NewXrayManager(cfg, database, logger)
 	if err := xrayManager.StartManaged(); err != nil {
-		logger.Warn("start managed xray failed", zap.Error(err))
-		st.AddTaskLog("warn", "start managed xray failed", err.Error())
+		st.AddTaskLog("error", "start managed xray failed", err.Error())
+		return fmt.Errorf("start managed xray failed: %w", err)
 	}
 
 	orderSvc := service.NewOrderService(database, xrayManager, logger)
