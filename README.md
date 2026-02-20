@@ -32,6 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-se
 - 下载当前架构对应的 `xraytool` release 包（amd64/arm64）
 - 下载 Xray-core 到私有目录（不全局安装）
 - 写入 `/etc/default/xraytool` 与 systemd 服务
+- 自动检测 Xray API 端口占用（默认尝试 `10085`，冲突时自动随机可用端口）
 - 启动服务并做健康检查
 
 非交互示例：
@@ -39,6 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-se
 ```bash
 curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/refs/heads/main/deploy/public-install.sh | sudo bash -s -- \
   --non-interactive \
+  --xray-api-port random \
   --port 18080 \
   --admin-user admin \
   --admin-pass 'YourStrongPass123'

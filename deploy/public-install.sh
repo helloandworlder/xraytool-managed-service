@@ -16,6 +16,7 @@ NON_INTERACTIVE=false
 LISTEN_PORT_INPUT="${XTOOL_INSTALL_PORT:-}"
 ADMIN_USER_INPUT="${XTOOL_INSTALL_ADMIN_USER:-}"
 ADMIN_PASS_INPUT="${XTOOL_INSTALL_ADMIN_PASS:-}"
+XRAY_API_PORT_INPUT="${XTOOL_INSTALL_XRAY_API_PORT:-}"
 PACKAGE_PATH="${XTOOL_PACKAGE_PATH:-}"
 XRAY_BIN_PATH="${XTOOL_XRAY_BIN_PATH:-}"
 
@@ -30,6 +31,7 @@ Options:
   --port <1-65535>       Web panel port
   --admin-user <name>    Admin username
   --admin-pass <pass>    Admin password
+  --xray-api-port <p|random>  Managed Xray API port (default: auto-choose)
   -y, --non-interactive  Skip prompts and use provided/random values
   -h, --help             Show help
 
@@ -39,6 +41,7 @@ Env overrides (for testing):
   XTOOL_INSTALL_PORT     Same as --port
   XTOOL_INSTALL_ADMIN_USER  Same as --admin-user
   XTOOL_INSTALL_ADMIN_PASS  Same as --admin-pass
+  XTOOL_INSTALL_XRAY_API_PORT Same as --xray-api-port
 EOF
 }
 
@@ -62,6 +65,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --admin-pass)
       ADMIN_PASS_INPUT="$2"
+      shift 2
+      ;;
+    --xray-api-port)
+      XRAY_API_PORT_INPUT="$2"
       shift 2
       ;;
     -y|--non-interactive)
@@ -176,6 +183,15 @@ read_existing_env() {
   awk -F'=' -v k="$key" '$1==k {print substr($0, index($0,$2)); exit}' "$env_file"
 }
 
+extract_port_from_addr() {
+  local value="$1"
+  if [[ "$value" == *:* ]]; then
+    echo "${value##*:}"
+    return
+  fi
+  echo "$value"
+}
+
 port_in_use() {
   local port="$1"
   ss -lntH | awk -v p=":${port}" '$4 ~ p"$" {found=1} END {exit found ? 0 : 1}'
@@ -284,6 +300,37 @@ resolve_runtime_values() {
   fi
 }
 
+resolve_xray_api_port() {
+  local preferred_port existing_api existing_port
+
+  preferred_port="${XRAY_API_PORT_INPUT}"
+  if [[ -z "$preferred_port" ]]; then
+    preferred_port="10085"
+  fi
+
+  if [[ "$preferred_port" == "random" || "$preferred_port" == "r" ]]; then
+    XRAY_API_PORT="$(random_port)"
+  else
+    XRAY_API_PORT="$preferred_port"
+  fi
+
+  is_valid_port "$XRAY_API_PORT" || fail "Invalid xray api port: $XRAY_API_PORT"
+  if port_in_use "$XRAY_API_PORT"; then
+    existing_api="$(read_existing_env XTOOL_XRAY_API || true)"
+    existing_port="$(extract_port_from_addr "$existing_api")"
+    if [[ -n "$existing_port" && "$existing_port" == "$XRAY_API_PORT" ]]; then
+      log "xray api port ${XRAY_API_PORT} is currently used by existing xraytool service, reusing it"
+    elif [[ -z "$XRAY_API_PORT_INPUT" ]]; then
+      XRAY_API_PORT="$(random_port)"
+      log "xray api port 10085 occupied, switched to random ${XRAY_API_PORT}"
+    else
+      fail "Xray API port is already in use: $XRAY_API_PORT"
+    fi
+  fi
+
+  XRAY_API_ADDR="127.0.0.1:${XRAY_API_PORT}"
+}
+
 build_release_url() {
   local asset="$1"
   if [[ "$RELEASE_VERSION" == "latest" ]]; then
@@ -389,7 +436,7 @@ XTOOL_MANAGED_XRAY=true
 XTOOL_XRAY_DIR=${INSTALL_DIR}/data/xray
 XTOOL_XRAY_BIN=${INSTALL_DIR}/data/xray/xray
 XTOOL_XRAY_CONFIG=${INSTALL_DIR}/data/xray/config.json
-XTOOL_XRAY_API=127.0.0.1:10085
+XTOOL_XRAY_API=${XRAY_API_ADDR}
 XTOOL_DEFAULT_PORT=23457
 XTOOL_SCHEDULER_SECONDS=30
 EOF
@@ -426,6 +473,7 @@ ensure_cmd systemctl
 
 detect_arch
 resolve_runtime_values
+resolve_xray_api_port
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -442,5 +490,6 @@ echo "Install dir : ${INSTALL_DIR}"
 echo "Panel URL   : http://<server-ip>:${LISTEN_PORT}"
 echo "Admin user  : ${ADMIN_USER}"
 echo "Admin pass  : ${ADMIN_PASS}"
+echo "Xray API    : ${XRAY_API_ADDR}"
 echo "Service     : systemctl status ${SERVICE_NAME}"
 echo "Reset admin : ${INSTALL_DIR}/deploy/xtool"

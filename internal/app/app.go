@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +53,14 @@ func Run() error {
 	hostSvc := service.NewHostIPService(database)
 	_, _ = hostSvc.ScanAndSync()
 
+	if cfg.ManagedXrayEnabled {
+		resolvedAPIServer, err := resolveManagedXrayAPIServer(cfg.XrayAPIServer)
+		if err != nil {
+			return err
+		}
+		cfg.XrayAPIServer = resolvedAPIServer
+	}
+
 	xrayManager := service.NewXrayManager(cfg, database, logger)
 	if err := xrayManager.StartManaged(); err != nil {
 		st.AddTaskLog("error", "start managed xray failed", err.Error())
@@ -95,4 +104,24 @@ func ensureListenAddrAvailable(addr string) error {
 		return fmt.Errorf("listen address unavailable %s: %w", addr, err)
 	}
 	return ln.Close()
+}
+
+func resolveManagedXrayAPIServer(raw string) (string, error) {
+	apiAddr := strings.TrimSpace(raw)
+	if apiAddr == "" {
+		apiAddr = "127.0.0.1:10085"
+	}
+	if strings.EqualFold(apiAddr, "auto") || strings.HasSuffix(apiAddr, ":0") {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return "", fmt.Errorf("allocate managed xray api port failed: %w", err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		return addr, nil
+	}
+	if err := ensureListenAddrAvailable(apiAddr); err != nil {
+		return "", fmt.Errorf("managed xray api address unavailable %s: %w", apiAddr, err)
+	}
+	return apiAddr, nil
 }
