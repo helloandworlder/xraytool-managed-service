@@ -27,6 +27,7 @@ type Admin struct {
 type Customer struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	Name      string    `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	Code      string    `gorm:"size:64;index" json:"code"`
 	Contact   string    `gorm:"size:255" json:"contact"`
 	Notes     string    `gorm:"size:1024" json:"notes"`
 	Status    string    `gorm:"size:32;default:active" json:"status"`

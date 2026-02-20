@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
 	ApiOutlined,
@@ -26,13 +26,14 @@ const panel = usePanelStore()
 auth.init()
 
 const loginForm = reactive({ username: auth.username || 'admin', password: '' })
-const customerForm = reactive({ name: '', contact: '', notes: '' })
+const customerForm = reactive({ name: '', code: '', contact: '', notes: '' })
 const probeForm = reactive({ ip: '0.0.0.0', port: 23457 })
 const orderForm = reactive({
   customer_id: 0,
   name: '',
   quantity: 1,
   duration_day: 30,
+  expires_at: '',
   mode: 'auto',
   port: 23457,
   manual_ip_ids: [] as number[]
@@ -54,10 +55,29 @@ const customerEditOpen = ref(false)
 const customerEditForm = reactive({
 	id: 0,
 	name: '',
+	code: '',
 	contact: '',
 	notes: '',
 	status: 'active'
 })
+
+const orderEditOpen = ref(false)
+const orderEditForm = reactive({
+	id: 0,
+	name: '',
+	quantity: 1,
+	port: 23457,
+	expires_at: '',
+	manual_ip_ids: [] as number[]
+})
+const oversellCustomerID = ref<number>(0)
+const testSamplePercent = ref<number>(100)
+const streamTestOpen = ref(false)
+const streamTestOrderID = ref<number>(0)
+const streamMeta = reactive({ total: 0, sampled: 0, sample_percent: 100, success: 0, failed: 0 })
+const streamRows = ref<Array<{ item_id: number; status: string; detail: string }>>([])
+const exportingOrderID = ref<number | null>(null)
+const exportCount = ref<number>(0)
 
 const siderCollapsed = ref(false)
 const probeResult = ref('')
@@ -109,12 +129,13 @@ const ordersColumns = [
 	{ title: '数量', dataIndex: 'quantity', width: 90 },
 	{ title: '端口', dataIndex: 'port', width: 100 },
 	{ title: '到期', key: 'expires', width: 210 },
-	{ title: '动作', key: 'action', fixed: 'right', width: 320 }
+	{ title: '动作', key: 'action', fixed: 'right', width: 420 }
 ]
 
 const customerColumns = [
 	{ title: 'ID', dataIndex: 'id', width: 72 },
 	{ title: '名称', dataIndex: 'name', width: 180 },
+	{ title: '代号', dataIndex: 'code', width: 120 },
 	{ title: '联系', dataIndex: 'contact' },
 	{ title: '状态', dataIndex: 'status', width: 100 },
 	{ title: '备注', dataIndex: 'notes' },
@@ -130,9 +151,21 @@ const hostColumns = [
 
 const oversellColumns = [
   { title: 'IP', dataIndex: 'ip', key: 'ip', width: 220 },
-  { title: '占用订单数', dataIndex: 'count', key: 'count', width: 110 },
-  { title: '热度', key: 'heat', width: 260 },
-  { title: '可用', dataIndex: 'enabled', key: 'enabled', width: 100 }
+  { title: '总占用', dataIndex: 'total_active_count', key: 'total_active_count', width: 90 },
+  { title: '当前客户占用', dataIndex: 'customer_active_count', key: 'customer_active_count', width: 110 },
+  { title: '超卖率', key: 'oversell_rate', width: 120 },
+  { title: '热度', key: 'heat', width: 220 },
+  { title: '可用', dataIndex: 'enabled', key: 'enabled', width: 90 }
+]
+
+const runtimeColumns = [
+	{ title: '客户', key: 'customer', width: 180 },
+	{ title: '在线数', dataIndex: 'online_clients', key: 'online_clients', width: 90 },
+	{ title: '实时速度', key: 'speed', width: 120 },
+	{ title: '1h流量', key: 't1h', width: 100 },
+	{ title: '24h流量', key: 't24h', width: 100 },
+	{ title: '7d流量', key: 't7d', width: 100 },
+	{ title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170 }
 ]
 
 const importColumns = [
@@ -167,6 +200,21 @@ onMounted(async () => {
     auth.logout()
   }
 })
+
+watch(
+	() => orderForm.customer_id,
+	async (id) => {
+		if (!id) {
+			panel.allocationPreview = null
+			return
+		}
+		try {
+			await panel.loadAllocationPreview(Number(id))
+		} catch (err) {
+			panel.setError(err)
+		}
+	}
+)
 
 function seedDefaultsFromSettings() {
   const p = Number(panel.settings.default_inbound_port || '23457')
@@ -240,6 +288,7 @@ async function createCustomer() {
 	try {
 		await panel.createCustomer(customerForm)
 		customerForm.name = ''
+		customerForm.code = ''
 		customerForm.contact = ''
 		customerForm.notes = ''
 		message.success('客户已创建')
@@ -248,9 +297,10 @@ async function createCustomer() {
 	}
 }
 
-function openCustomerEdit(row: { id: number; name: string; contact: string; notes: string; status: string }) {
+function openCustomerEdit(row: { id: number; name: string; code?: string; contact: string; notes: string; status: string }) {
 	customerEditForm.id = row.id
 	customerEditForm.name = row.name
+	customerEditForm.code = (row as any).code || ''
 	customerEditForm.contact = row.contact || ''
 	customerEditForm.notes = row.notes || ''
 	customerEditForm.status = row.status || 'active'
@@ -261,6 +311,7 @@ async function saveCustomerEdit() {
 	try {
 		await panel.updateCustomer(customerEditForm.id, {
 			name: customerEditForm.name,
+			code: customerEditForm.code,
 			contact: customerEditForm.contact,
 			notes: customerEditForm.notes,
 			status: customerEditForm.status
@@ -306,16 +357,55 @@ async function createOrder() {
       name: orderForm.name,
       quantity: Number(orderForm.quantity),
       duration_day: Number(orderForm.duration_day),
+      expires_at: orderForm.expires_at ? new Date(orderForm.expires_at).toISOString() : '',
       mode: orderForm.mode,
       port: Number(orderForm.port),
       manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v))
     })
     orderForm.name = ''
+    orderForm.expires_at = ''
     panel.orderSelection = []
     message.success('订单创建成功')
   } catch (err) {
     panel.setError(err)
   }
+}
+
+function setQuickExpiry(days: number, target: 'create' | 'edit') {
+	const at = new Date(Date.now() + days * 24 * 3600 * 1000)
+	const text = at.toISOString().slice(0, 19)
+	if (target === 'create') {
+		orderForm.expires_at = text
+		return
+	}
+	orderEditForm.expires_at = text
+}
+
+function openOrderEdit(row: Order) {
+	orderEditForm.id = row.id
+	orderEditForm.name = row.name
+	orderEditForm.quantity = row.quantity
+	orderEditForm.port = row.port
+	orderEditForm.expires_at = row.expires_at ? new Date(row.expires_at).toISOString().slice(0, 19) : ''
+	orderEditForm.manual_ip_ids = []
+	orderEditOpen.value = true
+	void panel.loadAllocationPreview(row.customer_id, row.id)
+}
+
+async function saveOrderEdit() {
+	try {
+		await panel.updateOrder(orderEditForm.id, {
+			name: orderEditForm.name,
+			quantity: Number(orderEditForm.quantity),
+			port: Number(orderEditForm.port),
+			expires_at: orderEditForm.expires_at ? new Date(orderEditForm.expires_at).toISOString() : '',
+			manual_ip_ids: orderEditForm.manual_ip_ids.map((v) => Number(v))
+		})
+		orderEditOpen.value = false
+		message.success('订单已更新')
+	} catch (err) {
+		panel.setError(err)
+	}
 }
 
 async function renewOrder(orderID: number, moreDays?: number) {
@@ -408,24 +498,73 @@ async function doBatchDeactivate() {
 
 async function exportOrder(orderID: number) {
 	try {
-		const res = await http.get(`/api/orders/${orderID}/export`, { responseType: 'text' })
+		exportingOrderID.value = orderID
+		const params = new URLSearchParams()
+		if (Number(exportCount.value) > 0) {
+			params.set('count', String(Number(exportCount.value)))
+		}
+		params.set('shuffle', 'true')
+		const query = params.toString()
+		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'text' })
 		const text = typeof res.data === 'string' ? res.data : String(res.data)
-		downloadTextFile(text, `order-${orderID}-socks5.txt`)
+		const header = String(res.headers['content-disposition'] || '')
+		const match = header.match(/filename="?([^";]+)"?/i)
+		downloadTextFile(text, match?.[1] || `order-${orderID}-socks5.txt`)
 	} catch (err) {
 		panel.setError(err)
+	} finally {
+		exportingOrderID.value = null
 	}
 }
 
 async function testOrder(orderID: number) {
   try {
     testingOrderID.value = orderID
-    testResult.value = await panel.testOrder(orderID)
+    testResult.value = await panel.testOrder(orderID, Number(testSamplePercent.value))
     message.success('测活已完成')
   } catch (err) {
     panel.setError(err)
   } finally {
     testingOrderID.value = null
   }
+}
+
+async function streamTestOrder(orderID: number) {
+	streamTestOrderID.value = orderID
+	streamRows.value = []
+	streamMeta.total = 0
+	streamMeta.sampled = 0
+	streamMeta.sample_percent = Number(testSamplePercent.value)
+	streamMeta.success = 0
+	streamMeta.failed = 0
+	streamTestOpen.value = true
+	try {
+		await panel.streamTestOrder(orderID, Number(testSamplePercent.value), (event) => {
+			if (event.type === 'meta') {
+				streamMeta.total = Number(event.total || 0)
+				streamMeta.sampled = Number(event.sampled || 0)
+				streamMeta.sample_percent = Number(event.sample_percent || testSamplePercent.value)
+				return
+			}
+			if (event.type === 'result') {
+				streamRows.value.unshift({
+					item_id: Number(event.item_id || 0),
+					status: String(event.status || ''),
+					detail: String(event.detail || '')
+				})
+				if (event.status === 'ok') streamMeta.success += 1
+				if (event.status === 'failed') streamMeta.failed += 1
+				return
+			}
+			if (event.type === 'done') {
+				streamMeta.success = Number(event.success_count || streamMeta.success)
+				streamMeta.failed = Number(event.failure_count || streamMeta.failed)
+			}
+		})
+		message.success('流式测活完成')
+	} catch (err) {
+		panel.setError(err)
+	}
 }
 
 async function openOrderDetail(order: Order) {
@@ -473,8 +612,23 @@ async function confirmImport() {
 
 async function saveSettings() {
 	try {
-		await panel.saveSettings({ ...panel.settings })
+		await panel.saveSettings({
+			default_inbound_port: panel.settings.default_inbound_port || '23457',
+			bark_enabled: panel.settings.bark_enabled === 'true' ? 'true' : 'false',
+			bark_base_url: panel.settings.bark_base_url || '',
+			bark_device_key: panel.settings.bark_device_key || '',
+			bark_group: panel.settings.bark_group || 'xraytool'
+		})
 		message.success('设置已保存')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function sendBarkTest() {
+	try {
+		await panel.testBark()
+		message.success('Bark 测试通知已发送')
 	} catch (err) {
 		panel.setError(err)
 	}
@@ -509,6 +663,22 @@ function bytesText(size: number): string {
 	return `${(size/1024/1024).toFixed(2)} MB`
 }
 
+function bpsText(size: number): string {
+	if (!Number.isFinite(size) || size <= 0) return '0 B/s'
+	if (size < 1024) return `${size.toFixed(0)} B/s`
+	if (size < 1024*1024) return `${(size/1024).toFixed(1)} KB/s`
+	return `${(size/1024/1024).toFixed(2)} MB/s`
+}
+
+async function changeOversellView(customerID: number) {
+	oversellCustomerID.value = customerID
+	try {
+		await panel.loadOversell(customerID)
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
 async function createBackup() {
 	try {
 		await panel.createBackup()
@@ -536,8 +706,21 @@ async function exportBackupDirect() {
 	}
 }
 
-function downloadBackup(name: string) {
-	window.open(panel.backupDownloadURL(name), '_blank')
+async function downloadBackup(name: string) {
+	try {
+		const res = await panel.downloadBackup(name)
+		const header = String(res.headers['content-disposition'] || '')
+		const match = header.match(/filename="?([^";]+)"?/i)
+		const saveName = match?.[1] || name
+		const url = URL.createObjectURL(res.data)
+		const a = document.createElement('a')
+		a.href = url
+		a.download = saveName
+		a.click()
+		URL.revokeObjectURL(url)
+	} catch (err) {
+		panel.setError(err)
+	}
 }
 
 function deleteBackup(name: string) {
@@ -644,6 +827,20 @@ function downloadTextFile(text: string, filename: string) {
             <a-row :gutter="12">
               <a-col :xs="24" :lg="13">
                 <a-card :bordered="false" title="IP 超卖热度" class="mb-3">
+                  <template #extra>
+                    <a-space>
+                      <span class="text-xs text-slate-500">视图</span>
+                      <a-select :value="oversellCustomerID" size="small" style="width: 180px" @change="(v:number) => changeOversellView(Number(v))">
+                        <a-select-option :value="0">本机全局</a-select-option>
+                        <a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}{{ c.code ? ` (${c.code})` : '' }}</a-select-option>
+                      </a-select>
+                    </a-space>
+                  </template>
+                  <div class="mb-2 ip-grid">
+                    <div v-for="row in panel.oversell" :key="row.ip" class="ip-cell" :style="{ backgroundColor: row.oversold_count > 0 ? 'rgba(239,68,68,0.16)' : row.total_active_count > 0 ? 'rgba(34,197,94,0.16)' : 'rgba(148,163,184,0.08)' }" :title="`${row.ip} 总占用:${row.total_active_count}`">
+                      <span>{{ row.ip }}</span>
+                    </div>
+                  </div>
                   <a-table
                     :columns="oversellColumns"
                     :data-source="panel.oversell"
@@ -655,8 +852,38 @@ function downloadTextFile(text: string, filename: string) {
                       <template v-if="column.key === 'enabled'">
                         <a-tag :color="record.enabled ? 'green' : 'red'">{{ record.enabled ? '启用' : '禁用' }}</a-tag>
                       </template>
+                      <template v-else-if="column.key === 'oversell_rate'">
+                        <a-tag :color="record.oversold_count > 0 ? 'red' : 'green'">{{ Number(record.oversell_rate || 0).toFixed(1) }}%</a-tag>
+                      </template>
                       <template v-else-if="column.key === 'heat'">
-                        <a-progress :percent="Math.min(100, Number(record.count) * 8)" :show-info="false" status="active" />
+                        <a-progress :percent="Math.min(100, Number(record.total_active_count) * 8)" :show-info="false" status="active" />
+                      </template>
+                    </template>
+                  </a-table>
+                </a-card>
+                <a-card :bordered="false" title="Socks5 客户实时状态" class="mb-3">
+                  <template #extra>
+                    <a-button size="small" @click="panel.loadRuntimeStats">刷新</a-button>
+                  </template>
+                  <a-table :columns="runtimeColumns" :data-source="panel.runtimeStats" size="small" :row-key="(row:any)=>row.customer_id" :pagination="{ pageSize: 8 }">
+                    <template #bodyCell="{ column, record }">
+                      <template v-if="column.key === 'customer'">
+                        {{ record.customer_name }}{{ record.customer_code ? ` (${record.customer_code})` : '' }}
+                      </template>
+                      <template v-else-if="column.key === 'speed'">
+                        {{ bpsText(Number(record.realtime_bps || 0)) }}
+                      </template>
+                      <template v-else-if="column.key === 't1h'">
+                        {{ bytesText(Number(record.traffic_1h || 0)) }}
+                      </template>
+                      <template v-else-if="column.key === 't24h'">
+                        {{ bytesText(Number(record.traffic_24h || 0)) }}
+                      </template>
+                      <template v-else-if="column.key === 't7d'">
+                        {{ bytesText(Number(record.traffic_7d || 0)) }}
+                      </template>
+                      <template v-else-if="column.key === 'updated_at'">
+                        {{ formatTime(record.updated_at) }}
                       </template>
                     </template>
                   </a-table>
@@ -698,6 +925,7 @@ function downloadTextFile(text: string, filename: string) {
                 <a-card :bordered="false" title="创建客户">
                   <a-form layout="vertical">
                     <a-form-item label="客户名"><a-input v-model:value="customerForm.name" /></a-form-item>
+                    <a-form-item label="客户代号"><a-input v-model:value="customerForm.code" placeholder="如 liunian" /></a-form-item>
                     <a-form-item label="联系方式"><a-input v-model:value="customerForm.contact" /></a-form-item>
                     <a-form-item label="备注"><a-textarea v-model:value="customerForm.notes" :rows="4" /></a-form-item>
                     <a-button type="primary" block @click="createCustomer">创建客户</a-button>
@@ -791,6 +1019,20 @@ function downloadTextFile(text: string, filename: string) {
                 <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.duration_day" :min="1" style="width: 100%" placeholder="有效天数" /></a-col>
                 <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.port" :min="1" :max="65535" style="width: 100%" placeholder="端口" /></a-col>
               </a-row>
+              <a-row :gutter="8" class="mt-2">
+                <a-col :xs="24" :md="12">
+                  <a-date-picker v-model:value="orderForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" placeholder="指定到期时间(可选)" />
+                </a-col>
+                <a-col :xs="24" :md="12" class="flex items-center">
+                  <a-space>
+                    <a-button size="small" @click="setQuickExpiry(7, 'create')">7天</a-button>
+                    <a-button size="small" @click="setQuickExpiry(15, 'create')">15天</a-button>
+                    <a-button size="small" @click="setQuickExpiry(30, 'create')">30天</a-button>
+                    <a-button size="small" @click="setQuickExpiry(90, 'create')">90天</a-button>
+                  </a-space>
+                </a-col>
+              </a-row>
+              <a-alert v-if="panel.allocationPreview" class="mt-2" type="info" show-icon :message="`可分配IP: ${panel.allocationPreview.available} / 池总量: ${panel.allocationPreview.pool_size} / 已被该客户占用: ${panel.allocationPreview.used_by_customer}`" />
               <div v-if="orderForm.mode === 'manual'" class="mt-2">
                 <a-select v-model:value="orderForm.manual_ip_ids" mode="multiple" style="width: 100%" placeholder="选择手动IP">
                   <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
@@ -805,6 +1047,12 @@ function downloadTextFile(text: string, filename: string) {
               <template #extra>
                 <a-space>
                   <span class="text-xs text-slate-500">已选 {{ panel.orderSelection.length }} 个</span>
+                  <a-select v-model:value="testSamplePercent" size="small" style="width: 110px">
+                    <a-select-option :value="100">测活100%</a-select-option>
+                    <a-select-option :value="10">测活10%</a-select-option>
+                    <a-select-option :value="5">测活5%</a-select-option>
+                  </a-select>
+                  <a-input-number v-model:value="exportCount" :min="0" size="small" :placeholder="'导出条数(0=全部)'" />
                   <a-input-number v-model:value="batchMoreDays" :min="1" :max="365" size="small" />
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchRenew">批量续期</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchResync">批量重同步</a-button>
@@ -839,8 +1087,10 @@ function downloadTextFile(text: string, filename: string) {
                   <template v-else-if="column.key === 'action'">
                     <a-space :size="4" wrap>
                       <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
-                      <a-button size="small" @click="exportOrder(record.id)">导出</a-button>
+                      <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
                       <a-button size="small" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
+                      <a-button size="small" @click="streamTestOrder(record.id)">流式测活</a-button>
+                      <a-button size="small" @click="openOrderEdit(record)">编辑</a-button>
                       <a-button size="small" @click="renewOrder(record.id)">续期</a-button>
                       <a-button size="small" danger @click="deactivateOrder(record.id)">停用</a-button>
                     </a-space>
@@ -918,14 +1168,20 @@ function downloadTextFile(text: string, filename: string) {
             <a-card :bordered="false" title="系统设置" class="max-w-4xl mb-3">
               <a-row :gutter="12">
                 <a-col :xs="24" :md="12"><a-form-item label="默认入口端口"><a-input v-model:value="panel.settings.default_inbound_port" /></a-form-item></a-col>
-                <a-col :xs="24" :md="12"><a-form-item label="Xray API地址"><a-input v-model:value="panel.settings.xray_api_server" /></a-form-item></a-col>
-                <a-col :xs="24" :md="12"><a-form-item label="Bark启用(true/false)"><a-input v-model:value="panel.settings.bark_enabled" /></a-form-item></a-col>
+                <a-col :xs="24" :md="12">
+                  <a-form-item label="Bark启用">
+                    <a-switch :checked="panel.settings.bark_enabled === 'true'" @change="(checked:boolean)=> panel.settings.bark_enabled = checked ? 'true' : 'false'" />
+                  </a-form-item>
+                </a-col>
                 <a-col :xs="24" :md="12"><a-form-item label="Bark地址"><a-input v-model:value="panel.settings.bark_base_url" /></a-form-item></a-col>
                 <a-col :xs="24" :md="12"><a-form-item label="Bark设备Key"><a-input v-model:value="panel.settings.bark_device_key" /></a-form-item></a-col>
                 <a-col :xs="24" :md="12"><a-form-item label="Bark分组"><a-input v-model:value="panel.settings.bark_group" /></a-form-item></a-col>
               </a-row>
               <div class="text-right">
-                <a-button type="primary" :icon="h(ApiOutlined)" @click="saveSettings">保存设置</a-button>
+                <a-space>
+                  <a-button @click="sendBarkTest">发送测试通知</a-button>
+                  <a-button type="primary" :icon="h(ApiOutlined)" @click="saveSettings">保存设置</a-button>
+                </a-space>
               </div>
             </a-card>
 
@@ -981,7 +1237,11 @@ function downloadTextFile(text: string, filename: string) {
 
         <div class="mb-2 flex items-center justify-between">
           <div class="font-semibold">订单条目 ({{ panel.selectedOrder.items.length }})</div>
-          <a-button size="small" @click="copyOrderLines(panel.selectedOrder.items)">复制发货内容</a-button>
+          <a-space>
+            <a-input-number v-model:value="exportCount" :min="0" :max="panel.selectedOrder.items.length" size="small" />
+            <a-button size="small" :loading="exportingOrderID===panel.selectedOrder.id" @click="exportOrder(panel.selectedOrder.id)">提取导出</a-button>
+            <a-button size="small" @click="copyOrderLines(panel.selectedOrder.items)">复制发货内容</a-button>
+          </a-space>
         </div>
 
         <a-table
@@ -1006,6 +1266,7 @@ function downloadTextFile(text: string, filename: string) {
     <a-modal v-model:open="customerEditOpen" title="编辑客户" @ok="saveCustomerEdit">
       <a-form layout="vertical">
         <a-form-item label="客户名"><a-input v-model:value="customerEditForm.name" /></a-form-item>
+        <a-form-item label="客户代号"><a-input v-model:value="customerEditForm.code" /></a-form-item>
         <a-form-item label="联系方式"><a-input v-model:value="customerEditForm.contact" /></a-form-item>
         <a-form-item label="状态">
           <a-select v-model:value="customerEditForm.status">
@@ -1015,6 +1276,30 @@ function downloadTextFile(text: string, filename: string) {
         </a-form-item>
         <a-form-item label="备注"><a-textarea v-model:value="customerEditForm.notes" :rows="3" /></a-form-item>
       </a-form>
+    </a-modal>
+
+    <a-modal v-model:open="orderEditOpen" title="编辑订单" @ok="saveOrderEdit">
+      <a-form layout="vertical">
+        <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" /></a-form-item>
+        <a-form-item label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
+        <a-form-item label="端口"><a-input-number v-model:value="orderEditForm.port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+        <a-form-item label="到期时间"><a-date-picker v-model:value="orderEditForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" /></a-form-item>
+        <a-space class="mb-2">
+          <a-button size="small" @click="setQuickExpiry(7, 'edit')">7天</a-button>
+          <a-button size="small" @click="setQuickExpiry(30, 'edit')">30天</a-button>
+          <a-button size="small" @click="setQuickExpiry(90, 'edit')">90天</a-button>
+        </a-space>
+        <a-alert v-if="panel.allocationPreview" type="info" show-icon :message="`可分配IP: ${panel.allocationPreview.available} / 池总量: ${panel.allocationPreview.pool_size} / 已占用: ${panel.allocationPreview.used_by_customer}`" />
+      </a-form>
+    </a-modal>
+
+    <a-modal v-model:open="streamTestOpen" title="流式测活结果" :footer="null" width="860px">
+      <a-alert type="info" show-icon :message="`总条目 ${streamMeta.total} / 抽样 ${streamMeta.sampled} (${streamMeta.sample_percent}%) / 成功 ${streamMeta.success} / 失败 ${streamMeta.failed}`" class="mb-2" />
+      <a-table :data-source="streamRows.map((v, idx)=>({ ...v, key: `${v.item_id}-${idx}` }))" :pagination="{ pageSize: 20 }" size="small">
+        <a-table-column title="Item" data-index="item_id" key="item_id" />
+        <a-table-column title="状态" data-index="status" key="status" />
+        <a-table-column title="详情" data-index="detail" key="detail" />
+      </a-table>
     </a-modal>
   </div>
 </template>
@@ -1095,5 +1380,28 @@ function downloadTextFile(text: string, filename: string) {
   font-size: 34px;
   font-weight: 800;
   line-height: 1;
+}
+
+.ip-grid {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 6px;
+	max-height: 200px;
+	overflow: auto;
+}
+
+.ip-cell {
+	border: 1px solid rgba(148, 163, 184, 0.24);
+	border-radius: 8px;
+	padding: 4px 6px;
+	font-size: 11px;
+	line-height: 1.2;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (max-width: 768px) {
+	.ip-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
 }
 </style>

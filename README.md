@@ -152,6 +152,37 @@ sudo bash public-install.sh --help
 - 调用 `deploy/public-install.sh` 完成 systemd 安装
 - 验证 `systemctl` 服务状态、`/healthz`、登录 API
 
+## 线上升级与回归
+
+### 一键线上升级（保留端口/账号/Xray API 端口）
+
+```bash
+sudo bash deploy/online-upgrade.sh --version latest
+```
+
+可选参数：
+
+- `--version v0.1.8` 指定版本
+- `--skip-regression` 跳过升级后自动回归
+- `--skip-backup` 跳过升级前数据库备份
+
+升级脚本默认会：
+
+- 基于当前 `/etc/default/xraytool` 保留关键配置
+- 执行升级前数据库备份
+- 执行升级后健康检查
+- 自动运行 `scripts/online_regression.py`
+
+### 单独运行线上回归脚本
+
+```bash
+python3 scripts/online_regression.py
+```
+
+更多人工核对项见：
+
+- `scripts/ONLINE_REGRESSION_CHECKLIST.md`
+
 ## 说明
 
 - Xray 采用托管模式时，`xraytool` 会在 `data/xray/config.json` 生成并维护配置。

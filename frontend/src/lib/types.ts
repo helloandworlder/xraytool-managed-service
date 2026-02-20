@@ -1,6 +1,7 @@
 export interface Customer {
   id: number
   name: string
+  code: string
   contact: string
   notes: string
   status: string
@@ -47,7 +48,32 @@ export interface Order {
 export interface OversellRow {
   ip: string
   count: number
+  total_active_count: number
+  customer_active_count: number
+  unique_customer_count: number
+  oversold_count: number
+  oversell_rate: number
   enabled: boolean
+  is_public: boolean
+  is_local: boolean
+}
+
+export interface AllocationPreview {
+  pool_size: number
+  used_by_customer: number
+  available: number
+}
+
+export interface CustomerRuntimeStat {
+  customer_id: number
+  customer_name: string
+  customer_code: string
+  online_clients: number
+  realtime_bps: number
+  traffic_1h: number
+  traffic_24h: number
+  traffic_7d: number
+  updated_at: string
 }
 
 export interface ImportPreviewRow {

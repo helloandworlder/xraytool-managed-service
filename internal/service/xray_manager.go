@@ -21,13 +21,16 @@ import (
 
 	handlercmd "github.com/xtls/xray-core/app/proxyman/command"
 	routercmd "github.com/xtls/xray-core/app/router/command"
+	statscmd "github.com/xtls/xray-core/app/stats/command"
 	cserial "github.com/xtls/xray-core/common/serial"
 	core "github.com/xtls/xray-core/core"
 	xconf "github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -142,6 +145,64 @@ func (m *XrayManager) dial(ctx context.Context) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 	)
+}
+
+func (m *XrayManager) QueryUserTraffic(ctx context.Context) (map[string]int64, error) {
+	conn, err := m.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := statscmd.NewStatsServiceClient(conn)
+	resp, err := client.QueryStats(ctx, &statscmd.QueryStatsRequest{Pattern: "user>>>", Reset_: false})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(resp.Stat))
+	for _, row := range resp.Stat {
+		if row == nil {
+			continue
+		}
+		out[row.Name] = row.Value
+	}
+	return out, nil
+}
+
+func (m *XrayManager) GetAllOnlineUsers(ctx context.Context) ([]string, error) {
+	conn, err := m.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := statscmd.NewStatsServiceClient(conn)
+	resp, err := client.GetAllOnlineUsers(ctx, &statscmd.GetAllOnlineUsersRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Users, nil
+}
+
+func (m *XrayManager) GetOnlineCount(ctx context.Context, onlineStatName string) (int64, error) {
+	conn, err := m.dial(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	client := statscmd.NewStatsServiceClient(conn)
+	resp, err := client.GetStatsOnline(ctx, &statscmd.GetStatsRequest{Name: onlineStatName, Reset_: false})
+	if err != nil {
+		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if resp.Stat == nil {
+		return 0, nil
+	}
+	return resp.Stat.Value, nil
 }
 
 func (m *XrayManager) ApplyOrderItem(ctx context.Context, item model.OrderItem, inboundTag string) (model.XrayResource, error) {
@@ -451,6 +512,21 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		"api": map[string]interface{}{
 			"tag":      "api",
 			"services": []string{"HandlerService", "RoutingService", "StatsService"},
+		},
+		"policy": map[string]interface{}{
+			"levels": map[string]interface{}{
+				"0": map[string]interface{}{
+					"statsUserUplink":   true,
+					"statsUserDownlink": true,
+					"statsUserOnline":   true,
+				},
+			},
+			"system": map[string]interface{}{
+				"statsInboundUplink":    true,
+				"statsInboundDownlink":  true,
+				"statsOutboundUplink":   true,
+				"statsOutboundDownlink": true,
+			},
 		},
 		"inbounds":  inbounds,
 		"outbounds": outbounds,

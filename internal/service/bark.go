@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -29,13 +30,13 @@ func (b *BarkService) Notify(title, body string) error {
 	if err != nil {
 		return err
 	}
-	if strings.ToLower(settings["bark_enabled"]) != "true" {
+	if !parseBool(settings["bark_enabled"]) {
 		return nil
 	}
 	base := strings.TrimSuffix(settings["bark_base_url"], "/")
 	device := strings.TrimSpace(settings["bark_device_key"])
 	if base == "" || device == "" {
-		return nil
+		return errors.New("bark enabled but base_url/device_key missing")
 	}
 	group := settings["bark_group"]
 	u := fmt.Sprintf("%s/%s/%s/%s?group=%s", base, url.PathEscape(device), url.PathEscape(title), url.PathEscape(body), url.QueryEscape(group))
@@ -44,6 +45,9 @@ func (b *BarkService) Notify(title, body string) error {
 		return err
 	}
 	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("bark request failed: %s", resp.Status)
+	}
 	return nil
 }
 
@@ -57,4 +61,14 @@ func (b *BarkService) settings() (map[string]string, error) {
 		out[row.Key] = row.Value
 	}
 	return out, nil
+}
+
+func parseBool(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

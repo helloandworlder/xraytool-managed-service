@@ -1,6 +1,16 @@
 import { defineStore } from 'pinia'
 import { http, normalizeApiError } from '../lib/http'
-import type { BackupInfo, Customer, HostIP, ImportPreviewRow, Order, OversellRow, TaskLog } from '../lib/types'
+import type {
+  AllocationPreview,
+  BackupInfo,
+  Customer,
+  CustomerRuntimeStat,
+  HostIP,
+  ImportPreviewRow,
+  Order,
+  OversellRow,
+  TaskLog
+} from '../lib/types'
 
 type BatchResult = { id: number; success: boolean; error?: string }
 
@@ -14,13 +24,16 @@ export const usePanelStore = defineStore('panel', {
     customers: [] as Customer[],
     hostIPs: [] as HostIP[],
     oversell: [] as OversellRow[],
+    oversellCustomerID: 0,
     orders: [] as Order[],
     selectedOrder: null as Order | null,
     orderSelection: [] as number[],
+    allocationPreview: null as AllocationPreview | null,
 
     settings: {} as Record<string, string>,
     taskLogs: [] as TaskLog[],
     backups: [] as BackupInfo[],
+    runtimeStats: [] as CustomerRuntimeStat[],
 
     importPreview: [] as ImportPreviewRow[]
   }),
@@ -47,23 +60,26 @@ export const usePanelStore = defineStore('panel', {
       await Promise.all([
         this.loadCustomers(),
         this.loadHostIPs(),
-        this.loadOversell(),
+        this.loadOversell(this.oversellCustomerID),
         this.loadOrders(),
         this.loadSettings(),
         this.loadTaskLogs(),
-        this.loadBackups()
+        this.loadBackups(),
+        this.loadRuntimeStats().catch(() => {
+          this.runtimeStats = []
+        })
       ])
     },
     async loadCustomers() {
       const res = await http.get('/api/customers')
       this.customers = res.data
     },
-    async createCustomer(payload: { name: string; contact: string; notes: string }) {
+    async createCustomer(payload: { name: string; code?: string; contact: string; notes: string }) {
       await http.post('/api/customers', payload)
       await this.loadCustomers()
       this.setNotice('客户已创建')
     },
-    async updateCustomer(id: number, payload: { name: string; contact: string; notes: string; status: string }) {
+    async updateCustomer(id: number, payload: { name: string; code?: string; contact: string; notes: string; status: string }) {
       await http.put(`/api/customers/${id}`, payload)
       await this.loadCustomers()
       this.setNotice('客户已更新')
@@ -86,9 +102,24 @@ export const usePanelStore = defineStore('panel', {
       await http.post(`/api/host-ips/${id}/toggle`, { enabled })
       await this.loadHostIPs()
     },
-    async loadOversell() {
-      const res = await http.get('/api/oversell')
-      this.oversell = res.data
+    async loadOversell(customerID = 0) {
+      this.oversellCustomerID = customerID
+      const params = new URLSearchParams()
+      if (customerID > 0) params.set('customer_id', String(customerID))
+      const query = params.toString()
+      const res = await http.get(`/api/oversell${query ? `?${query}` : ''}`)
+      this.oversell = res.data.rows || []
+    },
+    async loadAllocationPreview(customerID: number, excludeOrderID = 0) {
+      if (!customerID) {
+        this.allocationPreview = null
+        return null
+      }
+      const params = new URLSearchParams({ customer_id: String(customerID) })
+      if (excludeOrderID > 0) params.set('exclude_order_id', String(excludeOrderID))
+      const res = await http.get(`/api/orders/allocation/preview?${params.toString()}`)
+      this.allocationPreview = res.data
+      return this.allocationPreview
     },
     async loadOrders() {
       const res = await http.get('/api/orders')
@@ -101,8 +132,23 @@ export const usePanelStore = defineStore('panel', {
     async createOrder(payload: Record<string, unknown>) {
       await http.post('/api/orders', payload)
       await this.loadOrders()
-      await this.loadOversell()
+      await this.loadOversell(this.oversellCustomerID)
+      const customerID = Number(payload.customer_id || 0)
+      if (customerID > 0) {
+        await this.loadAllocationPreview(customerID)
+      }
       this.setNotice('订单创建完成并已同步')
+    },
+    async updateOrder(orderID: number, payload: Record<string, unknown>) {
+      const res = await http.put(`/api/orders/${orderID}`, payload)
+      await this.loadOrders()
+      await this.loadOversell(this.oversellCustomerID)
+      const customerID = this.orders.find((o) => o.id === orderID)?.customer_id
+      if (customerID) {
+        await this.loadAllocationPreview(customerID, orderID)
+      }
+      this.setNotice('订单已更新')
+      return res.data as Order
     },
     async deactivateOrder(orderID: number) {
       await http.post(`/api/orders/${orderID}/deactivate`, {})
@@ -114,9 +160,50 @@ export const usePanelStore = defineStore('panel', {
       await this.loadOrders()
       this.setNotice('订单续期完成')
     },
-    async testOrder(orderID: number) {
-      const res = await http.post(`/api/orders/${orderID}/test`, {})
+    async testOrder(orderID: number, samplePercent = 100) {
+      const res = await http.post(`/api/orders/${orderID}/test`, { sample_percent: samplePercent })
       return res.data as Record<string, string>
+    },
+    async streamTestOrder(orderID: number, samplePercent: number, onEvent: (event: Record<string, any>) => void) {
+      const token = localStorage.getItem('xtool_token') || ''
+      const resp = await fetch(`/api/orders/${orderID}/test/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ sample_percent: samplePercent })
+      })
+      if (!resp.ok || !resp.body) {
+        throw new Error(`stream test failed: ${resp.status}`)
+      }
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          const text = line.trim()
+          if (!text) continue
+          try {
+            onEvent(JSON.parse(text))
+          } catch {
+            // ignore malformed line
+          }
+        }
+      }
+      const tail = buffer.trim()
+      if (tail) {
+        try {
+          onEvent(JSON.parse(tail))
+        } catch {
+          // ignore malformed tail
+        }
+      }
     },
     async batchRenew(orderIDs: number[], moreDays: number) {
       const res = await http.post('/api/orders/batch/renew', {
@@ -161,8 +248,16 @@ export const usePanelStore = defineStore('panel', {
     },
     async saveSettings(payload: Record<string, string>) {
       await http.put('/api/settings', payload)
-      this.settings = { ...payload }
+      await this.loadSettings()
       this.setNotice('设置已保存')
+    },
+    async testBark() {
+      await http.post('/api/settings/bark/test', {})
+      this.setNotice('Bark 测试通知已发送')
+    },
+    async loadRuntimeStats() {
+      const res = await http.get('/api/runtime/customers')
+      this.runtimeStats = res.data
     },
     async loadTaskLogs(filters?: { level?: string; keyword?: string; start?: string; end?: string; limit?: number }) {
       const params = new URLSearchParams()
@@ -186,7 +281,7 @@ export const usePanelStore = defineStore('panel', {
     }) {
       await http.post('/api/orders/import/confirm', payload)
       await this.loadOrders()
-      await this.loadOversell()
+      await this.loadOversell(this.oversellCustomerID)
       this.setNotice('导入成功并纳入生命周期')
     },
     async loadBackups() {
@@ -198,8 +293,8 @@ export const usePanelStore = defineStore('panel', {
       await this.loadBackups()
       this.setNotice('数据库备份创建成功')
     },
-    backupDownloadURL(name: string) {
-      return `/api/db/backups/${encodeURIComponent(name)}/download`
+    async downloadBackup(name: string) {
+      return http.get(`/api/db/backups/${encodeURIComponent(name)}/download`, { responseType: 'blob' })
     },
     async deleteBackup(name: string) {
       await http.delete(`/api/db/backups/${encodeURIComponent(name)}`)

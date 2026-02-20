@@ -1,10 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,12 +27,14 @@ type API struct {
 	orders  *service.OrderService
 	hostIPs *service.HostIPService
 	backups *service.BackupService
+	bark    *service.BarkService
+	runtime *service.RuntimeStatsService
 	cfg     config.Config
 	logger  *zap.Logger
 }
 
-func New(db *gorm.DB, st *store.Store, orders *service.OrderService, hostIPs *service.HostIPService, backups *service.BackupService, cfg config.Config, logger *zap.Logger) *API {
-	return &API{db: db, store: st, orders: orders, hostIPs: hostIPs, backups: backups, cfg: cfg, logger: logger}
+func New(db *gorm.DB, st *store.Store, orders *service.OrderService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
+	return &API{db: db, store: st, orders: orders, hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
 }
 
 func (a *API) Router() *gin.Engine {
@@ -71,8 +75,10 @@ func (a *API) Router() *gin.Engine {
 	secure.GET("/oversell", a.oversellView)
 
 	secure.GET("/orders", a.listOrders)
+	secure.GET("/orders/allocation/preview", a.orderAllocationPreview)
 	secure.GET("/orders/:id", a.getOrder)
 	secure.POST("/orders", a.createOrder)
+	secure.PUT("/orders/:id", a.updateOrder)
 	secure.POST("/orders/:id/deactivate", a.deactivateOrder)
 	secure.POST("/orders/:id/renew", a.renewOrder)
 	secure.POST("/orders/batch/deactivate", a.batchDeactivateOrders)
@@ -82,11 +88,14 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/orders/batch/export", a.batchExportOrders)
 	secure.GET("/orders/:id/export", a.exportOrder)
 	secure.POST("/orders/:id/test", a.testOrder)
+	secure.POST("/orders/:id/test/stream", a.testOrderStream)
 	secure.POST("/orders/import/preview", a.previewImport)
 	secure.POST("/orders/import/confirm", a.confirmImport)
 
 	secure.GET("/settings", a.getSettings)
 	secure.PUT("/settings", a.updateSettings)
+	secure.POST("/settings/bark/test", a.testBark)
+	secure.GET("/runtime/customers", a.customerRuntimeStats)
 	secure.GET("/db/backups", a.listBackups)
 	secure.POST("/db/backups", a.createBackup)
 	secure.GET("/db/backup/export", a.exportBackup)
@@ -184,9 +193,22 @@ func (a *API) createCustomer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if strings.TrimSpace(row.Name) == "" {
+	row.Name = strings.TrimSpace(row.Name)
+	row.Code = strings.TrimSpace(row.Code)
+	if row.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
 		return
+	}
+	if row.Code != "" {
+		var cnt int64
+		if err := a.db.Model(&model.Customer{}).Where("code = ?", row.Code).Count(&cnt).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if cnt > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "customer code already exists"})
+			return
+		}
 	}
 	if row.Status == "" {
 		row.Status = "active"
@@ -209,11 +231,23 @@ func (a *API) updateCustomer(c *gin.Context) {
 		return
 	}
 	updates := map[string]interface{}{
-		"name":       req.Name,
+		"name":       strings.TrimSpace(req.Name),
+		"code":       strings.TrimSpace(req.Code),
 		"contact":    req.Contact,
 		"notes":      req.Notes,
 		"status":     req.Status,
 		"updated_at": time.Now(),
+	}
+	if code, ok := updates["code"].(string); ok && code != "" {
+		var cnt int64
+		if err := a.db.Model(&model.Customer{}).Where("code = ? and id <> ?", code, id).Count(&cnt).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if cnt > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "customer code already exists"})
+			return
+		}
 	}
 	if err := a.db.Model(&model.Customer{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -298,23 +332,110 @@ func (a *API) toggleHostIP(c *gin.Context) {
 }
 
 func (a *API) oversellView(c *gin.Context) {
-	rows := []struct {
-		IP      string `json:"ip"`
-		Count   int64  `json:"count"`
-		Enabled bool   `json:"enabled"`
-	}{}
-	err := a.db.Table("host_ips h").
-		Select("h.ip as ip, h.enabled as enabled, count(oi.id) as count").
-		Joins("left join order_items oi on oi.ip = h.ip and oi.status = ?", model.OrderItemStatusActive).
-		Joins("left join orders o on o.id = oi.order_id and o.status = ? and o.expires_at > ?", model.OrderStatusActive, time.Now()).
-		Group("h.id").
-		Order("count desc, h.ip asc").
-		Scan(&rows).Error
-	if err != nil {
+	type ipRow struct {
+		IP       string `json:"ip"`
+		Enabled  bool   `json:"enabled"`
+		IsPublic bool   `json:"is_public"`
+		IsLocal  bool   `json:"is_local"`
+	}
+	hostRows := []ipRow{}
+	if err := a.db.Table("host_ips").Select("ip, enabled, is_public, is_local").Order("ip asc").Scan(&hostRows).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, rows)
+
+	customerID, _ := strconv.ParseUint(strings.TrimSpace(c.DefaultQuery("customer_id", "0")), 10, 64)
+
+	type countRow struct {
+		IP    string
+		Count int64
+	}
+	totalCountMap := map[string]int64{}
+	customerCountMap := map[string]int64{}
+
+	totalRows := []countRow{}
+	if err := a.db.Table("order_items oi").
+		Select("oi.ip as ip, count(1) as count").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("o.status = ? and o.expires_at > ? and oi.status = ?", model.OrderStatusActive, time.Now(), model.OrderItemStatusActive).
+		Group("oi.ip").Scan(&totalRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for _, row := range totalRows {
+		totalCountMap[row.IP] = row.Count
+	}
+
+	if customerID > 0 {
+		customerRows := []countRow{}
+		if err := a.db.Table("order_items oi").
+			Select("oi.ip as ip, count(1) as count").
+			Joins("join orders o on o.id = oi.order_id").
+			Where("o.customer_id = ? and o.status = ? and o.expires_at > ? and oi.status = ?", uint(customerID), model.OrderStatusActive, time.Now(), model.OrderItemStatusActive).
+			Group("oi.ip").Scan(&customerRows).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		for _, row := range customerRows {
+			customerCountMap[row.IP] = row.Count
+		}
+	}
+
+	customerCountRows := []struct {
+		IP    string
+		Count int64
+	}{}
+	if err := a.db.Table("order_items oi").
+		Select("oi.ip as ip, count(distinct o.customer_id) as count").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("o.status = ? and o.expires_at > ? and oi.status = ?", model.OrderStatusActive, time.Now(), model.OrderItemStatusActive).
+		Group("oi.ip").Scan(&customerCountRows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	uniqueCustomerMap := map[string]int64{}
+	for _, row := range customerCountRows {
+		uniqueCustomerMap[row.IP] = row.Count
+	}
+
+	rows := make([]gin.H, 0, len(hostRows))
+	for _, h := range hostRows {
+		total := totalCountMap[h.IP]
+		oversold := int64(0)
+		if total > 1 {
+			oversold = total - 1
+		}
+		rate := 0.0
+		if total > 0 {
+			rate = float64(oversold) * 100 / float64(total)
+		}
+		rows = append(rows, gin.H{
+			"ip":                    h.IP,
+			"count":                 total,
+			"total_active_count":    total,
+			"customer_active_count": customerCountMap[h.IP],
+			"unique_customer_count": uniqueCustomerMap[h.IP],
+			"oversold_count":        oversold,
+			"oversell_rate":         rate,
+			"enabled":               h.Enabled,
+			"is_public":             h.IsPublic,
+			"is_local":              h.IsLocal,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		left := rows[i]["count"].(int64)
+		right := rows[j]["count"].(int64)
+		if left == right {
+			return rows[i]["ip"].(string) < rows[j]["ip"].(string)
+		}
+		return left > right
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"rows":        rows,
+		"customer_id": customerID,
+		"total_ips":   len(hostRows),
+	})
 }
 
 func (a *API) listOrders(c *gin.Context) {
@@ -324,6 +445,21 @@ func (a *API) listOrders(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) orderAllocationPreview(c *gin.Context) {
+	customerID, err := strconv.ParseUint(strings.TrimSpace(c.Query("customer_id")), 10, 64)
+	if err != nil || customerID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "customer_id is required"})
+		return
+	}
+	excludeID, _ := strconv.ParseUint(strings.TrimSpace(c.DefaultQuery("exclude_order_id", "0")), 10, 64)
+	preview, err := a.orders.AllocationPreview(uint(customerID), uint(excludeID))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, preview)
 }
 
 func (a *API) getOrder(c *gin.Context) {
@@ -340,12 +476,76 @@ func (a *API) getOrder(c *gin.Context) {
 }
 
 func (a *API) createOrder(c *gin.Context) {
-	var req service.CreateOrderInput
+	var req struct {
+		CustomerID  uint   `json:"customer_id"`
+		Name        string `json:"name"`
+		Quantity    int    `json:"quantity"`
+		DurationDay int    `json:"duration_day"`
+		ExpiresAt   string `json:"expires_at"`
+		Mode        string `json:"mode"`
+		Port        int    `json:"port"`
+		ManualIPIDs []uint `json:"manual_ip_ids"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	order, err := a.orders.CreateOrder(c.Request.Context(), req)
+	input := service.CreateOrderInput{
+		CustomerID:  req.CustomerID,
+		Name:        req.Name,
+		Quantity:    req.Quantity,
+		DurationDay: req.DurationDay,
+		Mode:        req.Mode,
+		Port:        req.Port,
+		ManualIPIDs: req.ManualIPIDs,
+	}
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
+		}
+		input.ExpiresAt = t
+	}
+	order, err := a.orders.CreateOrder(c.Request.Context(), input)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, order)
+}
+
+func (a *API) updateOrder(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Quantity    int    `json:"quantity"`
+		Port        int    `json:"port"`
+		ExpiresAt   string `json:"expires_at"`
+		ManualIPIDs []uint `json:"manual_ip_ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	input := service.UpdateOrderInput{
+		Name:        req.Name,
+		Quantity:    req.Quantity,
+		Port:        req.Port,
+		ManualIPIDs: req.ManualIPIDs,
+	}
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
+		}
+		input.ExpiresAt = t
+	}
+	order, err := a.orders.UpdateOrder(c.Request.Context(), id, input)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -482,11 +682,14 @@ func (a *API) exportOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	text, err := a.orders.ExportOrderLines(id)
+	count, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("count", "0")))
+	shuffle := strings.ToLower(strings.TrimSpace(c.DefaultQuery("shuffle", "true"))) != "false"
+	text, filename, err := a.orders.ExportOrderLinesWithMeta(id, service.ExportOrderOptions{Count: count, Shuffle: shuffle})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
 }
 
@@ -495,12 +698,48 @@ func (a *API) testOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	out, err := a.orders.TestOrder(id)
+	var req struct {
+		SamplePercent int `json:"sample_percent"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	out, err := a.orders.TestOrderSampled(id, req.SamplePercent)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+func (a *API) testOrderStream(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		SamplePercent int `json:"sample_percent"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+
+	if err := a.orders.TestOrderStream(id, req.SamplePercent, func(event service.TestOrderStreamEvent) error {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := c.Writer.Write(append(payload, '\n')); err != nil {
+			return err
+		}
+		c.Writer.Flush()
+		return nil
+	}); err != nil {
+		errPayload, _ := json.Marshal(service.TestOrderStreamEvent{Type: "error", Error: err.Error()})
+		_, _ = c.Writer.Write(append(errPayload, '\n'))
+		c.Writer.Flush()
+	}
 }
 
 func (a *API) previewImport(c *gin.Context) {
@@ -560,11 +799,35 @@ func (a *API) updateSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := a.store.SetSettings(req); err != nil {
+	clean := sanitizeSettingsUpdate(req)
+	if len(clean) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid settings provided"})
+		return
+	}
+	if err := a.store.SetSettings(clean); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) testBark(c *gin.Context) {
+	title := "XrayTool Bark 测试通知"
+	body := fmt.Sprintf("测试时间: %s", time.Now().Format("2006-01-02 15:04:05"))
+	if err := a.bark.Notify(title, body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "test notification sent"})
+}
+
+func (a *API) customerRuntimeStats(c *gin.Context) {
+	rows, err := a.runtime.Snapshot(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
 }
 
 func (a *API) taskLogs(c *gin.Context) {
@@ -707,6 +970,35 @@ func (a *API) logMiddleware() gin.HandlerFunc {
 			zap.Duration("latency", time.Since(start)),
 		)
 	}
+}
+
+func sanitizeSettingsUpdate(in map[string]string) map[string]string {
+	out := map[string]string{}
+	allowed := map[string]struct{}{
+		"default_inbound_port": {},
+		"bark_enabled":         {},
+		"bark_base_url":        {},
+		"bark_device_key":      {},
+		"bark_group":           {},
+	}
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		if _, ok := allowed[k]; !ok {
+			continue
+		}
+		if k == "bark_enabled" {
+			vv := strings.ToLower(strings.TrimSpace(v))
+			switch vv {
+			case "1", "true", "on", "yes":
+				out[k] = "true"
+			default:
+				out[k] = "false"
+			}
+			continue
+		}
+		out[k] = strings.TrimSpace(v)
+	}
+	return out
 }
 
 func parseUintParam(c *gin.Context, key string) (uint, bool) {

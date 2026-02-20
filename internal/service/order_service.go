@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/http"
 	"sort"
@@ -39,13 +40,46 @@ type BatchTestResult struct {
 }
 
 type CreateOrderInput struct {
-	CustomerID  uint   `json:"customer_id"`
-	Name        string `json:"name"`
-	Quantity    int    `json:"quantity"`
-	DurationDay int    `json:"duration_day"`
-	Mode        string `json:"mode"`
-	Port        int    `json:"port"`
-	ManualIPIDs []uint `json:"manual_ip_ids"`
+	CustomerID  uint      `json:"customer_id"`
+	Name        string    `json:"name"`
+	Quantity    int       `json:"quantity"`
+	DurationDay int       `json:"duration_day"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	Mode        string    `json:"mode"`
+	Port        int       `json:"port"`
+	ManualIPIDs []uint    `json:"manual_ip_ids"`
+}
+
+type UpdateOrderInput struct {
+	Name        string    `json:"name"`
+	Quantity    int       `json:"quantity"`
+	Port        int       `json:"port"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	ManualIPIDs []uint    `json:"manual_ip_ids"`
+}
+
+type AllocationPreview struct {
+	PoolSize       int `json:"pool_size"`
+	UsedByCustomer int `json:"used_by_customer"`
+	Available      int `json:"available"`
+}
+
+type ExportOrderOptions struct {
+	Count   int
+	Shuffle bool
+}
+
+type TestOrderStreamEvent struct {
+	Type          string `json:"type"`
+	ItemID        uint   `json:"item_id,omitempty"`
+	Status        string `json:"status,omitempty"`
+	Detail        string `json:"detail,omitempty"`
+	Total         int    `json:"total,omitempty"`
+	Sampled       int    `json:"sampled,omitempty"`
+	SamplePercent int    `json:"sample_percent,omitempty"`
+	SuccessCount  int    `json:"success_count,omitempty"`
+	FailureCount  int    `json:"failure_count,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 type ImportPreviewRow struct {
@@ -78,6 +112,169 @@ func (s *OrderService) GetOrder(orderID uint) (*model.Order, error) {
 	return &order, nil
 }
 
+func (s *OrderService) AllocationPreview(customerID uint, excludeOrderID uint) (AllocationPreview, error) {
+	if customerID == 0 {
+		return AllocationPreview{}, errors.New("customer_id is required")
+	}
+	pool, err := s.usableIPPool()
+	if err != nil {
+		return AllocationPreview{}, err
+	}
+	usedByCustomer, err := s.customerUsedIPSet(customerID, excludeOrderID)
+	if err != nil {
+		return AllocationPreview{}, err
+	}
+	available := len(pool) - len(usedByCustomer)
+	if available < 0 {
+		available = 0
+	}
+	return AllocationPreview{
+		PoolSize:       len(pool),
+		UsedByCustomer: len(usedByCustomer),
+		Available:      available,
+	}, nil
+}
+
+func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateOrderInput) (*model.Order, error) {
+	var order model.Order
+	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
+		return nil, err
+	}
+
+	targetName := strings.TrimSpace(order.Name)
+	if strings.TrimSpace(in.Name) != "" {
+		targetName = strings.TrimSpace(in.Name)
+	}
+	targetPort := order.Port
+	if in.Port > 0 {
+		targetPort = in.Port
+	}
+	targetQuantity := order.Quantity
+	if in.Quantity > 0 {
+		targetQuantity = in.Quantity
+	}
+	targetExpiresAt := order.ExpiresAt
+	if !in.ExpiresAt.IsZero() {
+		targetExpiresAt = in.ExpiresAt
+	}
+
+	if targetPort <= 0 || targetPort > 65535 {
+		return nil, errors.New("invalid port")
+	}
+	if targetQuantity <= 0 {
+		return nil, errors.New("quantity must be > 0")
+	}
+	if order.Mode == model.OrderModeImport && targetQuantity > len(order.Items) {
+		return nil, errors.New("import order quantity cannot be increased")
+	}
+	if targetPort != order.Port {
+		if err := s.ensurePortReadyForManaged(targetPort); err != nil {
+			return nil, err
+		}
+	}
+
+	now := time.Now()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		items := append([]model.OrderItem(nil), order.Items...)
+		if targetQuantity < len(items) {
+			sort.Slice(items, func(i, j int) bool { return items[i].ID > items[j].ID })
+			removeItems := items[:len(items)-targetQuantity]
+			removeIDs := make([]uint, 0, len(removeItems))
+			for _, item := range removeItems {
+				removeIDs = append(removeIDs, item.ID)
+			}
+			if len(removeIDs) > 0 {
+				if err := tx.Where("order_item_id in ?", removeIDs).Delete(&model.XrayResource{}).Error; err != nil {
+					return err
+				}
+				if err := tx.Where("id in ?", removeIDs).Delete(&model.OrderItem{}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		if targetQuantity > len(items) {
+			diff := targetQuantity - len(items)
+			mode := order.Mode
+			manualIDs := in.ManualIPIDs
+			if mode == model.OrderModeManual && len(manualIDs) < diff {
+				mode = model.OrderModeAuto
+				manualIDs = nil
+			}
+			if mode != model.OrderModeAuto && mode != model.OrderModeManual {
+				mode = model.OrderModeAuto
+			}
+			selectedIPs, err := s.allocateIPs(order.CustomerID, diff, mode, manualIDs, order.ID)
+			if err != nil {
+				return err
+			}
+			for _, ip := range selectedIPs {
+				item := model.OrderItem{
+					OrderID:   order.ID,
+					HostIPID:  &ip.ID,
+					IP:        ip.IP,
+					Port:      targetPort,
+					Username:  randomString(8),
+					Password:  randomString(12),
+					Managed:   true,
+					Status:    model.OrderItemStatusActive,
+					CreatedAt: now,
+					UpdatedAt: now,
+				}
+				if err := tx.Create(&item).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		itemUpdates := map[string]interface{}{
+			"updated_at": now,
+		}
+		if targetPort != order.Port {
+			itemUpdates["port"] = targetPort
+		}
+		if targetExpiresAt.After(now) {
+			itemUpdates["status"] = model.OrderItemStatusActive
+		}
+		if err := tx.Model(&model.OrderItem{}).Where("order_id = ?", order.ID).Updates(itemUpdates).Error; err != nil {
+			return err
+		}
+
+		orderStatus := model.OrderStatusActive
+		if !targetExpiresAt.After(now) {
+			orderStatus = model.OrderStatusExpired
+		}
+		orderUpdates := map[string]interface{}{
+			"name":                targetName,
+			"quantity":            targetQuantity,
+			"port":                targetPort,
+			"expires_at":          targetExpiresAt,
+			"status":              orderStatus,
+			"notify_one_day_sent": false,
+			"notify_expired_sent": false,
+			"updated_at":          now,
+		}
+		return tx.Model(&model.Order{}).Where("id = ?", order.ID).Updates(orderUpdates).Error
+	}); err != nil {
+		return nil, err
+	}
+
+	if !targetExpiresAt.After(now) {
+		if err := s.DeactivateOrder(ctx, order.ID, model.OrderStatusExpired); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.SyncOrderRuntime(ctx, order.ID); err != nil {
+			s.log.Warn("sync runtime after update failed", zap.Error(err), zap.Uint("order_id", order.ID))
+		}
+	}
+
+	updated, err := s.GetOrder(order.ID)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*model.Order, error) {
 	if in.CustomerID == 0 {
 		return nil, errors.New("customer_id is required")
@@ -85,7 +282,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 	if in.Quantity <= 0 {
 		return nil, errors.New("quantity must be > 0")
 	}
-	if in.DurationDay <= 0 {
+	if in.DurationDay <= 0 && in.ExpiresAt.IsZero() {
 		in.DurationDay = 30
 	}
 	if in.Mode == "" {
@@ -107,7 +304,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		return nil, err
 	}
 
-	selectedIPs, err := s.allocateIPs(in.CustomerID, in.Quantity, in.Mode, in.ManualIPIDs)
+	selectedIPs, err := s.allocateIPs(in.CustomerID, in.Quantity, in.Mode, in.ManualIPIDs, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +313,13 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 	}
 
 	now := time.Now()
+	expiresAt := now.Add(time.Duration(in.DurationDay) * 24 * time.Hour)
+	if !in.ExpiresAt.IsZero() {
+		if !in.ExpiresAt.After(now) {
+			return nil, errors.New("expires_at must be in the future")
+		}
+		expiresAt = in.ExpiresAt
+	}
 	order := &model.Order{
 		CustomerID: in.CustomerID,
 		Name:       in.Name,
@@ -124,7 +328,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		Quantity:   in.Quantity,
 		Port:       port,
 		StartsAt:   now,
-		ExpiresAt:  now.Add(time.Duration(in.DurationDay) * 24 * time.Hour),
+		ExpiresAt:  expiresAt,
 	}
 	if strings.TrimSpace(order.Name) == "" {
 		order.Name = fmt.Sprintf("Order-%d-%s", in.CustomerID, now.Format("20060102150405"))
@@ -344,7 +548,7 @@ func (s *OrderService) BatchTest(orderIDs []uint) []BatchTestResult {
 func (s *OrderService) BatchExport(orderIDs []uint) (string, error) {
 	parts := make([]string, 0, len(orderIDs)*2)
 	for _, id := range orderIDs {
-		lines, err := s.ExportOrderLines(id)
+		lines, _, err := s.ExportOrderLinesWithMeta(id, ExportOrderOptions{Shuffle: true})
 		if err != nil {
 			return "", err
 		}
@@ -355,22 +559,51 @@ func (s *OrderService) BatchExport(orderIDs []uint) (string, error) {
 }
 
 func (s *OrderService) ExportOrderLines(orderID uint) (string, error) {
+	lines, _, err := s.ExportOrderLinesWithMeta(orderID, ExportOrderOptions{Shuffle: true})
+	return lines, err
+}
+
+func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOptions) (string, string, error) {
+	var order model.Order
+	if err := s.db.Preload("Customer").First(&order, orderID).Error; err != nil {
+		return "", "", err
+	}
 	var items []model.OrderItem
-	if err := s.db.Where("order_id = ?", orderID).Order("id asc").Find(&items).Error; err != nil {
-		return "", err
+	if err := s.db.Where("order_id = ? and status = ?", orderID, model.OrderItemStatusActive).Order("id asc").Find(&items).Error; err != nil {
+		return "", "", err
+	}
+	if len(items) == 0 {
+		return "", "", errors.New("no active items")
+	}
+	if opts.Shuffle {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		r.Shuffle(len(items), func(i, j int) {
+			items[i], items[j] = items[j], items[i]
+		})
+	}
+	if opts.Count > 0 {
+		if opts.Count > len(items) {
+			return "", "", fmt.Errorf("extract count %d exceeds active items %d", opts.Count, len(items))
+		}
+		items = items[:opts.Count]
 	}
 	lines := make([]string, 0, len(items))
 	for _, item := range items {
 		lines = append(lines, fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password))
 	}
-	return strings.Join(lines, "\n"), nil
+	return strings.Join(lines, "\n"), s.exportFilename(order, items), nil
 }
 
 func (s *OrderService) TestOrder(orderID uint) (map[uint]string, error) {
+	return s.TestOrderSampled(orderID, 100)
+}
+
+func (s *OrderService) TestOrderSampled(orderID uint, samplePercent int) (map[uint]string, error) {
 	var items []model.OrderItem
-	if err := s.db.Where("order_id = ?", orderID).Find(&items).Error; err != nil {
+	if err := s.db.Where("order_id = ? and status = ?", orderID, model.OrderItemStatusActive).Find(&items).Error; err != nil {
 		return nil, err
 	}
+	items = sampleItems(items, samplePercent)
 	out := make(map[uint]string, len(items))
 	for _, item := range items {
 		if !item.Managed {
@@ -396,6 +629,63 @@ func (s *OrderService) TestOrder(orderID uint) (map[uint]string, error) {
 		out[item.ID] = strings.TrimSpace(string(body[:n]))
 	}
 	return out, nil
+}
+
+func (s *OrderService) TestOrderStream(orderID uint, samplePercent int, emit func(TestOrderStreamEvent) error) error {
+	var items []model.OrderItem
+	if err := s.db.Where("order_id = ? and status = ?", orderID, model.OrderItemStatusActive).Find(&items).Error; err != nil {
+		return err
+	}
+	selected := sampleItems(items, samplePercent)
+	if err := emit(TestOrderStreamEvent{Type: "meta", Total: len(items), Sampled: len(selected), SamplePercent: normalizeSamplePercent(samplePercent)}); err != nil {
+		return err
+	}
+	ok := 0
+	fail := 0
+	for _, item := range selected {
+		event := TestOrderStreamEvent{Type: "result", ItemID: item.ID}
+		if !item.Managed {
+			event.Status = "skip"
+			event.Detail = "unmanaged"
+			if err := emit(event); err != nil {
+				return err
+			}
+			continue
+		}
+		socksAddr := fmt.Sprintf("%s:%d", item.IP, item.Port)
+		dialer, err := proxy.SOCKS5("tcp", socksAddr, &proxy.Auth{User: item.Username, Password: item.Password}, proxy.Direct)
+		if err != nil {
+			event.Status = "failed"
+			event.Detail = "dialer error"
+			fail++
+			if err := emit(event); err != nil {
+				return err
+			}
+			continue
+		}
+		httpTransport := &http.Transport{Dial: dialer.Dial}
+		client := &http.Client{Timeout: 6 * time.Second, Transport: httpTransport}
+		resp, err := client.Get("https://api.ipify.org")
+		if err != nil {
+			event.Status = "failed"
+			event.Detail = "connect failed"
+			fail++
+			if err := emit(event); err != nil {
+				return err
+			}
+			continue
+		}
+		body := make([]byte, 128)
+		n, _ := resp.Body.Read(body)
+		_ = resp.Body.Close()
+		event.Status = "ok"
+		event.Detail = strings.TrimSpace(string(body[:n]))
+		ok++
+		if err := emit(event); err != nil {
+			return err
+		}
+	}
+	return emit(TestOrderStreamEvent{Type: "done", SuccessCount: ok, FailureCount: fail})
 }
 
 func (s *OrderService) PreviewImport(lines string) ([]ImportPreviewRow, error) {
@@ -514,7 +804,7 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 	return order, nil
 }
 
-func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, manualIDs []uint) ([]model.HostIP, error) {
+func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, manualIDs []uint, excludeOrderID uint) ([]model.HostIP, error) {
 	if mode == model.OrderModeManual {
 		if len(manualIDs) < quantity {
 			return nil, errors.New("manual_ip_ids insufficient")
@@ -526,35 +816,29 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 		if len(rows) != quantity {
 			return nil, errors.New("some manual ips are invalid or disabled")
 		}
+		usedByCustomer, err := s.customerUsedIPSet(customerID, excludeOrderID)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if _, exists := usedByCustomer[row.IP]; exists {
+				return nil, fmt.Errorf("ip %s already used by current customer", row.IP)
+			}
+		}
 		return rows, nil
 	}
 
-	var all []model.HostIP
-	if err := s.db.Where("enabled = 1 and is_local = 1 and is_public = 1").Order("ip asc").Find(&all).Error; err != nil {
+	all, err := s.usableIPPool()
+	if err != nil {
 		return nil, err
-	}
-	all = filterUsableIPs(all)
-	if len(all) == 0 {
-		if err := s.db.Where("enabled = 1 and is_local = 1").Order("ip asc").Find(&all).Error; err != nil {
-			return nil, err
-		}
-		all = filterUsableIPs(all)
 	}
 	if len(all) == 0 {
 		return nil, errors.New("no enabled host ips")
 	}
 
-	usedByCustomer := map[string]struct{}{}
-	var ips []struct{ IP string }
-	if err := s.db.Table("order_items oi").
-		Select("oi.ip").
-		Joins("join orders o on o.id = oi.order_id").
-		Where("o.customer_id = ? and o.status = ? and o.expires_at > ? and oi.status = ?", customerID, model.OrderStatusActive, time.Now(), model.OrderItemStatusActive).
-		Scan(&ips).Error; err != nil {
+	usedByCustomer, err := s.customerUsedIPSet(customerID, excludeOrderID)
+	if err != nil {
 		return nil, err
-	}
-	for _, v := range ips {
-		usedByCustomer[v.IP] = struct{}{}
 	}
 
 	usage := map[string]int64{}
@@ -595,6 +879,128 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 		return nil, fmt.Errorf("available IPs (%d) less than quantity (%d)", len(candidates), quantity)
 	}
 	return candidates[:quantity], nil
+}
+
+func (s *OrderService) usableIPPool() ([]model.HostIP, error) {
+	var all []model.HostIP
+	if err := s.db.Where("enabled = 1 and is_local = 1 and is_public = 1").Order("ip asc").Find(&all).Error; err != nil {
+		return nil, err
+	}
+	all = filterUsableIPs(all)
+	if len(all) == 0 {
+		if err := s.db.Where("enabled = 1 and is_local = 1").Order("ip asc").Find(&all).Error; err != nil {
+			return nil, err
+		}
+		all = filterUsableIPs(all)
+	}
+	return all, nil
+}
+
+func (s *OrderService) customerUsedIPSet(customerID uint, excludeOrderID uint) (map[string]struct{}, error) {
+	usedByCustomer := map[string]struct{}{}
+	if customerID == 0 {
+		return usedByCustomer, nil
+	}
+	var ips []struct{ IP string }
+	q := s.db.Table("order_items oi").
+		Select("oi.ip").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("o.customer_id = ? and o.status = ? and o.expires_at > ? and oi.status = ?", customerID, model.OrderStatusActive, time.Now(), model.OrderItemStatusActive)
+	if excludeOrderID > 0 {
+		q = q.Where("o.id <> ?", excludeOrderID)
+	}
+	if err := q.Scan(&ips).Error; err != nil {
+		return nil, err
+	}
+	for _, v := range ips {
+		usedByCustomer[v.IP] = struct{}{}
+	}
+	return usedByCustomer, nil
+}
+
+func sampleItems(items []model.OrderItem, samplePercent int) []model.OrderItem {
+	p := normalizeSamplePercent(samplePercent)
+	if len(items) == 0 {
+		return items
+	}
+	if p >= 100 {
+		return items
+	}
+	cloned := append([]model.OrderItem(nil), items...)
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	r.Shuffle(len(cloned), func(i, j int) {
+		cloned[i], cloned[j] = cloned[j], cloned[i]
+	})
+	n := len(cloned) * p / 100
+	if n <= 0 {
+		n = 1
+	}
+	return cloned[:n]
+}
+
+func normalizeSamplePercent(p int) int {
+	if p == 5 || p == 10 || p == 100 {
+		return p
+	}
+	if p <= 0 {
+		return 100
+	}
+	if p > 100 {
+		return 100
+	}
+	if p < 5 {
+		return 5
+	}
+	return p
+}
+
+func (s *OrderService) exportFilename(order model.Order, items []model.OrderItem) string {
+	customer := sanitizeFilenamePart(order.Customer.Code)
+	if customer == "" {
+		customer = sanitizeFilenamePart(order.Customer.Name)
+	}
+	if customer == "" {
+		customer = fmt.Sprintf("customer-%d", order.CustomerID)
+	}
+	ipMask := "unknown"
+	if len(items) > 0 {
+		ipMask = maskIPv4(items[0].IP)
+	}
+	date := time.Now().Format("20060102")
+	orderName := sanitizeFilenamePart(order.Name)
+	if orderName == "" {
+		orderName = fmt.Sprintf("order-%d", order.ID)
+	}
+	count := fmt.Sprintf("%d条", len(items))
+	return fmt.Sprintf("%s-%s-%s-%s-%s.txt", customer, ipMask, date, orderName, count)
+}
+
+func maskIPv4(ip string) string {
+	parts := strings.Split(strings.TrimSpace(ip), ".")
+	if len(parts) == 4 {
+		return fmt.Sprintf("%s.%s.%s.*", parts[0], parts[1], parts[2])
+	}
+	clean := strings.ReplaceAll(strings.TrimSpace(ip), ":", "-")
+	if clean == "" {
+		return "unknown"
+	}
+	return clean
+}
+
+func sanitizeFilenamePart(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.ReplaceAll(v, "/", "-")
+	v = strings.ReplaceAll(v, "\\", "-")
+	v = strings.ReplaceAll(v, ":", "-")
+	v = strings.ReplaceAll(v, "|", "-")
+	v = strings.ReplaceAll(v, "\"", "")
+	v = strings.ReplaceAll(v, "'", "")
+	v = strings.ReplaceAll(v, "*", "")
+	v = strings.ReplaceAll(v, "?", "")
+	v = strings.ReplaceAll(v, "<", "")
+	v = strings.ReplaceAll(v, ">", "")
+	v = strings.Join(strings.Fields(v), "-")
+	return strings.Trim(v, "-. ")
 }
 
 func (s *OrderService) activeAccountsForPort(port int) (map[string]string, error) {
