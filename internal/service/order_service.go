@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -529,6 +530,13 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 	if err := s.db.Where("enabled = 1 and is_local = 1 and is_public = 1").Order("ip asc").Find(&all).Error; err != nil {
 		return nil, err
 	}
+	all = filterUsableIPs(all)
+	if len(all) == 0 {
+		if err := s.db.Where("enabled = 1 and is_local = 1").Order("ip asc").Find(&all).Error; err != nil {
+			return nil, err
+		}
+		all = filterUsableIPs(all)
+	}
 	if len(all) == 0 {
 		return nil, errors.New("no enabled host ips")
 	}
@@ -639,4 +647,19 @@ func isAlreadyExists(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "already exists")
+}
+
+func filterUsableIPs(rows []model.HostIP) []model.HostIP {
+	out := make([]model.HostIP, 0, len(rows))
+	for _, row := range rows {
+		ip := net.ParseIP(strings.TrimSpace(row.IP))
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
 }

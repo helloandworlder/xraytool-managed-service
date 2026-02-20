@@ -95,6 +95,12 @@ const rowSelection = computed(() => ({
   }
 }))
 
+const manualHostIPOptions = computed(() => {
+	const enabled = panel.hostIPs.filter((v) => v.enabled && v.ip !== '127.0.0.1')
+	const publicIPs = enabled.filter((v) => v.is_public)
+	return publicIPs.length > 0 ? publicIPs : enabled
+})
+
 const ordersColumns = [
 	{ title: 'ID', dataIndex: 'id', width: 80 },
 	{ title: '客户', key: 'customer', width: 180 },
@@ -787,7 +793,7 @@ function downloadTextFile(text: string, filename: string) {
               </a-row>
               <div v-if="orderForm.mode === 'manual'" class="mt-2">
                 <a-select v-model:value="orderForm.manual_ip_ids" mode="multiple" style="width: 100%" placeholder="选择手动IP">
-                  <a-select-option v-for="ip in panel.hostIPs.filter((v)=>v.enabled&&v.is_public)" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
+                  <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
                 </a-select>
               </div>
               <div class="mt-3 flex justify-end">
