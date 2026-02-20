@@ -13,6 +13,39 @@ Go + SQLite + Gin + Zap + Vue3 + Pinia + Tailwind + Ant Design Vue 的 Xray 托�
 
 ## Quick Start
 
+### Public 一键安装（推荐）
+
+在服务器上直接粘贴执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/main/deploy/public-install.sh | sudo bash
+```
+
+安装脚本会交互询问：
+
+- 面板监听端口（回车自动随机，也可手动输入）
+- 管理员账号（回车自动随机，也可手动输入）
+- 管理员密码（回车自动随机，也可手动输入）
+
+并自动完成：
+
+- 下载当前架构对应的 `xraytool` release 包（amd64/arm64）
+- 下载 Xray-core 到私有目录（不全局安装）
+- 写入 `/etc/default/xraytool` 与 systemd 服务
+- 启动服务并做健康检查
+
+非交互示例：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/main/deploy/public-install.sh | sudo bash -s -- \
+  --non-interactive \
+  --port 18080 \
+  --admin-user admin \
+  --admin-pass 'YourStrongPass123'
+```
+
+### 源码构建安装（开发环境）
+
 1. 准备 Xray 二进制（不全局安装）：
 
 ```bash
@@ -73,7 +106,7 @@ XTOOL_BACKUP_DIR=./data/backups
 - 服务模板：`deploy/systemd/xraytool.service`
 - 建议部署目录：`/opt/xraytool`
 
-### 一键安装脚本
+### 本地源码安装脚本
 
 ```bash
 sudo ./deploy/install.sh --xray-bin /path/to/xray
@@ -84,6 +117,13 @@ sudo ./deploy/install.sh --xray-bin /path/to/xray
 - `--install-dir /opt/xraytool`
 - `--xray-bin /path/to/xray`
 
+### Public 安装脚本（可下载到本地执行）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/main/deploy/public-install.sh -o public-install.sh
+sudo bash public-install.sh --help
+```
+
 ## Linux 全套测试（OrbStack / Docker）
 
 ```bash
@@ -91,6 +131,18 @@ sudo ./deploy/install.sh --xray-bin /path/to/xray
 ```
 
 该脚本会在 Linux 容器中执行后端测试构建、前端 pnpm 构建以及 API smoke。
+
+## 生产 E2E（OrbStack）
+
+```bash
+./scripts/production_e2e_orbstack.sh
+```
+
+该脚本会在 OrbStack Linux 机器中执行完整安装验证：
+
+- 构建当前代码并打包本地 release
+- 调用 `deploy/public-install.sh` 完成 systemd 安装
+- 验证 `systemctl` 服务状态、`/healthz`、登录 API
 
 ## 说明
 

@@ -33,6 +33,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
+      - name: Setup arm64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - name: Build frontend
         working-directory: frontend
         run: |
@@ -42,19 +47,25 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -o dist/xraytool-linux-amd64 ./cmd/xraytool
-          GOOS=linux GOARCH=amd64 go build -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytool-linux-amd64 ./cmd/xraytool
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
+          CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o dist/xraytool-linux-arm64 ./cmd/xraytool
+          CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o dist/xraytoolctl-linux-arm64 ./cmd/xtoolctl
 
-      - name: Package release bundle
+      - name: Package release bundles
         run: |
-          mkdir -p dist/release
-          cp dist/xraytool-linux-amd64 dist/release/xraytool
-          cp dist/xraytoolctl-linux-amd64 dist/release/xraytoolctl
-          cp -R deploy dist/release/deploy
-          cp -R web/dist dist/release/web-dist
-          cp .env.example dist/release/.env.example
-          cp README.md dist/release/README.md
-          tar -C dist -czf dist/xraytool-linux-amd64.tar.gz release
+          for arch in amd64 arm64; do
+            workdir="$(mktemp -d)"
+            mkdir -p "${workdir}/release"
+            cp "dist/xraytool-linux-${arch}" "${workdir}/release/xraytool"
+            cp "dist/xraytoolctl-linux-${arch}" "${workdir}/release/xraytoolctl"
+            cp -R deploy "${workdir}/release/deploy"
+            cp -R web/dist "${workdir}/release/web-dist"
+            cp .env.example "${workdir}/release/.env.example"
+            cp README.md "${workdir}/release/README.md"
+            tar -C "${workdir}" -czf "dist/xraytool-linux-${arch}.tar.gz" release
+            rm -rf "${workdir}"
+          done
 
       - name: Publish GitHub release assets
         if: startsWith(github.ref, 'refs/tags/')
@@ -64,3 +75,6 @@ jobs:
             dist/xraytool-linux-amd64
             dist/xraytoolctl-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
+            dist/xraytool-linux-arm64
+            dist/xraytoolctl-linux-arm64
+            dist/xraytool-linux-arm64.tar.gz
