@@ -18,7 +18,7 @@ Go + SQLite + Gin + Zap + Vue3 + Pinia + Tailwind + Ant Design Vue 的 Xray 托�
 在服务器上直接粘贴执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/main/deploy/public-install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/refs/heads/main/deploy/public-install.sh | sudo bash
 ```
 
 安装脚本会交互询问：
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-se
 非交互示例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/main/deploy/public-install.sh | sudo bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/refs/heads/main/deploy/public-install.sh | sudo bash -s -- \
   --non-interactive \
   --port 18080 \
   --admin-user admin \
@@ -120,7 +120,7 @@ sudo ./deploy/install.sh --xray-bin /path/to/xray
 ### Public 安装脚本（可下载到本地执行）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/main/deploy/public-install.sh -o public-install.sh
+curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/refs/heads/main/deploy/public-install.sh -o public-install.sh
 sudo bash public-install.sh --help
 ```
 
