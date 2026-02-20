@@ -157,6 +157,9 @@ func (m *XrayManager) QueryUserTraffic(ctx context.Context) (map[string]int64, e
 	client := statscmd.NewStatsServiceClient(conn)
 	resp, err := client.QueryStats(ctx, &statscmd.QueryStatsRequest{Pattern: "user>>>", Reset_: false})
 	if err != nil {
+		if isStatsUnsupportedErr(err) {
+			return map[string]int64{}, nil
+		}
 		return nil, err
 	}
 	out := make(map[string]int64, len(resp.Stat))
@@ -179,6 +182,9 @@ func (m *XrayManager) GetAllOnlineUsers(ctx context.Context) ([]string, error) {
 	client := statscmd.NewStatsServiceClient(conn)
 	resp, err := client.GetAllOnlineUsers(ctx, &statscmd.GetAllOnlineUsersRequest{})
 	if err != nil {
+		if isStatsUnsupportedErr(err) {
+			return []string{}, nil
+		}
 		return nil, err
 	}
 	return resp.Users, nil
@@ -194,6 +200,9 @@ func (m *XrayManager) GetOnlineCount(ctx context.Context, onlineStatName string)
 	client := statscmd.NewStatsServiceClient(conn)
 	resp, err := client.GetStatsOnline(ctx, &statscmd.GetStatsRequest{Name: onlineStatName, Reset_: false})
 	if err != nil {
+		if isStatsUnsupportedErr(err) {
+			return 0, nil
+		}
 		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 			return 0, nil
 		}
@@ -513,6 +522,7 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			"tag":      "api",
 			"services": []string{"HandlerService", "RoutingService", "StatsService"},
 		},
+		"stats": map[string]interface{}{},
 		"policy": map[string]interface{}{
 			"levels": map[string]interface{}{
 				"0": map[string]interface{}{
@@ -544,6 +554,28 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		return err
 	}
 	return os.WriteFile(m.cfg.XrayConfigPath, body, 0o644)
+}
+
+func isStatsUnsupportedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "querystats only works its own stats.manager") {
+		return true
+	}
+	if strings.Contains(msg, "getstats") && strings.Contains(msg, "stats.manager") {
+		return true
+	}
+	if strings.Contains(msg, "stats not enabled") {
+		return true
+	}
+	if st, ok := status.FromError(err); ok {
+		if st.Code() == codes.Unimplemented || st.Code() == codes.FailedPrecondition {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeConfig(obj map[string]interface{}) (*xconf.Config, error) {
