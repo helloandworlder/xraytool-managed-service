@@ -584,14 +584,14 @@ function downloadTextFile(text: string, filename: string) {
         <template #title>
           <span class="text-lg font-bold">XrayTool 托管服务</span>
         </template>
-        <a-form layout="vertical" @finish="doLogin">
+        <a-form layout="vertical">
           <a-form-item label="用户名">
-            <a-input v-model:value="loginForm.username" placeholder="请输入用户名" />
+            <a-input v-model:value="loginForm.username" placeholder="请输入用户名" @pressEnter="doLogin" />
           </a-form-item>
           <a-form-item label="密码">
-            <a-input-password v-model:value="loginForm.password" placeholder="请输入密码" />
+            <a-input-password v-model:value="loginForm.password" placeholder="请输入密码" @pressEnter="doLogin" />
           </a-form-item>
-          <a-button type="primary" html-type="submit" block :loading="auth.loading">登录面板</a-button>
+          <a-button type="primary" block :loading="auth.loading" @click="doLogin">登录面板</a-button>
         </a-form>
         <a-alert v-if="auth.error" class="mt-3" type="error" :message="auth.error" show-icon />
       </a-card>
