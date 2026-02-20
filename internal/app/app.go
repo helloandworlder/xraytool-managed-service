@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -63,6 +64,9 @@ func Run() error {
 	scheduler := service.NewScheduler(database, orderSvc, barkSvc, logger, cfg.SchedulerInterval)
 
 	engine := api.New(database, st, orderSvc, hostSvc, backupSvc, cfg, logger).Router()
+	if err := ensureListenAddrAvailable(cfg.ListenAddr); err != nil {
+		return err
+	}
 	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: engine}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -83,4 +87,12 @@ func Run() error {
 		return fmt.Errorf("http serve: %w", err)
 	}
 	return nil
+}
+
+func ensureListenAddrAvailable(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen address unavailable %s: %w", addr, err)
+	}
+	return ln.Close()
 }

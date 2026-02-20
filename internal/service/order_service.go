@@ -103,6 +103,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		}
 		port = p
 	}
+	if err := s.ensurePortReadyForManaged(port); err != nil {
+		return nil, err
+	}
 
 	selectedIPs, err := s.allocateIPs(in.CustomerID, in.Quantity, in.Mode, in.ManualIPIDs)
 	if err != nil {
@@ -627,6 +630,24 @@ func (s *OrderService) defaultPort() (int, error) {
 		return 23457, nil
 	}
 	return p, nil
+}
+
+func (s *OrderService) ensurePortReadyForManaged(port int) error {
+	accounts, err := s.activeAccountsForPort(port)
+	if err != nil {
+		return err
+	}
+	if len(accounts) > 0 {
+		return nil
+	}
+	occupied, probeErr := ProbePort("0.0.0.0", port)
+	if probeErr != nil {
+		return probeErr
+	}
+	if occupied {
+		return fmt.Errorf("target port %d already occupied", port)
+	}
+	return nil
 }
 
 func (s *OrderService) hostIPSet() (map[string]uint, error) {
