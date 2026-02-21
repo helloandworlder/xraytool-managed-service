@@ -45,7 +45,7 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src debian:bullseye bash -lc '
             set -euo pipefail
             apt-get update
-            apt-get install -y ca-certificates curl gcc-aarch64-linux-gnu
+            apt-get install -y ca-certificates curl gcc gcc-aarch64-linux-gnu
             curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz -o /tmp/go.tgz
             tar -C /usr/local -xzf /tmp/go.tgz
             export PATH=/usr/local/go/bin:$PATH
