@@ -707,16 +707,17 @@ func (s *OrderService) PreviewImport(lines string) ([]ImportPreviewRow, error) {
 			rows = append(rows, row)
 			continue
 		}
-		port, err := strconv.Atoi(parts[1])
+		ip := strings.TrimSpace(parts[0])
+		port, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 		if err != nil || port <= 0 || port > 65535 {
 			row.Error = "invalid port"
 			rows = append(rows, row)
 			continue
 		}
-		row.IP = parts[0]
+		row.IP = ip
 		row.Port = port
-		row.Username = parts[2]
-		row.Password = parts[3]
+		row.Username = strings.TrimSpace(parts[2])
+		row.Password = strings.TrimSpace(parts[3])
 		_, row.IsLocalIP = hostIPs[row.IP]
 		if row.IsLocalIP {
 			occupied, _ := ProbePort(row.IP, row.Port)
@@ -724,12 +725,19 @@ func (s *OrderService) PreviewImport(lines string) ([]ImportPreviewRow, error) {
 		}
 		rows = append(rows, row)
 	}
-	return rows, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return s.applyImportRowValidation(rows)
 }
 
 func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderName string, expiresAt time.Time, rows []ImportPreviewRow) (*model.Order, error) {
 	if customerID == 0 {
 		return nil, errors.New("customer_id required")
+	}
+	rows, err := s.applyImportRowValidation(rows)
+	if err != nil {
+		return nil, err
 	}
 	validRows := make([]ImportPreviewRow, 0, len(rows))
 	for _, row := range rows {
@@ -738,7 +746,7 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 		}
 	}
 	if len(validRows) == 0 {
-		return nil, errors.New("no valid rows")
+		return nil, errors.New("no valid rows, please fix preview errors")
 	}
 	if orderName == "" {
 		orderName = fmt.Sprintf("Imported-%s", time.Now().Format("20060102150405"))
@@ -772,20 +780,23 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 			return err
 		}
 		for _, row := range validRows {
+			managed := false
 			item := model.OrderItem{
 				OrderID:   order.ID,
 				IP:        row.IP,
 				Port:      row.Port,
 				Username:  row.Username,
 				Password:  row.Password,
-				Managed:   row.IsLocalIP,
+				Managed:   false,
 				Status:    model.OrderItemStatusActive,
 				CreatedAt: time.Now(),
 				UpdatedAt: time.Now(),
 			}
 			if host, ok := hostByIP[row.IP]; ok {
 				item.HostIPID = &host.ID
+				managed = true
 			}
+			item.Managed = managed
 			if err := tx.Create(&item).Error; err != nil {
 				return err
 			}
@@ -1066,6 +1077,85 @@ func (s *OrderService) hostIPSet() (map[string]uint, error) {
 		set[row.IP] = row.ID
 	}
 	return set, nil
+}
+
+func (s *OrderService) applyImportRowValidation(rows []ImportPreviewRow) ([]ImportPreviewRow, error) {
+	checked := make([]ImportPreviewRow, len(rows))
+	copy(checked, rows)
+
+	batchCount := map[string]int{}
+	for i := range checked {
+		checked[i].IP = strings.TrimSpace(checked[i].IP)
+		checked[i].Username = strings.TrimSpace(checked[i].Username)
+		checked[i].Password = strings.TrimSpace(checked[i].Password)
+		if checked[i].Error != "" {
+			continue
+		}
+		if checked[i].IP == "" {
+			checked[i].Error = "invalid ip"
+			continue
+		}
+		if checked[i].Port <= 0 || checked[i].Port > 65535 {
+			checked[i].Error = "invalid port"
+			continue
+		}
+		if checked[i].Username == "" {
+			checked[i].Error = "username required"
+			continue
+		}
+		if checked[i].Password == "" {
+			checked[i].Error = "password required"
+			continue
+		}
+		batchCount[checked[i].Username]++
+	}
+
+	candidateSet := map[string]struct{}{}
+	candidates := make([]string, 0, len(batchCount))
+	for i := range checked {
+		if checked[i].Error != "" {
+			continue
+		}
+		if batchCount[checked[i].Username] > 1 {
+			checked[i].Error = "duplicate username in import list"
+			continue
+		}
+		if _, ok := candidateSet[checked[i].Username]; ok {
+			continue
+		}
+		candidateSet[checked[i].Username] = struct{}{}
+		candidates = append(candidates, checked[i].Username)
+	}
+
+	if len(candidates) == 0 {
+		return checked, nil
+	}
+
+	type usernameRow struct {
+		Username string
+	}
+	existingRows := []usernameRow{}
+	if err := s.db.Table("order_items").
+		Select("username").
+		Where("username in ?", candidates).
+		Scan(&existingRows).Error; err != nil {
+		return nil, err
+	}
+	existing := map[string]struct{}{}
+	for _, row := range existingRows {
+		existing[row.Username] = struct{}{}
+	}
+
+	for i := range checked {
+		if checked[i].Error != "" {
+			continue
+		}
+		if _, ok := existing[checked[i].Username]; ok {
+			checked[i].Error = "username already exists"
+		}
+	}
+
+	return checked, nil
 }
 
 func isAlreadyExists(err error) bool {
