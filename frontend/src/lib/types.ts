@@ -22,6 +22,12 @@ export interface OrderItem {
   port: number
   username: string
   password: string
+  outbound_type?: string
+  socks_outbound_id?: number
+  forward_address?: string
+  forward_port?: number
+  forward_username?: string
+  forward_password?: string
   managed: boolean
   status: string
   resources?: Array<{
@@ -85,6 +91,70 @@ export interface ImportPreviewRow {
   is_local_ip: boolean
   port_occupied: boolean
   error?: string
+}
+
+export interface XrayNode {
+  id: number
+  name: string
+  base_url: string
+  username: string
+  password: string
+  enabled: boolean
+  is_local: boolean
+}
+
+export interface SocksMigrationPreviewRow {
+  raw: string
+  ip: string
+  port: number
+  username: string
+  password: string
+  node_id?: number
+  node_name?: string
+  state: 'ready' | 'blocked' | 'unmatched' | 'ambiguous' | 'invalid' | string
+  reason?: string
+}
+
+export interface SocksMigrationNodeSummary {
+  node_id?: number
+  node_name: string
+  is_local: boolean
+  reachable: boolean
+  assigned_count: number
+  ready_count: number
+  blocked: boolean
+  port_conflicts?: number[]
+  error?: string
+  action_hint?: string
+  highlight_color: 'red' | 'green' | string
+}
+
+export interface SocksMigrationPreviewResult {
+  rows: SocksMigrationPreviewRow[]
+  nodes: SocksMigrationNodeSummary[]
+  ready_rows: number
+  blocked_rows: number
+  unmatched_rows: number
+  ambiguous_rows: number
+  invalid_rows: number
+  blocked_node_count: number
+  reachable_node_size: number
+}
+
+export interface ForwardOutbound {
+  id: number
+  name: string
+  address: string
+  port: number
+  username: string
+  password: string
+  route_user: string
+  exit_ip: string
+  country_code: string
+  enabled: boolean
+  probe_status: string
+  probe_error: string
+  last_probed_at?: string
 }
 
 export interface TaskLog {

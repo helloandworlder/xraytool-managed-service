@@ -2,6 +2,7 @@ package service
 
 import (
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -74,15 +75,24 @@ func (s *HostIPService) ScanAndSync() ([]model.HostIP, error) {
 	}
 
 	var rows []model.HostIP
-	if err := s.db.Order("ip asc").Find(&rows).Error; err != nil {
+	if err := s.db.Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	sort.Slice(rows, func(i, j int) bool {
+		return lessIPString(rows[i].IP, rows[j].IP)
+	})
 	return rows, nil
 }
 
 func (s *HostIPService) List() ([]model.HostIP, error) {
 	var rows []model.HostIP
-	err := s.db.Order("ip asc").Find(&rows).Error
+	err := s.db.Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return lessIPString(rows[i].IP, rows[j].IP)
+	})
 	return rows, err
 }
 

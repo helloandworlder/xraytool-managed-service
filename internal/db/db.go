@@ -26,6 +26,8 @@ func Open(path string) (*gorm.DB, error) {
 		&model.Admin{},
 		&model.Customer{},
 		&model.HostIP{},
+		&model.XrayNode{},
+		&model.SocksOutbound{},
 		&model.Order{},
 		&model.OrderItem{},
 		&model.XrayResource{},

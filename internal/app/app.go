@@ -68,12 +68,14 @@ func Run() error {
 	}
 
 	orderSvc := service.NewOrderService(database, xrayManager, logger)
+	nodeSvc := service.NewNodeService(database, logger)
+	forwardSvc := service.NewForwardOutboundService(database)
 	barkSvc := service.NewBarkService(database)
 	runtimeSvc := service.NewRuntimeStatsService(database, xrayManager)
 	backupSvc := service.NewBackupService(cfg, database, logger)
 	scheduler := service.NewScheduler(database, orderSvc, barkSvc, logger, cfg.SchedulerInterval)
 
-	engine := api.New(database, st, orderSvc, hostSvc, backupSvc, barkSvc, runtimeSvc, cfg, logger).Router()
+	engine := api.New(database, st, orderSvc, nodeSvc, forwardSvc, hostSvc, backupSvc, barkSvc, runtimeSvc, cfg, logger).Router()
 	if err := ensureListenAddrAvailable(cfg.ListenAddr); err != nil {
 		return err
 	}

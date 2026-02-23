@@ -40,22 +40,24 @@ type BatchTestResult struct {
 }
 
 type CreateOrderInput struct {
-	CustomerID  uint      `json:"customer_id"`
-	Name        string    `json:"name"`
-	Quantity    int       `json:"quantity"`
-	DurationDay int       `json:"duration_day"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	Mode        string    `json:"mode"`
-	Port        int       `json:"port"`
-	ManualIPIDs []uint    `json:"manual_ip_ids"`
+	CustomerID         uint      `json:"customer_id"`
+	Name               string    `json:"name"`
+	Quantity           int       `json:"quantity"`
+	DurationDay        int       `json:"duration_day"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	Mode               string    `json:"mode"`
+	Port               int       `json:"port"`
+	ManualIPIDs        []uint    `json:"manual_ip_ids"`
+	ForwardOutboundIDs []uint    `json:"forward_outbound_ids"`
 }
 
 type UpdateOrderInput struct {
-	Name        string    `json:"name"`
-	Quantity    int       `json:"quantity"`
-	Port        int       `json:"port"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	ManualIPIDs []uint    `json:"manual_ip_ids"`
+	Name               string    `json:"name"`
+	Quantity           int       `json:"quantity"`
+	Port               int       `json:"port"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	ManualIPIDs        []uint    `json:"manual_ip_ids"`
+	ForwardOutboundIDs []uint    `json:"forward_outbound_ids"`
 }
 
 type AllocationPreview struct {
@@ -150,7 +152,18 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 		targetPort = in.Port
 	}
 	targetQuantity := order.Quantity
-	if in.Quantity > 0 {
+	targetForwardOutboundIDs := uniqueUintIDs(in.ForwardOutboundIDs)
+	if order.Mode == model.OrderModeForward {
+		if len(targetForwardOutboundIDs) == 0 {
+			for _, item := range order.Items {
+				if item.SocksOutboundID != nil && *item.SocksOutboundID > 0 {
+					targetForwardOutboundIDs = append(targetForwardOutboundIDs, *item.SocksOutboundID)
+				}
+			}
+			targetForwardOutboundIDs = uniqueUintIDs(targetForwardOutboundIDs)
+		}
+		targetQuantity = len(targetForwardOutboundIDs)
+	} else if in.Quantity > 0 {
 		targetQuantity = in.Quantity
 	}
 	targetExpiresAt := order.ExpiresAt
@@ -164,6 +177,9 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	if targetQuantity <= 0 {
 		return nil, errors.New("quantity must be > 0")
 	}
+	if order.Mode == model.OrderModeForward && len(targetForwardOutboundIDs) == 0 {
+		return nil, errors.New("forward_outbound_ids is required for forward mode")
+	}
 	if order.Mode == model.OrderModeImport && targetQuantity > len(order.Items) {
 		return nil, errors.New("import order quantity cannot be increased")
 	}
@@ -175,68 +191,76 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 
 	now := time.Now()
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		items := append([]model.OrderItem(nil), order.Items...)
-		if targetQuantity < len(items) {
-			sort.Slice(items, func(i, j int) bool { return items[i].ID > items[j].ID })
-			removeItems := items[:len(items)-targetQuantity]
-			removeIDs := make([]uint, 0, len(removeItems))
-			for _, item := range removeItems {
-				removeIDs = append(removeIDs, item.ID)
-			}
-			if len(removeIDs) > 0 {
-				if err := tx.Where("order_item_id in ?", removeIDs).Delete(&model.XrayResource{}).Error; err != nil {
-					return err
-				}
-				if err := tx.Where("id in ?", removeIDs).Delete(&model.OrderItem{}).Error; err != nil {
-					return err
-				}
-			}
-		}
-		if targetQuantity > len(items) {
-			diff := targetQuantity - len(items)
-			mode := order.Mode
-			manualIDs := in.ManualIPIDs
-			if mode == model.OrderModeManual && len(manualIDs) < diff {
-				mode = model.OrderModeAuto
-				manualIDs = nil
-			}
-			if mode != model.OrderModeAuto && mode != model.OrderModeManual {
-				mode = model.OrderModeAuto
-			}
-			selectedIPs, err := s.allocateIPs(order.CustomerID, diff, mode, manualIDs, order.ID)
-			if err != nil {
+		if order.Mode == model.OrderModeForward {
+			if err := s.syncForwardOrderItemsTx(tx, order, targetForwardOutboundIDs, targetPort, targetExpiresAt, now); err != nil {
 				return err
 			}
-			for _, ip := range selectedIPs {
-				item := model.OrderItem{
-					OrderID:   order.ID,
-					HostIPID:  &ip.ID,
-					IP:        ip.IP,
-					Port:      targetPort,
-					Username:  randomString(8),
-					Password:  randomString(12),
-					Managed:   true,
-					Status:    model.OrderItemStatusActive,
-					CreatedAt: now,
-					UpdatedAt: now,
+		} else {
+			items := append([]model.OrderItem(nil), order.Items...)
+			if targetQuantity < len(items) {
+				sort.Slice(items, func(i, j int) bool { return items[i].ID > items[j].ID })
+				removeItems := items[:len(items)-targetQuantity]
+				removeIDs := make([]uint, 0, len(removeItems))
+				for _, item := range removeItems {
+					removeIDs = append(removeIDs, item.ID)
 				}
-				if err := tx.Create(&item).Error; err != nil {
-					return err
+				if len(removeIDs) > 0 {
+					if err := tx.Where("order_item_id in ?", removeIDs).Delete(&model.XrayResource{}).Error; err != nil {
+						return err
+					}
+					if err := tx.Where("id in ?", removeIDs).Delete(&model.OrderItem{}).Error; err != nil {
+						return err
+					}
 				}
 			}
-		}
+			if targetQuantity > len(items) {
+				diff := targetQuantity - len(items)
+				mode := order.Mode
+				manualIDs := in.ManualIPIDs
+				ipMode := mode
+				if mode == model.OrderModeManual && len(manualIDs) < diff {
+					ipMode = model.OrderModeAuto
+					manualIDs = nil
+				}
+				if ipMode != model.OrderModeAuto && ipMode != model.OrderModeManual {
+					ipMode = model.OrderModeAuto
+				}
+				selectedIPs, err := s.allocateIPs(order.CustomerID, diff, ipMode, manualIDs, order.ID)
+				if err != nil {
+					return err
+				}
+				for _, ip := range selectedIPs {
+					item := model.OrderItem{
+						OrderID:      order.ID,
+						HostIPID:     &ip.ID,
+						IP:           ip.IP,
+						Port:         targetPort,
+						Username:     randomString(8),
+						Password:     randomString(12),
+						OutboundType: model.OutboundTypeDirect,
+						Managed:      true,
+						Status:       model.OrderItemStatusActive,
+						CreatedAt:    now,
+						UpdatedAt:    now,
+					}
+					if err := tx.Create(&item).Error; err != nil {
+						return err
+					}
+				}
+			}
 
-		itemUpdates := map[string]interface{}{
-			"updated_at": now,
-		}
-		if targetPort != order.Port {
-			itemUpdates["port"] = targetPort
-		}
-		if targetExpiresAt.After(now) {
-			itemUpdates["status"] = model.OrderItemStatusActive
-		}
-		if err := tx.Model(&model.OrderItem{}).Where("order_id = ?", order.ID).Updates(itemUpdates).Error; err != nil {
-			return err
+			itemUpdates := map[string]interface{}{
+				"updated_at": now,
+			}
+			if targetPort != order.Port {
+				itemUpdates["port"] = targetPort
+			}
+			if targetExpiresAt.After(now) {
+				itemUpdates["status"] = model.OrderItemStatusActive
+			}
+			if err := tx.Model(&model.OrderItem{}).Where("order_id = ?", order.ID).Updates(itemUpdates).Error; err != nil {
+				return err
+			}
 		}
 
 		orderStatus := model.OrderStatusActive
@@ -279,17 +303,23 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 	if in.CustomerID == 0 {
 		return nil, errors.New("customer_id is required")
 	}
-	if in.Quantity <= 0 {
-		return nil, errors.New("quantity must be > 0")
-	}
 	if in.DurationDay <= 0 && in.ExpiresAt.IsZero() {
 		in.DurationDay = 30
 	}
 	if in.Mode == "" {
 		in.Mode = model.OrderModeAuto
 	}
-	if in.Mode != model.OrderModeAuto && in.Mode != model.OrderModeManual {
-		return nil, errors.New("mode must be auto or manual")
+	if in.Mode != model.OrderModeAuto && in.Mode != model.OrderModeManual && in.Mode != model.OrderModeForward {
+		return nil, errors.New("mode must be auto/manual/forward")
+	}
+	if in.Mode == model.OrderModeForward {
+		in.ForwardOutboundIDs = uniqueUintIDs(in.ForwardOutboundIDs)
+		if len(in.ForwardOutboundIDs) == 0 {
+			return nil, errors.New("forward_outbound_ids is required for forward mode")
+		}
+		in.Quantity = len(in.ForwardOutboundIDs)
+	} else if in.Quantity <= 0 {
+		return nil, errors.New("quantity must be > 0")
 	}
 
 	port := in.Port
@@ -304,12 +334,24 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		return nil, err
 	}
 
-	selectedIPs, err := s.allocateIPs(in.CustomerID, in.Quantity, in.Mode, in.ManualIPIDs, 0)
+	ipMode := in.Mode
+	if in.Mode == model.OrderModeForward {
+		ipMode = model.OrderModeAuto
+	}
+	selectedIPs, err := s.allocateIPs(in.CustomerID, in.Quantity, ipMode, in.ManualIPIDs, 0)
 	if err != nil {
 		return nil, err
 	}
 	if len(selectedIPs) != in.Quantity {
 		return nil, fmt.Errorf("not enough IPs, expect %d got %d", in.Quantity, len(selectedIPs))
+	}
+
+	selectedOutbounds := []model.SocksOutbound{}
+	if in.Mode == model.OrderModeForward {
+		selectedOutbounds, err = s.loadForwardOutboundsByIDs(in.ForwardOutboundIDs, true)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	now := time.Now()
@@ -338,18 +380,33 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		if err := tx.Create(order).Error; err != nil {
 			return err
 		}
-		for _, ip := range selectedIPs {
+		for i, ip := range selectedIPs {
 			item := model.OrderItem{
-				OrderID:   order.ID,
-				HostIPID:  &ip.ID,
-				IP:        ip.IP,
-				Port:      port,
-				Username:  randomString(8),
-				Password:  randomString(12),
-				Managed:   true,
-				Status:    model.OrderItemStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
+				OrderID:      order.ID,
+				HostIPID:     &ip.ID,
+				IP:           ip.IP,
+				Port:         port,
+				Username:     randomString(8),
+				Password:     randomString(12),
+				OutboundType: model.OutboundTypeDirect,
+				Managed:      true,
+				Status:       model.OrderItemStatusActive,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			}
+			if in.Mode == model.OrderModeForward {
+				outbound := selectedOutbounds[i]
+				user, userErr := s.resolveForwardItemUsername(tx, outbound, now, 0)
+				if userErr != nil {
+					return userErr
+				}
+				item.Username = user
+				item.OutboundType = model.OutboundTypeSocks5
+				item.SocksOutboundID = &outbound.ID
+				item.ForwardAddress = outbound.Address
+				item.ForwardPort = outbound.Port
+				item.ForwardUsername = outbound.Username
+				item.ForwardPassword = outbound.Password
 			}
 			if err := tx.Create(&item).Error; err != nil {
 				return err
@@ -782,15 +839,16 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 		for _, row := range validRows {
 			managed := false
 			item := model.OrderItem{
-				OrderID:   order.ID,
-				IP:        row.IP,
-				Port:      row.Port,
-				Username:  row.Username,
-				Password:  row.Password,
-				Managed:   false,
-				Status:    model.OrderItemStatusActive,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
+				OrderID:      order.ID,
+				IP:           row.IP,
+				Port:         row.Port,
+				Username:     row.Username,
+				Password:     row.Password,
+				OutboundType: model.OutboundTypeDirect,
+				Managed:      false,
+				Status:       model.OrderItemStatusActive,
+				CreatedAt:    time.Now(),
+				UpdatedAt:    time.Now(),
 			}
 			if host, ok := hostByIP[row.IP]; ok {
 				item.HostIPID = &host.ID
@@ -877,33 +935,61 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 		candidates = append(candidates, ip)
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		left := usage[candidates[i].IP]
-		right := usage[candidates[j].IP]
-		if left == right {
-			return candidates[i].IP < candidates[j].IP
-		}
-		return left < right
-	})
-
 	if len(candidates) < quantity {
 		return nil, fmt.Errorf("available IPs (%d) less than quantity (%d)", len(candidates), quantity)
 	}
-	return candidates[:quantity], nil
+
+	buckets := map[int64][]model.HostIP{}
+	levels := make([]int64, 0)
+	seenLevel := map[int64]struct{}{}
+	for _, candidate := range candidates {
+		level := usage[candidate.IP]
+		buckets[level] = append(buckets[level], candidate)
+		if _, ok := seenLevel[level]; !ok {
+			seenLevel[level] = struct{}{}
+			levels = append(levels, level)
+		}
+	}
+	sort.Slice(levels, func(i, j int) bool { return levels[i] < levels[j] })
+
+	selected := make([]model.HostIP, 0, quantity)
+	seed := int(customerID*131 + excludeOrderID*17 + uint(quantity)*7)
+	for _, level := range levels {
+		bucket := buckets[level]
+		sort.Slice(bucket, func(i, j int) bool {
+			return lessIPString(bucket[i].IP, bucket[j].IP)
+		})
+		need := quantity - len(selected)
+		if need <= 0 {
+			break
+		}
+		take := need
+		if take > len(bucket) {
+			take = len(bucket)
+		}
+		selected = append(selected, scatteredPick(bucket, take, seed+int(level)*11)...)
+	}
+	if len(selected) < quantity {
+		return nil, fmt.Errorf("available IPs (%d) less than quantity (%d)", len(selected), quantity)
+	}
+	return selected[:quantity], nil
 }
 
 func (s *OrderService) usableIPPool() ([]model.HostIP, error) {
 	var all []model.HostIP
-	if err := s.db.Where("enabled = 1 and is_local = 1 and is_public = 1").Order("ip asc").Find(&all).Error; err != nil {
+	if err := s.db.Where("enabled = 1 and is_local = 1 and is_public = 1").Find(&all).Error; err != nil {
 		return nil, err
 	}
 	all = filterUsableIPs(all)
 	if len(all) == 0 {
-		if err := s.db.Where("enabled = 1 and is_local = 1").Order("ip asc").Find(&all).Error; err != nil {
+		if err := s.db.Where("enabled = 1 and is_local = 1").Find(&all).Error; err != nil {
 			return nil, err
 		}
 		all = filterUsableIPs(all)
 	}
+	sort.Slice(all, func(i, j int) bool {
+		return lessIPString(all[i].IP, all[j].IP)
+	})
 	return all, nil
 }
 
@@ -1156,6 +1242,455 @@ func (s *OrderService) applyImportRowValidation(rows []ImportPreviewRow) ([]Impo
 	}
 
 	return checked, nil
+}
+
+func uniqueUintIDs(ids []uint) []uint {
+	if len(ids) == 0 {
+		return []uint{}
+	}
+	seen := make(map[uint]struct{}, len(ids))
+	out := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (s *OrderService) loadForwardOutboundsByIDs(ids []uint, enabledOnly bool) ([]model.SocksOutbound, error) {
+	return s.loadForwardOutboundsByIDsTx(s.db, ids, enabledOnly)
+}
+
+func (s *OrderService) loadForwardOutboundsByIDsTx(tx *gorm.DB, ids []uint, enabledOnly bool) ([]model.SocksOutbound, error) {
+	ids = uniqueUintIDs(ids)
+	if len(ids) == 0 {
+		return []model.SocksOutbound{}, nil
+	}
+	rows := []model.SocksOutbound{}
+	q := tx.Where("id in ?", ids)
+	if enabledOnly {
+		q = q.Where("enabled = 1")
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	byID := make(map[uint]model.SocksOutbound, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	ordered := make([]model.SocksOutbound, 0, len(ids))
+	missing := make([]string, 0)
+	for _, id := range ids {
+		row, ok := byID[id]
+		if !ok {
+			missing = append(missing, strconv.FormatUint(uint64(id), 10))
+			continue
+		}
+		ordered = append(ordered, row)
+	}
+	if len(missing) > 0 {
+		if enabledOnly {
+			return nil, fmt.Errorf("some forward outbounds not found or disabled: %s", strings.Join(missing, ","))
+		}
+		return nil, fmt.Errorf("some forward outbounds not found: %s", strings.Join(missing, ","))
+	}
+	return ordered, nil
+}
+
+func (s *OrderService) syncForwardOrderItemsTx(tx *gorm.DB, order model.Order, targetOutboundIDs []uint, targetPort int, targetExpiresAt time.Time, now time.Time) error {
+	targetOutboundIDs = uniqueUintIDs(targetOutboundIDs)
+	outbounds, err := s.loadForwardOutboundsByIDsTx(tx, targetOutboundIDs, true)
+	if err != nil {
+		return err
+	}
+	outboundByID := make(map[uint]model.SocksOutbound, len(outbounds))
+	targetSet := make(map[uint]struct{}, len(outbounds))
+	for _, outbound := range outbounds {
+		outboundByID[outbound.ID] = outbound
+		targetSet[outbound.ID] = struct{}{}
+	}
+
+	keepByOutbound := map[uint]model.OrderItem{}
+	removeIDs := make([]uint, 0)
+	for _, item := range order.Items {
+		if item.SocksOutboundID == nil || *item.SocksOutboundID == 0 || !strings.EqualFold(strings.TrimSpace(item.OutboundType), model.OutboundTypeSocks5) {
+			removeIDs = append(removeIDs, item.ID)
+			continue
+		}
+		outboundID := *item.SocksOutboundID
+		if _, ok := targetSet[outboundID]; !ok {
+			removeIDs = append(removeIDs, item.ID)
+			continue
+		}
+		if prev, exists := keepByOutbound[outboundID]; exists {
+			if item.ID > prev.ID {
+				removeIDs = append(removeIDs, item.ID)
+				continue
+			}
+			removeIDs = append(removeIDs, prev.ID)
+		}
+		keepByOutbound[outboundID] = item
+	}
+
+	if len(removeIDs) > 0 {
+		if err := tx.Where("order_item_id in ?", removeIDs).Delete(&model.XrayResource{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id in ?", removeIDs).Delete(&model.OrderItem{}).Error; err != nil {
+			return err
+		}
+	}
+
+	addOutboundIDs := make([]uint, 0)
+	for _, outboundID := range targetOutboundIDs {
+		if _, ok := keepByOutbound[outboundID]; ok {
+			continue
+		}
+		addOutboundIDs = append(addOutboundIDs, outboundID)
+	}
+
+	if len(addOutboundIDs) > 0 {
+		ips, err := s.allocateIPs(order.CustomerID, len(addOutboundIDs), model.OrderModeAuto, nil, order.ID)
+		if err != nil {
+			return err
+		}
+		for i, outboundID := range addOutboundIDs {
+			outbound := outboundByID[outboundID]
+			user, userErr := s.resolveForwardItemUsername(tx, outbound, now, 0)
+			if userErr != nil {
+				return userErr
+			}
+			item := model.OrderItem{
+				OrderID:         order.ID,
+				HostIPID:        &ips[i].ID,
+				IP:              ips[i].IP,
+				Port:            targetPort,
+				Username:        user,
+				Password:        randomString(12),
+				SocksOutboundID: &outbound.ID,
+				OutboundType:    model.OutboundTypeSocks5,
+				ForwardAddress:  outbound.Address,
+				ForwardPort:     outbound.Port,
+				ForwardUsername: outbound.Username,
+				ForwardPassword: outbound.Password,
+				Managed:         true,
+				Status:          model.OrderItemStatusActive,
+				CreatedAt:       now,
+				UpdatedAt:       now,
+			}
+			if err := tx.Create(&item).Error; err != nil {
+				return err
+			}
+		}
+	}
+
+	current := []model.OrderItem{}
+	if err := tx.Where("order_id = ?", order.ID).Find(&current).Error; err != nil {
+		return err
+	}
+	for _, item := range current {
+		if item.SocksOutboundID == nil || *item.SocksOutboundID == 0 {
+			continue
+		}
+		outbound, ok := outboundByID[*item.SocksOutboundID]
+		if !ok {
+			continue
+		}
+		user, userErr := s.resolveForwardItemUsername(tx, outbound, now, item.ID)
+		if userErr != nil {
+			return userErr
+		}
+		updates := map[string]interface{}{
+			"port":              targetPort,
+			"username":          user,
+			"socks_outbound_id": outbound.ID,
+			"outbound_type":     model.OutboundTypeSocks5,
+			"forward_address":   outbound.Address,
+			"forward_port":      outbound.Port,
+			"forward_username":  outbound.Username,
+			"forward_password":  outbound.Password,
+			"managed":           true,
+			"updated_at":        now,
+		}
+		if targetExpiresAt.After(now) {
+			updates["status"] = model.OrderItemStatusActive
+		}
+		if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *OrderService) ForwardOutboundReuseWarnings(customerID uint, excludeOrderID uint, outboundIDs []uint) ([]string, error) {
+	outboundIDs = uniqueUintIDs(outboundIDs)
+	if customerID == 0 || len(outboundIDs) == 0 {
+		return []string{}, nil
+	}
+	type warnRow struct {
+		OutboundID uint
+		Address    string
+		Port       int
+		RouteUser  string
+		Count      int64
+	}
+	rows := []warnRow{}
+	q := s.db.Table("order_items oi").
+		Select("oi.socks_outbound_id as outbound_id, so.address as address, so.port as port, so.route_user as route_user, count(1) as count").
+		Joins("join orders o on o.id = oi.order_id").
+		Joins("join socks_outbounds so on so.id = oi.socks_outbound_id").
+		Where("o.customer_id = ? and o.status = ? and o.expires_at > ? and oi.status = ? and oi.socks_outbound_id in ?", customerID, model.OrderStatusActive, time.Now(), model.OrderItemStatusActive, outboundIDs)
+	if excludeOrderID > 0 {
+		q = q.Where("o.id <> ?", excludeOrderID)
+	}
+	if err := q.Group("oi.socks_outbound_id, so.address, so.port, so.route_user").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []string{}, nil
+	}
+	warnings := make([]string, 0, len(rows))
+	for _, row := range rows {
+		user := strings.TrimSpace(row.RouteUser)
+		if user == "" {
+			user = "(未设置分流用户)"
+		}
+		warnings = append(warnings, fmt.Sprintf("SOCKS5出口 %s:%d (%s) 已在该客户其他活动订单复用 %d 次", row.Address, row.Port, user, row.Count))
+	}
+	sort.Strings(warnings)
+	return warnings, nil
+}
+
+func (s *OrderService) allocateForwardOutbounds(customerID uint, quantity int, excludeOrderID uint) ([]model.SocksOutbound, error) {
+	all := []model.SocksOutbound{}
+	if err := s.db.Where("enabled = 1").Order("id asc").Find(&all).Error; err != nil {
+		return nil, err
+	}
+	if len(all) == 0 {
+		return nil, errors.New("no enabled socks outbounds")
+	}
+
+	usedByCustomer, err := s.customerUsedOutboundSet(customerID, excludeOrderID)
+	if err != nil {
+		return nil, err
+	}
+
+	usage := map[uint]int64{}
+	usageRows := []struct {
+		OutboundID uint
+		Count      int64
+	}{}
+	if err := s.db.Table("order_items oi").
+		Select("oi.socks_outbound_id as outbound_id, count(1) as count").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("oi.socks_outbound_id is not null and oi.status = ? and o.status = ? and o.expires_at > ?", model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
+		Group("oi.socks_outbound_id").Scan(&usageRows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range usageRows {
+		usage[row.OutboundID] = row.Count
+	}
+
+	preferred := make([]model.SocksOutbound, 0, len(all))
+	fallback := make([]model.SocksOutbound, 0, len(all))
+	for _, outbound := range all {
+		if _, exists := usedByCustomer[outbound.ID]; exists {
+			fallback = append(fallback, outbound)
+			continue
+		}
+		preferred = append(preferred, outbound)
+	}
+
+	selected := make([]model.SocksOutbound, 0, quantity)
+	seed := int(customerID*163 + excludeOrderID*13 + uint(quantity)*19)
+	selected = append(selected, selectDispersedOutbounds(preferred, usage, quantity, seed)...)
+	if len(selected) < quantity {
+		need := quantity - len(selected)
+		selected = append(selected, selectDispersedOutbounds(fallback, usage, need, seed+97)...)
+	}
+	if len(selected) < quantity {
+		return nil, fmt.Errorf("available outbounds (%d) less than quantity (%d)", len(selected), quantity)
+	}
+	return selected[:quantity], nil
+}
+
+func selectDispersedOutbounds(candidates []model.SocksOutbound, usage map[uint]int64, quantity int, seed int) []model.SocksOutbound {
+	if quantity <= 0 || len(candidates) == 0 {
+		return []model.SocksOutbound{}
+	}
+	buckets := map[int64][]model.SocksOutbound{}
+	levels := make([]int64, 0)
+	seen := map[int64]struct{}{}
+	for _, outbound := range candidates {
+		level := usage[outbound.ID]
+		buckets[level] = append(buckets[level], outbound)
+		if _, ok := seen[level]; !ok {
+			seen[level] = struct{}{}
+			levels = append(levels, level)
+		}
+	}
+	sort.Slice(levels, func(i, j int) bool { return levels[i] < levels[j] })
+	out := make([]model.SocksOutbound, 0, quantity)
+	for _, level := range levels {
+		bucket := buckets[level]
+		sort.Slice(bucket, func(i, j int) bool {
+			li := strings.TrimSpace(bucket[i].RouteUser)
+			lj := strings.TrimSpace(bucket[j].RouteUser)
+			if li == lj {
+				return bucket[i].ID < bucket[j].ID
+			}
+			return li < lj
+		})
+		need := quantity - len(out)
+		if need <= 0 {
+			break
+		}
+		take := need
+		if take > len(bucket) {
+			take = len(bucket)
+		}
+		out = append(out, scatteredPick(bucket, take, seed+int(level)*7)...)
+	}
+	return out
+}
+
+func (s *OrderService) customerUsedOutboundSet(customerID uint, excludeOrderID uint) (map[uint]struct{}, error) {
+	used := map[uint]struct{}{}
+	if customerID == 0 {
+		return used, nil
+	}
+	rows := []struct {
+		OutboundID uint
+	}{}
+	q := s.db.Table("order_items oi").
+		Select("oi.socks_outbound_id as outbound_id").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("o.customer_id = ? and o.status = ? and o.expires_at > ? and oi.status = ? and oi.socks_outbound_id is not null", customerID, model.OrderStatusActive, time.Now(), model.OrderItemStatusActive)
+	if excludeOrderID > 0 {
+		q = q.Where("o.id <> ?", excludeOrderID)
+	}
+	if err := q.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.OutboundID > 0 {
+			used[row.OutboundID] = struct{}{}
+		}
+	}
+	return used, nil
+}
+
+func (s *OrderService) resolveForwardItemUsername(tx *gorm.DB, outbound model.SocksOutbound, now time.Time, excludeItemID uint) (string, error) {
+	user := strings.TrimSpace(outbound.RouteUser)
+	if user != "" {
+		exists, err := s.orderUsernameExistsTx(tx, user, excludeItemID)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return user, nil
+		}
+	}
+
+	generated, err := s.nextAvailableOrderUsernameTx(tx, outbound.CountryCode)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Model(&model.SocksOutbound{}).Where("id = ?", outbound.ID).Updates(map[string]interface{}{
+		"route_user": generated,
+		"updated_at": now,
+	}).Error; err != nil {
+		return "", err
+	}
+	return generated, nil
+}
+
+func (s *OrderService) nextAvailableOrderUsername(countryCode string) (string, error) {
+	return s.nextAvailableOrderUsernameTx(s.db, countryCode)
+}
+
+func (s *OrderService) nextAvailableOrderUsernameTx(tx *gorm.DB, countryCode string) (string, error) {
+	prefix := normalizeCountryPrefix(countryCode)
+	for i := 0; i < 16; i++ {
+		candidate := fmt.Sprintf("%s-%s", prefix, randomString(10))
+		exists, err := s.orderUsernameExistsTx(tx, candidate, 0)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("failed to generate unique order username")
+}
+
+func (s *OrderService) orderUsernameExistsTx(tx *gorm.DB, username string, excludeItemID uint) (bool, error) {
+	var count int64
+	q := tx.Model(&model.OrderItem{}).Where("username = ?", strings.TrimSpace(username))
+	if excludeItemID > 0 {
+		q = q.Where("id <> ?", excludeItemID)
+	}
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func scatteredPick[T any](rows []T, take int, seed int) []T {
+	n := len(rows)
+	if take <= 0 || n == 0 {
+		return []T{}
+	}
+	if take >= n {
+		out := make([]T, n)
+		copy(out, rows)
+		return out
+	}
+	if seed < 0 {
+		seed = -seed
+	}
+	start := seed % n
+	stride := n / take
+	if stride <= 1 {
+		stride = 2
+	}
+	for gcd(stride, n) != 1 {
+		stride++
+	}
+	used := make([]bool, n)
+	out := make([]T, 0, take)
+	idx := start
+	for len(out) < take {
+		if !used[idx] {
+			used[idx] = true
+			out = append(out, rows[idx])
+		}
+		idx = (idx + stride) % n
+	}
+	return out
+}
+
+func gcd(a, b int) int {
+	if a < 0 {
+		a = -a
+	}
+	if b < 0 {
+		b = -b
+	}
+	for b != 0 {
+		a, b = b, a%b
+	}
+	if a == 0 {
+		return 1
+	}
+	return a
 }
 
 func isAlreadyExists(err error) bool {

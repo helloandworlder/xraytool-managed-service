@@ -11,9 +11,13 @@ const (
 	OrderItemStatusExpired  = "expired"
 	OrderItemStatusDisabled = "disabled"
 
-	OrderModeAuto   = "auto"
-	OrderModeManual = "manual"
-	OrderModeImport = "import"
+	OrderModeAuto    = "auto"
+	OrderModeManual  = "manual"
+	OrderModeImport  = "import"
+	OrderModeForward = "forward"
+
+	OutboundTypeDirect = "direct"
+	OutboundTypeSocks5 = "socks5"
 )
 
 type Admin struct {
@@ -50,6 +54,38 @@ type HostIP struct {
 	OrderItems []OrderItem `json:"order_items,omitempty"`
 }
 
+type XrayNode struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Name      string    `gorm:"size:128;uniqueIndex;not null" json:"name"`
+	BaseURL   string    `gorm:"size:255;not null" json:"base_url"`
+	Username  string    `gorm:"size:64;not null" json:"username"`
+	Password  string    `gorm:"size:128;not null" json:"password"`
+	Enabled   bool      `gorm:"default:true" json:"enabled"`
+	IsLocal   bool      `gorm:"default:false" json:"is_local"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type SocksOutbound struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	Name         string     `gorm:"size:128" json:"name"`
+	Address      string     `gorm:"size:128;not null;index" json:"address"`
+	Port         int        `gorm:"not null" json:"port"`
+	Username     string     `gorm:"size:128;not null" json:"username"`
+	Password     string     `gorm:"size:128;not null" json:"password"`
+	RouteUser    string     `gorm:"size:128;index" json:"route_user"`
+	ExitIP       string     `gorm:"size:64" json:"exit_ip"`
+	CountryCode  string     `gorm:"size:8;index" json:"country_code"`
+	Enabled      bool       `gorm:"default:true;index" json:"enabled"`
+	ProbeStatus  string     `gorm:"size:32" json:"probe_status"`
+	ProbeError   string     `gorm:"size:255" json:"probe_error"`
+	LastProbedAt *time.Time `json:"last_probed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+
+	OrderItems []OrderItem `json:"order_items,omitempty"`
+}
+
 type Order struct {
 	ID                uint      `gorm:"primaryKey" json:"id"`
 	CustomerID        uint      `gorm:"index;not null" json:"customer_id"`
@@ -70,23 +106,30 @@ type Order struct {
 }
 
 type OrderItem struct {
-	ID       uint  `gorm:"primaryKey" json:"id"`
-	OrderID  uint  `gorm:"index;not null" json:"order_id"`
-	HostIPID *uint `gorm:"index" json:"host_ip_id,omitempty"`
+	ID              uint  `gorm:"primaryKey" json:"id"`
+	OrderID         uint  `gorm:"index;not null" json:"order_id"`
+	HostIPID        *uint `gorm:"index" json:"host_ip_id,omitempty"`
+	SocksOutboundID *uint `gorm:"index" json:"socks_outbound_id,omitempty"`
 
-	IP       string `gorm:"size:64;not null;index" json:"ip"`
-	Port     int    `gorm:"not null;index" json:"port"`
-	Username string `gorm:"size:64;not null;uniqueIndex:idx_order_items_auth" json:"username"`
-	Password string `gorm:"size:64;not null" json:"password"`
-	Managed  bool   `gorm:"default:true" json:"managed"`
-	Status   string `gorm:"size:32;not null;index" json:"status"`
+	IP              string `gorm:"size:64;not null;index" json:"ip"`
+	Port            int    `gorm:"not null;index" json:"port"`
+	Username        string `gorm:"size:64;not null;uniqueIndex:idx_order_items_auth" json:"username"`
+	Password        string `gorm:"size:64;not null" json:"password"`
+	OutboundType    string `gorm:"size:16;not null;default:direct;index" json:"outbound_type"`
+	ForwardAddress  string `gorm:"size:128" json:"forward_address,omitempty"`
+	ForwardPort     int    `json:"forward_port,omitempty"`
+	ForwardUsername string `gorm:"size:128" json:"forward_username,omitempty"`
+	ForwardPassword string `gorm:"size:128" json:"forward_password,omitempty"`
+	Managed         bool   `gorm:"default:true" json:"managed"`
+	Status          string `gorm:"size:32;not null;index" json:"status"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	HostIP    *HostIP        `json:"host_ip,omitempty"`
-	Order     Order          `json:"-"`
-	Resources []XrayResource `json:"resources,omitempty"`
+	HostIP        *HostIP        `json:"host_ip,omitempty"`
+	SocksOutbound *SocksOutbound `json:"socks_outbound,omitempty"`
+	Order         Order          `json:"-"`
+	Resources     []XrayResource `json:"resources,omitempty"`
 }
 
 type XrayResource struct {

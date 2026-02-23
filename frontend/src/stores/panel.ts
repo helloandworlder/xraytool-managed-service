@@ -5,14 +5,22 @@ import type {
   BackupInfo,
   Customer,
   CustomerRuntimeStat,
+  ForwardOutbound,
   HostIP,
   ImportPreviewRow,
   Order,
   OversellRow,
-  TaskLog
+  SocksMigrationPreviewResult,
+  TaskLog,
+  XrayNode
 } from '../lib/types'
 
 type BatchResult = { id: number; success: boolean; error?: string }
+
+type OrderSubmitResult = {
+  order?: Order
+  warnings: string[]
+}
 
 export const usePanelStore = defineStore('panel', {
   state: () => ({
@@ -35,7 +43,10 @@ export const usePanelStore = defineStore('panel', {
     backups: [] as BackupInfo[],
     runtimeStats: [] as CustomerRuntimeStat[],
 
-    importPreview: [] as ImportPreviewRow[]
+    importPreview: [] as ImportPreviewRow[],
+    nodes: [] as XrayNode[],
+    migrationPreview: null as SocksMigrationPreviewResult | null,
+    forwardOutbounds: [] as ForwardOutbound[]
   }),
   getters: {
     activeOrderCount: (state) => state.orders.filter((o) => o.status === 'active').length,
@@ -62,6 +73,8 @@ export const usePanelStore = defineStore('panel', {
         this.loadHostIPs(),
         this.loadOversell(this.oversellCustomerID),
         this.loadOrders(),
+        this.loadNodes(),
+        this.loadForwardOutbounds(),
         this.loadSettings(),
         this.loadTaskLogs(),
         this.loadBackups(),
@@ -92,6 +105,79 @@ export const usePanelStore = defineStore('panel', {
     async loadHostIPs() {
       const res = await http.get('/api/host-ips')
       this.hostIPs = res.data
+    },
+    async loadNodes() {
+      const res = await http.get('/api/nodes')
+      this.nodes = res.data
+    },
+    async createNode(payload: { name: string; base_url: string; username: string; password: string; enabled: boolean; is_local: boolean }) {
+      await http.post('/api/nodes', payload)
+      await this.loadNodes()
+      this.setNotice('节点已创建')
+    },
+    async updateNode(id: number, payload: { name: string; base_url: string; username: string; password: string; enabled: boolean; is_local: boolean }) {
+      await http.put(`/api/nodes/${id}`, payload)
+      await this.loadNodes()
+      this.setNotice('节点已更新')
+    },
+    async deleteNode(id: number) {
+      await http.delete(`/api/nodes/${id}`)
+      await this.loadNodes()
+      this.setNotice('节点已删除')
+    },
+    async loadForwardOutbounds() {
+      const res = await http.get('/api/forward-outbounds')
+      this.forwardOutbounds = res.data || []
+    },
+    async createForwardOutbound(payload: {
+      name: string
+      address: string
+      port: number
+      username: string
+      password: string
+      route_user?: string
+      enabled: boolean
+    }) {
+      await http.post('/api/forward-outbounds', payload)
+      await this.loadForwardOutbounds()
+      this.setNotice('转发出口已创建')
+    },
+    async updateForwardOutbound(id: number, payload: {
+      name: string
+      address: string
+      port: number
+      username: string
+      password: string
+      route_user?: string
+      enabled: boolean
+    }) {
+      await http.put(`/api/forward-outbounds/${id}`, payload)
+      await this.loadForwardOutbounds()
+      this.setNotice('转发出口已更新')
+    },
+    async toggleForwardOutbound(id: number, enabled: boolean) {
+      await http.post(`/api/forward-outbounds/${id}/toggle`, { enabled })
+      await this.loadForwardOutbounds()
+    },
+    async deleteForwardOutbound(id: number) {
+      await http.delete(`/api/forward-outbounds/${id}`)
+      await this.loadForwardOutbounds()
+      this.setNotice('转发出口已删除')
+    },
+    async importForwardOutbounds(lines: string) {
+      const res = await http.post('/api/forward-outbounds/import', { lines })
+      await this.loadForwardOutbounds()
+      return res.data as Array<Record<string, any>>
+    },
+    async probeForwardOutbound(id: number) {
+      const res = await http.post(`/api/forward-outbounds/${id}/probe`, {})
+      await this.loadForwardOutbounds()
+      return res.data
+    },
+    async probeAllForwardOutbounds(enabledOnly = true) {
+      const res = await http.post('/api/forward-outbounds/probe-all', { enabled_only: enabledOnly })
+      this.forwardOutbounds = res.data || []
+      return this.forwardOutbounds
     },
     async scanHostIPs() {
       const res = await http.post('/api/host-ips/scan')
@@ -130,7 +216,7 @@ export const usePanelStore = defineStore('panel', {
       this.selectedOrder = res.data
     },
     async createOrder(payload: Record<string, unknown>) {
-      await http.post('/api/orders', payload)
+		const res = await http.post('/api/orders', payload)
       await this.loadOrders()
       await this.loadOversell(this.oversellCustomerID)
       const customerID = Number(payload.customer_id || 0)
@@ -138,6 +224,10 @@ export const usePanelStore = defineStore('panel', {
         await this.loadAllocationPreview(customerID)
       }
       this.setNotice('订单创建完成并已同步')
+		const body = res.data || {}
+		const warnings = Array.isArray(body.warnings) ? body.warnings.map((v: unknown) => String(v)) : []
+		const order = body.order || body
+		return { order, warnings } as OrderSubmitResult
     },
     async updateOrder(orderID: number, payload: Record<string, unknown>) {
       const res = await http.put(`/api/orders/${orderID}`, payload)
@@ -148,7 +238,10 @@ export const usePanelStore = defineStore('panel', {
         await this.loadAllocationPreview(customerID, orderID)
       }
       this.setNotice('订单已更新')
-      return res.data as Order
+		const body = res.data || {}
+		const warnings = Array.isArray(body.warnings) ? body.warnings.map((v: unknown) => String(v)) : []
+		const order = (body.order || body) as Order
+		return { order, warnings } as OrderSubmitResult
     },
     async deactivateOrder(orderID: number) {
       await http.post(`/api/orders/${orderID}/deactivate`, {})
@@ -272,6 +365,11 @@ export const usePanelStore = defineStore('panel', {
     async previewImport(lines: string) {
       const res = await http.post('/api/orders/import/preview', { lines })
       this.importPreview = res.data
+    },
+    async previewSocksMigration(lines: string) {
+      const res = await http.post('/api/migrations/socks5/preview', { lines })
+      this.migrationPreview = res.data
+      return this.migrationPreview
     },
     async confirmImport(payload: {
       customer_id: number

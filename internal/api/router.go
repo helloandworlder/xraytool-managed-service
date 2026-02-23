@@ -25,6 +25,8 @@ type API struct {
 	db      *gorm.DB
 	store   *store.Store
 	orders  *service.OrderService
+	nodes   *service.NodeService
+	forward *service.ForwardOutboundService
 	hostIPs *service.HostIPService
 	backups *service.BackupService
 	bark    *service.BarkService
@@ -33,8 +35,8 @@ type API struct {
 	logger  *zap.Logger
 }
 
-func New(db *gorm.DB, st *store.Store, orders *service.OrderService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
-	return &API{db: db, store: st, orders: orders, hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
+func New(db *gorm.DB, st *store.Store, orders *service.OrderService, nodes *service.NodeService, forward *service.ForwardOutboundService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
+	return &API{db: db, store: st, orders: orders, nodes: nodes, forward: forward, hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
 }
 
 func (a *API) Router() *gin.Engine {
@@ -73,6 +75,20 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/host-ips/probe", a.probeHostPort)
 	secure.POST("/host-ips/:id/toggle", a.toggleHostIP)
 	secure.GET("/oversell", a.oversellView)
+
+	secure.GET("/nodes", a.listNodes)
+	secure.POST("/nodes", a.createNode)
+	secure.PUT("/nodes/:id", a.updateNode)
+	secure.DELETE("/nodes/:id", a.deleteNode)
+	secure.POST("/migrations/socks5/preview", a.previewSocksMigration)
+	secure.GET("/forward-outbounds", a.listForwardOutbounds)
+	secure.POST("/forward-outbounds", a.createForwardOutbound)
+	secure.PUT("/forward-outbounds/:id", a.updateForwardOutbound)
+	secure.DELETE("/forward-outbounds/:id", a.deleteForwardOutbound)
+	secure.POST("/forward-outbounds/:id/toggle", a.toggleForwardOutbound)
+	secure.POST("/forward-outbounds/import", a.importForwardOutbounds)
+	secure.POST("/forward-outbounds/:id/probe", a.probeForwardOutbound)
+	secure.POST("/forward-outbounds/probe-all", a.probeAllForwardOutbounds)
 
 	secure.GET("/orders", a.listOrders)
 	secure.GET("/orders/allocation/preview", a.orderAllocationPreview)
@@ -277,6 +293,196 @@ func (a *API) deleteCustomer(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (a *API) listNodes(c *gin.Context) {
+	rows, err := a.nodes.ListNodes()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) createNode(c *gin.Context) {
+	var req service.NodeInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.nodes.CreateNode(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) updateNode(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req service.NodeInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.nodes.UpdateNode(id, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) deleteNode(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.nodes.DeleteNode(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) previewSocksMigration(c *gin.Context) {
+	var req struct {
+		Lines string `json:"lines"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	result, err := a.nodes.PreviewSocksMigration(c.Request.Context(), req.Lines)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (a *API) listForwardOutbounds(c *gin.Context) {
+	rows, err := a.forward.List()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) createForwardOutbound(c *gin.Context) {
+	var req service.ForwardOutboundInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.forward.Create(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) updateForwardOutbound(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req service.ForwardOutboundInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.forward.Update(id, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) toggleForwardOutbound(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.forward.Toggle(id, req.Enabled); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) deleteForwardOutbound(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.forward.Delete(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) importForwardOutbounds(c *gin.Context) {
+	var req struct {
+		Lines string `json:"lines"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	rows, err := a.forward.ImportLines(req.Lines)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) probeForwardOutbound(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	row, err := a.forward.Probe(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) probeAllForwardOutbounds(c *gin.Context) {
+	var req struct {
+		EnabledOnly *bool `json:"enabled_only"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	enabledOnly := true
+	if req.EnabledOnly != nil {
+		enabledOnly = *req.EnabledOnly
+	}
+	rows, err := a.forward.ProbeAll(enabledOnly)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
 func (a *API) listHostIPs(c *gin.Context) {
 	rows, err := a.hostIPs.List()
 	if err != nil {
@@ -477,27 +683,29 @@ func (a *API) getOrder(c *gin.Context) {
 
 func (a *API) createOrder(c *gin.Context) {
 	var req struct {
-		CustomerID  uint   `json:"customer_id"`
-		Name        string `json:"name"`
-		Quantity    int    `json:"quantity"`
-		DurationDay int    `json:"duration_day"`
-		ExpiresAt   string `json:"expires_at"`
-		Mode        string `json:"mode"`
-		Port        int    `json:"port"`
-		ManualIPIDs []uint `json:"manual_ip_ids"`
+		CustomerID         uint   `json:"customer_id"`
+		Name               string `json:"name"`
+		Quantity           int    `json:"quantity"`
+		DurationDay        int    `json:"duration_day"`
+		ExpiresAt          string `json:"expires_at"`
+		Mode               string `json:"mode"`
+		Port               int    `json:"port"`
+		ManualIPIDs        []uint `json:"manual_ip_ids"`
+		ForwardOutboundIDs []uint `json:"forward_outbound_ids"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	input := service.CreateOrderInput{
-		CustomerID:  req.CustomerID,
-		Name:        req.Name,
-		Quantity:    req.Quantity,
-		DurationDay: req.DurationDay,
-		Mode:        req.Mode,
-		Port:        req.Port,
-		ManualIPIDs: req.ManualIPIDs,
+		CustomerID:         req.CustomerID,
+		Name:               req.Name,
+		Quantity:           req.Quantity,
+		DurationDay:        req.DurationDay,
+		Mode:               req.Mode,
+		Port:               req.Port,
+		ManualIPIDs:        req.ManualIPIDs,
+		ForwardOutboundIDs: req.ForwardOutboundIDs,
 	}
 	if strings.TrimSpace(req.ExpiresAt) != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -507,12 +715,21 @@ func (a *API) createOrder(c *gin.Context) {
 		}
 		input.ExpiresAt = t
 	}
+	warnings := []string{}
+	if strings.EqualFold(strings.TrimSpace(req.Mode), model.OrderModeForward) {
+		warnRows, warnErr := a.orders.ForwardOutboundReuseWarnings(req.CustomerID, 0, req.ForwardOutboundIDs)
+		if warnErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": warnErr.Error()})
+			return
+		}
+		warnings = warnRows
+	}
 	order, err := a.orders.CreateOrder(c.Request.Context(), input)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, order)
+	c.JSON(http.StatusOK, gin.H{"order": order, "warnings": warnings})
 }
 
 func (a *API) updateOrder(c *gin.Context) {
@@ -521,21 +738,23 @@ func (a *API) updateOrder(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name        string `json:"name"`
-		Quantity    int    `json:"quantity"`
-		Port        int    `json:"port"`
-		ExpiresAt   string `json:"expires_at"`
-		ManualIPIDs []uint `json:"manual_ip_ids"`
+		Name               string `json:"name"`
+		Quantity           int    `json:"quantity"`
+		Port               int    `json:"port"`
+		ExpiresAt          string `json:"expires_at"`
+		ManualIPIDs        []uint `json:"manual_ip_ids"`
+		ForwardOutboundIDs []uint `json:"forward_outbound_ids"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	input := service.UpdateOrderInput{
-		Name:        req.Name,
-		Quantity:    req.Quantity,
-		Port:        req.Port,
-		ManualIPIDs: req.ManualIPIDs,
+		Name:               req.Name,
+		Quantity:           req.Quantity,
+		Port:               req.Port,
+		ManualIPIDs:        req.ManualIPIDs,
+		ForwardOutboundIDs: req.ForwardOutboundIDs,
 	}
 	if strings.TrimSpace(req.ExpiresAt) != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -545,12 +764,25 @@ func (a *API) updateOrder(c *gin.Context) {
 		}
 		input.ExpiresAt = t
 	}
+	warnings := []string{}
+	current, err := a.orders.GetOrder(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(current.Mode), model.OrderModeForward) && len(req.ForwardOutboundIDs) > 0 {
+		warnings, err = a.orders.ForwardOutboundReuseWarnings(current.CustomerID, id, req.ForwardOutboundIDs)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	order, err := a.orders.UpdateOrder(c.Request.Context(), id, input)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, order)
+	c.JSON(http.StatusOK, gin.H{"order": order, "warnings": warnings})
 }
 
 func (a *API) deactivateOrder(c *gin.Context) {

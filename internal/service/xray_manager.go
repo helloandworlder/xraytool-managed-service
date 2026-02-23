@@ -231,7 +231,7 @@ func (m *XrayManager) ApplyOrderItem(ctx context.Context, item model.OrderItem, 
 	handlerClient := handlercmd.NewHandlerServiceClient(conn)
 	routerClient := routercmd.NewRoutingServiceClient(conn)
 
-	if err := m.addOutbound(ctx, handlerClient, resource.OutboundTag, item.IP); err != nil {
+	if err := m.addOutbound(ctx, handlerClient, resource.OutboundTag, item); err != nil {
 		return resource, err
 	}
 	if err := m.addRule(ctx, routerClient, resource.RuleTag, resource.InboundTag, item.Username, resource.OutboundTag); err != nil {
@@ -278,14 +278,35 @@ func (m *XrayManager) RebuildInboundForPort(ctx context.Context, port int, accou
 	return m.addInbound(ctx, handlerClient, tag, port, accounts)
 }
 
-func (m *XrayManager) addOutbound(ctx context.Context, client handlercmd.HandlerServiceClient, tag, sendThroughIP string) error {
-	obj := map[string]interface{}{
-		"outbounds": []map[string]interface{}{{
-			"tag":         tag,
-			"protocol":    "freedom",
-			"sendThrough": sendThroughIP,
-			"settings":    map[string]interface{}{},
-		}},
+func (m *XrayManager) addOutbound(ctx context.Context, client handlercmd.HandlerServiceClient, tag string, item model.OrderItem) error {
+	obj := map[string]interface{}{}
+	if strings.EqualFold(strings.TrimSpace(item.OutboundType), model.OutboundTypeSocks5) && strings.TrimSpace(item.ForwardAddress) != "" && item.ForwardPort > 0 {
+		server := map[string]interface{}{
+			"address": item.ForwardAddress,
+			"port":    item.ForwardPort,
+		}
+		if strings.TrimSpace(item.ForwardUsername) != "" || strings.TrimSpace(item.ForwardPassword) != "" {
+			server["users"] = []map[string]string{{
+				"user": item.ForwardUsername,
+				"pass": item.ForwardPassword,
+			}}
+		}
+		obj = map[string]interface{}{
+			"outbounds": []map[string]interface{}{{
+				"tag":      tag,
+				"protocol": "socks",
+				"settings": map[string]interface{}{"servers": []map[string]interface{}{server}},
+			}},
+		}
+	} else {
+		obj = map[string]interface{}{
+			"outbounds": []map[string]interface{}{{
+				"tag":         tag,
+				"protocol":    "freedom",
+				"sendThrough": item.IP,
+				"settings":    map[string]interface{}{},
+			}},
+		}
 	}
 	outbound, err := decodeOutbound(obj)
 	if err != nil {
@@ -413,18 +434,23 @@ func isNotFoundErr(err error) bool {
 
 func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 	type activeRow struct {
-		ItemID   uint
-		IP       string
-		Port     int
-		Username string
-		Password string
-		Managed  bool
+		ItemID          uint
+		IP              string
+		Port            int
+		Username        string
+		Password        string
+		Managed         bool
+		OutboundType    string
+		ForwardAddress  string
+		ForwardPort     int
+		ForwardUsername string
+		ForwardPassword string
 	}
 
 	var rows []activeRow
 	err := m.db.WithContext(ctx).
 		Table("order_items oi").
-		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.managed").
+		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.managed, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password").
 		Joins("join orders o on o.id = oi.order_id").
 		Where("oi.status = ? and o.status = ? and o.expires_at > ?", model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
 		Scan(&rows).Error
@@ -434,11 +460,16 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 
 	accountsByPort := map[int]map[string]string{}
 	type managedItem struct {
-		itemID   uint
-		ip       string
-		port     int
-		user     string
-		password string
+		itemID          uint
+		ip              string
+		port            int
+		user            string
+		password        string
+		outboundType    string
+		forwardAddress  string
+		forwardPort     int
+		forwardUsername string
+		forwardPassword string
 	}
 	items := make([]managedItem, 0)
 
@@ -450,7 +481,18 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			accountsByPort[row.Port] = map[string]string{}
 		}
 		accountsByPort[row.Port][row.Username] = row.Password
-		items = append(items, managedItem{itemID: row.ItemID, ip: row.IP, port: row.Port, user: row.Username, password: row.Password})
+		items = append(items, managedItem{
+			itemID:          row.ItemID,
+			ip:              row.IP,
+			port:            row.Port,
+			user:            row.Username,
+			password:        row.Password,
+			outboundType:    row.OutboundType,
+			forwardAddress:  row.ForwardAddress,
+			forwardPort:     row.ForwardPort,
+			forwardUsername: row.ForwardUsername,
+			forwardPassword: row.ForwardPassword,
+		})
 	}
 
 	inbounds := []map[string]interface{}{
@@ -499,12 +541,30 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		{"type": "field", "inboundTag": []string{"api-in"}, "outboundTag": "api"},
 	}
 	for _, item := range items {
-		outbounds = append(outbounds, map[string]interface{}{
-			"tag":         OutboundTag(item.itemID),
-			"protocol":    "freedom",
-			"sendThrough": item.ip,
-			"settings":    map[string]interface{}{},
-		})
+		if strings.EqualFold(strings.TrimSpace(item.outboundType), model.OutboundTypeSocks5) && strings.TrimSpace(item.forwardAddress) != "" && item.forwardPort > 0 {
+			server := map[string]interface{}{
+				"address": item.forwardAddress,
+				"port":    item.forwardPort,
+			}
+			if strings.TrimSpace(item.forwardUsername) != "" || strings.TrimSpace(item.forwardPassword) != "" {
+				server["users"] = []map[string]string{{
+					"user": item.forwardUsername,
+					"pass": item.forwardPassword,
+				}}
+			}
+			outbounds = append(outbounds, map[string]interface{}{
+				"tag":      OutboundTag(item.itemID),
+				"protocol": "socks",
+				"settings": map[string]interface{}{"servers": []map[string]interface{}{server}},
+			})
+		} else {
+			outbounds = append(outbounds, map[string]interface{}{
+				"tag":         OutboundTag(item.itemID),
+				"protocol":    "freedom",
+				"sendThrough": item.ip,
+				"settings":    map[string]interface{}{},
+			})
+		}
 		rules = append(rules, map[string]interface{}{
 			"type":        "field",
 			"ruleTag":     RuleTag(item.itemID),
