@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ type API struct {
 	db      *gorm.DB
 	store   *store.Store
 	orders  *service.OrderService
+	singbox *service.SingboxImportService
 	nodes   *service.NodeService
 	forward *service.ForwardOutboundService
 	hostIPs *service.HostIPService
@@ -35,8 +37,8 @@ type API struct {
 	logger  *zap.Logger
 }
 
-func New(db *gorm.DB, st *store.Store, orders *service.OrderService, nodes *service.NodeService, forward *service.ForwardOutboundService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
-	return &API{db: db, store: st, orders: orders, nodes: nodes, forward: forward, hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
+func New(db *gorm.DB, st *store.Store, orders *service.OrderService, singbox *service.SingboxImportService, nodes *service.NodeService, forward *service.ForwardOutboundService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
+	return &API{db: db, store: st, orders: orders, singbox: singbox, nodes: nodes, forward: forward, hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
 }
 
 func (a *API) Router() *gin.Engine {
@@ -80,6 +82,8 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/nodes", a.createNode)
 	secure.PUT("/nodes/:id", a.updateNode)
 	secure.DELETE("/nodes/:id", a.deleteNode)
+	secure.POST("/migrations/singbox/scan", a.scanSingboxConfigs)
+	secure.POST("/migrations/singbox/preview", a.previewSingboxImport)
 	secure.POST("/migrations/socks5/preview", a.previewSocksMigration)
 	secure.GET("/forward-outbounds", a.listForwardOutbounds)
 	secure.POST("/forward-outbounds", a.createForwardOutbound)
@@ -89,8 +93,17 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/forward-outbounds/import", a.importForwardOutbounds)
 	secure.POST("/forward-outbounds/:id/probe", a.probeForwardOutbound)
 	secure.POST("/forward-outbounds/probe-all", a.probeAllForwardOutbounds)
+	secure.GET("/orders/forward-outbounds", a.listForwardOutbounds)
+	secure.POST("/orders/forward-outbounds", a.createForwardOutbound)
+	secure.PUT("/orders/forward-outbounds/:id", a.updateForwardOutbound)
+	secure.DELETE("/orders/forward-outbounds/:id", a.deleteForwardOutbound)
+	secure.POST("/orders/forward-outbounds/:id/toggle", a.toggleForwardOutbound)
+	secure.POST("/orders/forward-outbounds/import", a.importForwardOutbounds)
+	secure.POST("/orders/forward-outbounds/:id/probe", a.probeForwardOutbound)
+	secure.POST("/orders/forward-outbounds/probe-all", a.probeAllForwardOutbounds)
 
 	secure.GET("/orders", a.listOrders)
+	secure.POST("/orders/forward/reuse-warnings", a.forwardReuseWarnings)
 	secure.GET("/orders/allocation/preview", a.orderAllocationPreview)
 	secure.GET("/orders/:id", a.getOrder)
 	secure.POST("/orders", a.createOrder)
@@ -346,6 +359,41 @@ func (a *API) deleteNode(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (a *API) scanSingboxConfigs(c *gin.Context) {
+	if a.singbox == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "sing-box import service unavailable"})
+		return
+	}
+	result, err := a.singbox.Scan()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (a *API) previewSingboxImport(c *gin.Context) {
+	if a.singbox == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "sing-box import service unavailable"})
+		return
+	}
+	var req struct {
+		Files []string `json:"files"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	rows, err := a.singbox.Preview(req.Files)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
 func (a *API) previewSocksMigration(c *gin.Context) {
 	var req struct {
 		Lines string `json:"lines"`
@@ -481,6 +529,24 @@ func (a *API) probeAllForwardOutbounds(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) forwardReuseWarnings(c *gin.Context) {
+	var req struct {
+		CustomerID         uint   `json:"customer_id"`
+		ForwardOutboundIDs []uint `json:"forward_outbound_ids"`
+		ExcludeOrderID     uint   `json:"exclude_order_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	warnings, err := a.orders.ForwardOutboundReuseWarnings(req.CustomerID, req.ExcludeOrderID, req.ForwardOutboundIDs)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"warnings": warnings})
 }
 
 func (a *API) listHostIPs(c *gin.Context) {
@@ -1001,6 +1067,15 @@ func (a *API) confirmImport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	customerID := req.CustomerID
+	if customerID == 0 {
+		id, err := a.ensureUnassignedCustomer()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		customerID = id
+	}
 	var exp time.Time
 	if req.ExpiresAt != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -1008,12 +1083,45 @@ func (a *API) confirmImport(c *gin.Context) {
 			exp = t
 		}
 	}
-	order, err := a.orders.ImportOrder(c.Request.Context(), req.CustomerID, req.OrderName, exp, req.Rows)
+	order, err := a.orders.ImportOrder(c.Request.Context(), customerID, req.OrderName, exp, req.Rows)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, order)
+}
+
+func (a *API) ensureUnassignedCustomer() (uint, error) {
+	const customerName = "未分配客户"
+	const customerCode = "UNASSIGNED"
+
+	row := model.Customer{}
+	err := a.db.First(&row, "name = ?", customerName).Error
+	if err == nil {
+		if row.Status != model.OrderStatusActive {
+			_ = a.db.Model(&model.Customer{}).Where("id = ?", row.ID).Update("status", model.OrderStatusActive).Error
+		}
+		return row.ID, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+
+	create := model.Customer{
+		Name:    customerName,
+		Code:    customerCode,
+		Contact: "",
+		Notes:   "系统自动创建: 导入未指定客户",
+		Status:  model.OrderStatusActive,
+	}
+	if createErr := a.db.Create(&create).Error; createErr == nil {
+		return create.ID, nil
+	}
+
+	if err := a.db.First(&row, "name = ?", customerName).Error; err != nil {
+		return 0, err
+	}
+	return row.ID, nil
 }
 
 func (a *API) getSettings(c *gin.Context) {

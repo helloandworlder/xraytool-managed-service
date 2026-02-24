@@ -84,6 +84,7 @@ export interface CustomerRuntimeStat {
 
 export interface ImportPreviewRow {
   raw: string
+  source_file?: string
   ip: string
   port: number
   username: string
@@ -91,6 +92,19 @@ export interface ImportPreviewRow {
   is_local_ip: boolean
   port_occupied: boolean
   error?: string
+}
+
+export interface SingboxScanFile {
+  path: string
+  entry_count: number
+  selectable: boolean
+  error?: string
+}
+
+export interface SingboxScanResult {
+  files: SingboxScanFile[]
+  total_files: number
+  total_entries: number
 }
 
 export interface XrayNode {

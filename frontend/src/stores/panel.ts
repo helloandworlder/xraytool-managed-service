@@ -10,6 +10,7 @@ import type {
   ImportPreviewRow,
   Order,
   OversellRow,
+  SingboxScanResult,
   SocksMigrationPreviewResult,
   TaskLog,
   XrayNode
@@ -44,6 +45,7 @@ export const usePanelStore = defineStore('panel', {
     runtimeStats: [] as CustomerRuntimeStat[],
 
     importPreview: [] as ImportPreviewRow[],
+    singboxScan: null as SingboxScanResult | null,
     nodes: [] as XrayNode[],
     migrationPreview: null as SocksMigrationPreviewResult | null,
     forwardOutbounds: [] as ForwardOutbound[]
@@ -126,7 +128,7 @@ export const usePanelStore = defineStore('panel', {
       this.setNotice('节点已删除')
     },
     async loadForwardOutbounds() {
-      const res = await http.get('/api/forward-outbounds')
+      const res = await http.get('/api/orders/forward-outbounds')
       this.forwardOutbounds = res.data || []
     },
     async createForwardOutbound(payload: {
@@ -138,7 +140,7 @@ export const usePanelStore = defineStore('panel', {
       route_user?: string
       enabled: boolean
     }) {
-      await http.post('/api/forward-outbounds', payload)
+      await http.post('/api/orders/forward-outbounds', payload)
       await this.loadForwardOutbounds()
       this.setNotice('转发出口已创建')
     },
@@ -151,33 +153,41 @@ export const usePanelStore = defineStore('panel', {
       route_user?: string
       enabled: boolean
     }) {
-      await http.put(`/api/forward-outbounds/${id}`, payload)
+      await http.put(`/api/orders/forward-outbounds/${id}`, payload)
       await this.loadForwardOutbounds()
       this.setNotice('转发出口已更新')
     },
     async toggleForwardOutbound(id: number, enabled: boolean) {
-      await http.post(`/api/forward-outbounds/${id}/toggle`, { enabled })
+      await http.post(`/api/orders/forward-outbounds/${id}/toggle`, { enabled })
       await this.loadForwardOutbounds()
     },
     async deleteForwardOutbound(id: number) {
-      await http.delete(`/api/forward-outbounds/${id}`)
+      await http.delete(`/api/orders/forward-outbounds/${id}`)
       await this.loadForwardOutbounds()
       this.setNotice('转发出口已删除')
     },
     async importForwardOutbounds(lines: string) {
-      const res = await http.post('/api/forward-outbounds/import', { lines })
+      const res = await http.post('/api/orders/forward-outbounds/import', { lines })
       await this.loadForwardOutbounds()
       return res.data as Array<Record<string, any>>
     },
     async probeForwardOutbound(id: number) {
-      const res = await http.post(`/api/forward-outbounds/${id}/probe`, {})
+      const res = await http.post(`/api/orders/forward-outbounds/${id}/probe`, {})
       await this.loadForwardOutbounds()
       return res.data
     },
     async probeAllForwardOutbounds(enabledOnly = true) {
-      const res = await http.post('/api/forward-outbounds/probe-all', { enabled_only: enabledOnly })
+      const res = await http.post('/api/orders/forward-outbounds/probe-all', { enabled_only: enabledOnly })
       this.forwardOutbounds = res.data || []
       return this.forwardOutbounds
+    },
+    async previewForwardReuseWarnings(payload: { customer_id: number; forward_outbound_ids: number[]; exclude_order_id?: number }) {
+      if (!payload.customer_id || !payload.forward_outbound_ids || payload.forward_outbound_ids.length === 0) {
+        return [] as string[]
+      }
+      const res = await http.post('/api/orders/forward/reuse-warnings', payload)
+      const warnings = Array.isArray(res.data?.warnings) ? res.data.warnings : []
+      return warnings.map((v: unknown) => String(v))
     },
     async scanHostIPs() {
       const res = await http.post('/api/host-ips/scan')
@@ -365,6 +375,16 @@ export const usePanelStore = defineStore('panel', {
     async previewImport(lines: string) {
       const res = await http.post('/api/orders/import/preview', { lines })
       this.importPreview = res.data
+    },
+    async scanSingboxConfigs() {
+      const res = await http.post('/api/migrations/singbox/scan', {})
+      this.singboxScan = res.data
+      return this.singboxScan
+    },
+    async previewSingboxImport(files: string[]) {
+      const res = await http.post('/api/migrations/singbox/preview', { files })
+      this.importPreview = res.data
+      return this.importPreview
     },
     async previewSocksMigration(lines: string) {
       const res = await http.post('/api/migrations/socks5/preview', { lines })

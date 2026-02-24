@@ -45,6 +45,7 @@ const importForm = reactive({
 	expires_at: '',
 	lines: ''
 })
+const singboxSelectedFiles = ref<string[]>([])
 const nodeForm = reactive({
   name: '',
   base_url: 'http://127.0.0.1:18080',
@@ -63,6 +64,7 @@ const forwardForm = reactive({
   enabled: true
 })
 const forwardImportLines = ref('')
+const forwardManagerOpen = ref(false)
 const forwardEditOpen = ref(false)
 const forwardEditForm = reactive({
   id: 0,
@@ -120,6 +122,8 @@ const batchTestResult = ref<Array<{ id: number; success: boolean; result?: Recor
 const orderDetailOpen = ref(false)
 const orderDetailLoading = ref(false)
 const batchMoreDays = ref(30)
+const createForwardReuseHints = ref<string[]>([])
+const editForwardReuseHints = ref<string[]>([])
 
 const menuItems = [
   { key: 'dashboard', icon: () => h(DashboardOutlined), label: '总览' },
@@ -163,35 +167,12 @@ const manualHostIPOptions = computed(() => {
 })
 
 const enabledForwardOutbounds = computed(() => panel.forwardOutbounds.filter((row) => row.enabled))
-
-function reuseHints(customerID: number, selectedIDs: number[], excludeOrderID = 0): string[] {
-	if (!customerID || selectedIDs.length === 0) return []
-	const selected = new Set(selectedIDs.map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0))
-	if (selected.size === 0) return []
-	const reused = new Set<number>()
-	for (const order of panel.orders) {
-		if (Number(order.customer_id) !== Number(customerID)) continue
-		if (Number(order.id) === Number(excludeOrderID)) continue
-		if (order.status !== 'active') continue
-		if (new Date(order.expires_at).getTime() <= Date.now()) continue
-		for (const item of order.items || []) {
-			const outboundID = Number((item as any).socks_outbound_id || 0)
-			if (selected.has(outboundID)) {
-				reused.add(outboundID)
-			}
-		}
-	}
-	const hints: string[] = []
-	for (const id of reused) {
-		const row = panel.forwardOutbounds.find((v) => Number(v.id) === Number(id))
-		if (!row) continue
-		hints.push(`SOCKS5出口 ${row.address}:${row.port} (${row.route_user || '未设置账号'}) 已在该客户其他活动订单使用`)
-	}
-	return hints
-}
-
-const createForwardReuseHints = computed(() => reuseHints(Number(orderForm.customer_id), orderForm.forward_outbound_ids, 0))
-const editForwardReuseHints = computed(() => reuseHints(Number(orderEditForm.customer_id), orderEditForm.forward_outbound_ids, Number(orderEditForm.id)))
+const selectableSingboxFiles = computed(() => (panel.singboxScan?.files || []).filter((file) => file.selectable).map((file) => file.path))
+const allSingboxSelected = computed(
+	() =>
+		selectableSingboxFiles.value.length > 0 &&
+		selectableSingboxFiles.value.every((path) => singboxSelectedFiles.value.includes(path))
+)
 
 const ordersColumns = [
 	{ title: 'ID', dataIndex: 'id', width: 80 },
@@ -242,6 +223,7 @@ const runtimeColumns = [
 ]
 
 const importColumns = [
+	{ title: '来源文件', dataIndex: 'source_file', key: 'source_file', width: 280 },
   { title: '原始', dataIndex: 'raw', key: 'raw', width: 340 },
   { title: '本机IP', dataIndex: 'is_local_ip', key: 'is_local_ip', width: 90 },
   { title: '端口占用', dataIndex: 'port_occupied', key: 'port_occupied', width: 100 },
@@ -315,12 +297,69 @@ watch(
 	}
 )
 
+watch(
+	() => [orderForm.mode, Number(orderForm.customer_id), orderForm.forward_outbound_ids.slice().sort((a, b) => a - b).join(',')],
+	async ([mode, customerID]) => {
+		if (mode !== 'forward') {
+			createForwardReuseHints.value = []
+			return
+		}
+		if (!customerID || orderForm.forward_outbound_ids.length === 0) {
+			createForwardReuseHints.value = []
+			return
+		}
+		try {
+			createForwardReuseHints.value = await panel.previewForwardReuseWarnings({
+				customer_id: Number(customerID),
+				forward_outbound_ids: orderForm.forward_outbound_ids.map((v) => Number(v))
+			})
+		} catch (err) {
+			panel.setError(err)
+		}
+	}
+)
+
+watch(
+	() => [orderEditOpen.value, orderEditForm.mode, Number(orderEditForm.customer_id), Number(orderEditForm.id), orderEditForm.forward_outbound_ids.slice().sort((a, b) => a - b).join(',')],
+	async ([open, mode, customerID, orderID]) => {
+		if (!open || mode !== 'forward') {
+			editForwardReuseHints.value = []
+			return
+		}
+		if (!customerID || orderEditForm.forward_outbound_ids.length === 0) {
+			editForwardReuseHints.value = []
+			return
+		}
+		try {
+			editForwardReuseHints.value = await panel.previewForwardReuseWarnings({
+				customer_id: Number(customerID),
+				exclude_order_id: Number(orderID || 0),
+				forward_outbound_ids: orderEditForm.forward_outbound_ids.map((v) => Number(v))
+			})
+		} catch (err) {
+			panel.setError(err)
+		}
+	}
+)
+
 function seedDefaultsFromSettings() {
   const p = Number(panel.settings.default_inbound_port || '23457')
   if (Number.isFinite(p) && p > 0) {
     orderForm.port = p
     probeForm.port = p
   }
+	if (!importForm.expires_at) {
+		setImportExpiryDays(15)
+	}
+}
+
+function setImportExpiryDays(days: number) {
+	const value = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString().slice(0, 19)
+	importForm.expires_at = value
+}
+
+function toggleSingboxSelectAll(checked: boolean) {
+	singboxSelectedFiles.value = checked ? [...selectableSingboxFiles.value] : []
 }
 
 function statusColor(status: string) {
@@ -502,6 +541,7 @@ async function createOrder() {
     orderForm.expires_at = ''
     if (orderForm.mode === 'forward') {
       orderForm.forward_outbound_ids = []
+      createForwardReuseHints.value = []
     }
     panel.orderSelection = []
     message.success('订单创建成功')
@@ -531,6 +571,7 @@ function openOrderEdit(row: Order) {
 	orderEditForm.expires_at = row.expires_at ? new Date(row.expires_at).toISOString().slice(0, 19) : ''
 	orderEditForm.manual_ip_ids = []
 	orderEditForm.forward_outbound_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.socks_outbound_id || 0)).filter((v) => v > 0)))
+	editForwardReuseHints.value = []
 	orderEditOpen.value = true
 	void panel.loadAllocationPreview(row.customer_id, row.id)
 }
@@ -747,6 +788,32 @@ async function previewImport() {
   }
 }
 
+async function scanSingboxConfigs() {
+	try {
+		const result = await panel.scanSingboxConfigs()
+		singboxSelectedFiles.value = (result?.files || []).filter((file) => file.selectable).map((file) => file.path)
+		if (!importForm.expires_at) {
+			setImportExpiryDays(15)
+		}
+		message.success(`扫描完成，共 ${result?.total_files || 0} 个文件，提取 ${result?.total_entries || 0} 条`) 
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function previewSelectedSingboxFiles() {
+	if (singboxSelectedFiles.value.length === 0) {
+		message.warning('请先选择至少 1 个配置文件')
+		return
+	}
+	try {
+		await panel.previewSingboxImport(singboxSelectedFiles.value)
+		message.success('sing-box 预检完成')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
 async function previewCrossNodeMigration() {
   try {
     const result = await panel.previewSocksMigration(importForm.lines)
@@ -794,6 +861,11 @@ async function removeNode(id: number) {
   })
 }
 
+function openForwardManager() {
+	forwardManagerOpen.value = true
+	void panel.loadForwardOutbounds()
+}
+
 async function createForwardOutbound() {
 	try {
 		await panel.createForwardOutbound({
@@ -822,7 +894,7 @@ async function importForwardOutbounds() {
 		const rows = await panel.importForwardOutbounds(forwardImportLines.value)
 		const failed = rows.filter((row) => String(row.error || '').trim() !== '').length
 		if (failed > 0) {
-			message.warning(`导入完成，失败 ${failed} 条，请检查格式`) 
+			message.warning(`导入完成，失败 ${failed} 条，请检查格式`)
 		} else {
 			message.success('转发出口导入完成')
 		}
@@ -904,6 +976,9 @@ async function confirmImport() {
       expires_at: importForm.expires_at ? new Date(importForm.expires_at).toISOString() : '',
       rows: panel.importPreview as ImportPreviewRow[]
     })
+		importForm.customer_id = 0
+		importForm.order_name = ''
+		setImportExpiryDays(15)
     importForm.lines = ''
     panel.importPreview = []
     message.success('导入成功')
@@ -1343,6 +1418,11 @@ function downloadTextFile(text: string, filename: string) {
                 </a-select>
               </div>
               <div v-else-if="orderForm.mode === 'forward'" class="mt-2">
+                <a-space class="mb-2" wrap>
+                  <a-button size="small" @click="openForwardManager">管理SOCKS5出口</a-button>
+                  <a-button size="small" @click="probeAllForwardOutbounds">批量探测出口</a-button>
+                  <span class="text-xs text-slate-500">订单内直接选择出口，无需单独创建数量</span>
+                </a-space>
                 <a-select
                   v-model:value="orderForm.forward_outbound_ids"
                   mode="multiple"
@@ -1455,12 +1535,40 @@ function downloadTextFile(text: string, filename: string) {
               <a-col :xs="24" :lg="10">
                 <a-card :bordered="false" title="批量导入已有 Socks5">
                   <a-space direction="vertical" style="width:100%">
+                    <a-alert
+                      type="info"
+                      show-icon
+                      message="一键导入 sing-box"
+                      description="扫描 /etc/sing-box/conf/*.json + /etc/sing-box/*.json，默认导入有效期预设 15 天。"
+                    />
+                    <a-space>
+                      <a-button @click="scanSingboxConfigs">扫描宿主机配置</a-button>
+                      <a-button type="primary" ghost :disabled="singboxSelectedFiles.length === 0" @click="previewSelectedSingboxFiles">预检已选文件</a-button>
+                    </a-space>
+                    <a-checkbox :checked="allSingboxSelected" @change="(e:any)=>toggleSingboxSelectAll(Boolean(e.target?.checked))">全选可导入文件</a-checkbox>
+                    <div class="max-h-52 overflow-auto rounded border border-slate-200 p-2">
+                      <a-checkbox-group v-model:value="singboxSelectedFiles" style="width:100%">
+                        <a-space direction="vertical" style="width:100%">
+                          <a-checkbox v-for="file in panel.singboxScan?.files || []" :key="file.path" :value="file.path" :disabled="!file.selectable">
+                            <span class="font-mono text-xs">{{ file.path }}</span>
+                            <span class="text-xs text-slate-500"> ({{ file.entry_count }} 条)</span>
+                            <span v-if="file.error" class="text-xs text-rose-500"> - {{ file.error }}</span>
+                          </a-checkbox>
+                        </a-space>
+                      </a-checkbox-group>
+                      <div v-if="!(panel.singboxScan?.files || []).length" class="text-xs text-slate-500">尚未扫描配置文件</div>
+                    </div>
                     <a-select v-model:value="importForm.customer_id" style="width:100%" placeholder="选择客户">
-                      <a-select-option :value="0">请选择</a-select-option>
+                      <a-select-option :value="0">暂不配置客户（自动归入未分配客户）</a-select-option>
                       <a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}</a-select-option>
                     </a-select>
                     <a-input v-model:value="importForm.order_name" placeholder="导入订单名" />
                     <a-date-picker v-model:value="importForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" />
+                    <a-space>
+                      <a-button size="small" @click="setImportExpiryDays(15)">15天(预设)</a-button>
+                      <a-button size="small" @click="setImportExpiryDays(30)">30天</a-button>
+                      <a-button size="small" @click="setImportExpiryDays(2)">2天</a-button>
+                    </a-space>
                     <a-textarea v-model:value="importForm.lines" :rows="14" placeholder="每行: ip:port:user:pass" />
                     <a-space>
                       <a-button @click="previewImport">预检</a-button>
@@ -1503,63 +1611,7 @@ function downloadTextFile(text: string, filename: string) {
                   </a-table>
                 </a-card>
 
-                <a-card :bordered="false" title="转发 socks5 出口池" class="mt-3">
-                  <a-row :gutter="8" class="mb-2">
-                    <a-col :span="6"><a-statistic title="出口总数" :value="forwardStats.total" /></a-col>
-                    <a-col :span="6"><a-statistic title="启用中" :value="forwardStats.enabled" /></a-col>
-                    <a-col :span="6"><a-statistic title="探测成功" :value="forwardStats.ok" /></a-col>
-                    <a-col :span="6"><a-statistic title="已含分流账号" :value="forwardStats.autoUser" /></a-col>
-                  </a-row>
-                  <a-space direction="vertical" style="width:100%">
-                    <a-input v-model:value="forwardForm.name" placeholder="备注名(可空)" />
-                    <a-input v-model:value="forwardForm.address" placeholder="出口地址/IP" />
-                    <a-input-number v-model:value="forwardForm.port" :min="1" :max="65535" style="width:100%" />
-                    <a-input v-model:value="forwardForm.username" placeholder="出口用户" />
-                    <a-input-password v-model:value="forwardForm.password" placeholder="出口密码" />
-                    <a-input v-model:value="forwardForm.route_user" placeholder="分流用户(可空, 自动生成 us-xxxxxxxxxx)" />
-                    <a-space>
-                      <a-switch :checked="forwardForm.enabled" @change="(v:boolean)=>forwardForm.enabled=v" />
-                      <span class="text-xs text-slate-500">启用</span>
-                    </a-space>
-                    <a-button type="primary" @click="createForwardOutbound">新增出口</a-button>
-                    <a-textarea v-model:value="forwardImportLines" :rows="5" placeholder="批量导入: ip:port:user:pass[:route_user]" />
-                    <a-space>
-                      <a-button @click="importForwardOutbounds">批量导入</a-button>
-                      <a-button @click="probeAllForwardOutbounds">批量探测出口IP</a-button>
-                    </a-space>
-                  </a-space>
-                  <a-table
-                    class="mt-3"
-                    :columns="forwardOutboundColumns"
-                    :data-source="panel.forwardOutbounds"
-                    size="small"
-                    :pagination="{ pageSize: 6 }"
-                    :row-key="(row:any) => row.id"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'addr'">
-                        <span class="font-mono text-xs">{{ record.address }}:{{ record.port }}</span>
-                      </template>
-                      <template v-else-if="column.key === 'country_code'">
-                        <a-tag>{{ (record.country_code || '--').toUpperCase() }}</a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'probe_status'">
-                        <a-tag :color="record.probe_status === 'ok' ? 'green' : 'orange'">{{ record.probe_status || 'idle' }}</a-tag>
-                        <div v-if="record.probe_error" class="text-[11px] text-rose-500">{{ record.probe_error }}</div>
-                      </template>
-                      <template v-else-if="column.key === 'enabled'">
-                        <a-switch :checked="record.enabled" @change="(checked:boolean)=>panel.toggleForwardOutbound(record.id, checked)" />
-                      </template>
-                      <template v-else-if="column.key === 'action'">
-                        <a-space :size="4">
-                          <a-button size="small" @click="openForwardEdit(record)">编辑</a-button>
-                          <a-button size="small" @click="probeForwardOutbound(record.id)">探测</a-button>
-                          <a-button danger size="small" @click="removeForwardOutbound(record.id)">删除</a-button>
-                        </a-space>
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
+				<a-alert class="mt-3" type="info" show-icon message="SOCKS5 转发出口已并入 订单页（创建订单 -> 转发分流）" />
               </a-col>
               <a-col :xs="24" :lg="14">
                 <a-card :bordered="false" title="导入预检结果">
@@ -1690,6 +1742,69 @@ function downloadTextFile(text: string, filename: string) {
       </a-layout>
     </a-layout>
 
+    <a-drawer v-model:open="forwardManagerOpen" title="SOCKS5 转发出口管理" width="980" :destroy-on-close="false">
+      <a-row :gutter="8" class="mb-2">
+        <a-col :span="6"><a-statistic title="出口总数" :value="forwardStats.total" /></a-col>
+        <a-col :span="6"><a-statistic title="启用中" :value="forwardStats.enabled" /></a-col>
+        <a-col :span="6"><a-statistic title="探测成功" :value="forwardStats.ok" /></a-col>
+        <a-col :span="6"><a-statistic title="已含分流账号" :value="forwardStats.autoUser" /></a-col>
+      </a-row>
+      <a-row :gutter="12">
+        <a-col :xs="24" :lg="10">
+          <a-space direction="vertical" style="width:100%">
+            <a-input v-model:value="forwardForm.name" placeholder="备注名(可空)" />
+            <a-input v-model:value="forwardForm.address" placeholder="出口地址/IP" />
+            <a-input-number v-model:value="forwardForm.port" :min="1" :max="65535" style="width:100%" />
+            <a-input v-model:value="forwardForm.username" placeholder="出口用户" />
+            <a-input-password v-model:value="forwardForm.password" placeholder="出口密码" />
+            <a-input v-model:value="forwardForm.route_user" placeholder="分流用户(可空, 自动生成 us-xxxxxxxxxx)" />
+            <a-space>
+              <a-switch :checked="forwardForm.enabled" @change="(v:boolean)=>forwardForm.enabled=v" />
+              <span class="text-xs text-slate-500">启用</span>
+            </a-space>
+            <a-button type="primary" @click="createForwardOutbound">新增出口</a-button>
+            <a-textarea v-model:value="forwardImportLines" :rows="5" placeholder="批量导入: ip:port:user:pass[:route_user]" />
+            <a-space>
+              <a-button @click="importForwardOutbounds">批量导入</a-button>
+              <a-button @click="probeAllForwardOutbounds">批量探测出口IP</a-button>
+            </a-space>
+          </a-space>
+        </a-col>
+        <a-col :xs="24" :lg="14">
+          <a-table
+            :columns="forwardOutboundColumns"
+            :data-source="panel.forwardOutbounds"
+            size="small"
+            :pagination="{ pageSize: 8 }"
+            :row-key="(row:any) => row.id"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'addr'">
+                <span class="font-mono text-xs">{{ record.address }}:{{ record.port }}</span>
+              </template>
+              <template v-else-if="column.key === 'country_code'">
+                <a-tag>{{ (record.country_code || '--').toUpperCase() }}</a-tag>
+              </template>
+              <template v-else-if="column.key === 'probe_status'">
+                <a-tag :color="record.probe_status === 'ok' ? 'green' : 'orange'">{{ record.probe_status || 'idle' }}</a-tag>
+                <div v-if="record.probe_error" class="text-[11px] text-rose-500">{{ record.probe_error }}</div>
+              </template>
+              <template v-else-if="column.key === 'enabled'">
+                <a-switch :checked="record.enabled" @change="(checked:boolean)=>panel.toggleForwardOutbound(record.id, checked)" />
+              </template>
+              <template v-else-if="column.key === 'action'">
+                <a-space :size="4">
+                  <a-button size="small" @click="openForwardEdit(record)">编辑</a-button>
+                  <a-button size="small" @click="probeForwardOutbound(record.id)">探测</a-button>
+                  <a-button danger size="small" @click="removeForwardOutbound(record.id)">删除</a-button>
+                </a-space>
+              </template>
+            </template>
+          </a-table>
+        </a-col>
+      </a-row>
+    </a-drawer>
+
     <a-modal v-model:open="orderDetailOpen" title="订单详情" width="980px" :footer="null">
       <div v-if="orderDetailLoading" class="py-8 text-center">加载中...</div>
       <div v-else-if="panel.selectedOrder">
@@ -1758,6 +1873,10 @@ function downloadTextFile(text: string, filename: string) {
         <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" /></a-form-item>
         <a-form-item v-if="orderEditForm.mode !== 'forward'" label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
         <a-form-item v-else label="SOCKS5转发出口">
+          <a-space class="mb-2" wrap>
+            <a-button size="small" @click="openForwardManager">管理SOCKS5出口</a-button>
+            <a-button size="small" @click="probeAllForwardOutbounds">批量探测出口</a-button>
+          </a-space>
           <a-select v-model:value="orderEditForm.forward_outbound_ids" mode="multiple" style="width:100%" placeholder="选择SOCKS5出口">
             <a-select-option v-for="row in enabledForwardOutbounds" :key="row.id" :value="row.id">
               {{ row.address }}:{{ row.port }} / {{ row.route_user || '未设置账号' }} / {{ (row.country_code || '--').toUpperCase() }}

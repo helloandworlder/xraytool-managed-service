@@ -86,6 +86,7 @@ type TestOrderStreamEvent struct {
 
 type ImportPreviewRow struct {
 	Raw          string `json:"raw"`
+	SourceFile   string `json:"source_file,omitempty"`
 	IP           string `json:"ip"`
 	Port         int    `json:"port"`
 	Username     string `json:"username"`
@@ -784,6 +785,13 @@ func (s *OrderService) PreviewImport(lines string) ([]ImportPreviewRow, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	return s.applyImportRowValidation(rows)
+}
+
+func (s *OrderService) PreviewImportRows(rows []ImportPreviewRow) ([]ImportPreviewRow, error) {
+	if len(rows) == 0 {
+		return []ImportPreviewRow{}, nil
 	}
 	return s.applyImportRowValidation(rows)
 }
