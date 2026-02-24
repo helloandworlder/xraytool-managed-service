@@ -36,5 +36,20 @@ func Open(path string) (*gorm.DB, error) {
 	); err != nil {
 		return nil, err
 	}
+	if err := migrateOrderItemUsernameIndex(database); err != nil {
+		return nil, err
+	}
 	return database, nil
+}
+
+func migrateOrderItemUsernameIndex(database *gorm.DB) error {
+	migrator := database.Migrator()
+	for _, name := range []string{"idx_order_items_auth", "idx_order_items_username"} {
+		if migrator.HasIndex(&model.OrderItem{}, name) {
+			if err := migrator.DropIndex(&model.OrderItem{}, name); err != nil {
+				return err
+			}
+		}
+	}
+	return database.Exec("CREATE INDEX IF NOT EXISTS idx_order_items_auth ON order_items(username)").Error
 }

@@ -1177,7 +1177,6 @@ func (s *OrderService) applyImportRowValidation(rows []ImportPreviewRow) ([]Impo
 	checked := make([]ImportPreviewRow, len(rows))
 	copy(checked, rows)
 
-	batchCount := map[string]int{}
 	for i := range checked {
 		checked[i].IP = strings.TrimSpace(checked[i].IP)
 		checked[i].Username = strings.TrimSpace(checked[i].Username)
@@ -1200,52 +1199,6 @@ func (s *OrderService) applyImportRowValidation(rows []ImportPreviewRow) ([]Impo
 		if checked[i].Password == "" {
 			checked[i].Error = "password required"
 			continue
-		}
-		batchCount[checked[i].Username]++
-	}
-
-	candidateSet := map[string]struct{}{}
-	candidates := make([]string, 0, len(batchCount))
-	for i := range checked {
-		if checked[i].Error != "" {
-			continue
-		}
-		if batchCount[checked[i].Username] > 1 {
-			checked[i].Error = "duplicate username in import list"
-			continue
-		}
-		if _, ok := candidateSet[checked[i].Username]; ok {
-			continue
-		}
-		candidateSet[checked[i].Username] = struct{}{}
-		candidates = append(candidates, checked[i].Username)
-	}
-
-	if len(candidates) == 0 {
-		return checked, nil
-	}
-
-	type usernameRow struct {
-		Username string
-	}
-	existingRows := []usernameRow{}
-	if err := s.db.Table("order_items").
-		Select("username").
-		Where("username in ?", candidates).
-		Scan(&existingRows).Error; err != nil {
-		return nil, err
-	}
-	existing := map[string]struct{}{}
-	for _, row := range existingRows {
-		existing[row.Username] = struct{}{}
-	}
-
-	for i := range checked {
-		if checked[i].Error != "" {
-			continue
-		}
-		if _, ok := existing[checked[i].Username]; ok {
-			checked[i].Error = "username already exists"
 		}
 	}
 

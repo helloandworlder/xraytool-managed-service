@@ -113,7 +113,7 @@ type OrderItem struct {
 
 	IP              string `gorm:"size:64;not null;index" json:"ip"`
 	Port            int    `gorm:"not null;index" json:"port"`
-	Username        string `gorm:"size:64;not null;uniqueIndex:idx_order_items_auth" json:"username"`
+	Username        string `gorm:"size:64;not null;index:idx_order_items_auth" json:"username"`
 	Password        string `gorm:"size:64;not null" json:"password"`
 	OutboundType    string `gorm:"size:16;not null;default:direct;index" json:"outbound_type"`
 	ForwardAddress  string `gorm:"size:128" json:"forward_address,omitempty"`
