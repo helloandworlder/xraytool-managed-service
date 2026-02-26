@@ -1112,22 +1112,23 @@ async function submitGroupSocksUpdate() {
 	}
 }
 
-function groupTargetQuantity(): number {
-	const id = Number(groupTargetOrderID.value)
-	if (!id) return 1
-	const row = panel.orders.find((v) => Number(v.id) === id)
-	const q = Number(row?.quantity || 0)
-	if (Number.isFinite(q) && q > 0) return q
-	return 1
+async function downloadGroupSocksTemplate() {
+	if (!groupTargetOrderID.value) {
+		message.warning('请先选择组头订单')
+		return
+	}
+	try {
+		const res = await panel.downloadOrderGroupSocks5Template(groupTargetOrderID.value)
+		const header = String(res.headers?.['content-disposition'] || '')
+		const match = header.match(/filename="?([^";]+)"?/i)
+		downloadBlobFile(res.data, match?.[1] || `group-${groupTargetOrderID.value}-socks5-template.xlsx`)
+	} catch (err) {
+		panel.setError(err)
+	}
 }
 
-function downloadGroupSocksTemplate() {
-	const count = groupTargetQuantity()
-	const rows: string[] = []
-	for (let i = 1; i <= count; i += 1) {
-		rows.push(`127.0.0.${i}:1080:user${String(i).padStart(3, '0')}:pass${String(i).padStart(3, '0')}`)
-	}
-	downloadTextFile(rows.join('\n'), `group-socks5-template-${Date.now()}.txt`)
+function downloadDedicatedCreateSample() {
+	downloadTextFile('1.1.1.1:1080:user001:pass001', `dedicated-socks5-sample-${Date.now()}.txt`)
 }
 
 function openGroupCredModal(orderID: number) {
@@ -1158,13 +1159,52 @@ async function submitGroupCredentialUpdate() {
 	}
 }
 
-function downloadGroupCredentialTemplate() {
-	const count = groupTargetQuantity()
-	const rows: string[] = []
-	for (let i = 1; i <= count; i += 1) {
-		rows.push(`user${String(i).padStart(3, '0')}:pass${String(i).padStart(3, '0')}:`) 
+async function downloadGroupCredentialTemplate() {
+	if (!groupTargetOrderID.value) {
+		message.warning('请先选择组头订单')
+		return
 	}
-	downloadTextFile(rows.join('\n'), `group-credentials-template-${Date.now()}.txt`)
+	try {
+		const res = await panel.downloadOrderGroupCredentialsTemplate(groupTargetOrderID.value)
+		const header = String(res.headers?.['content-disposition'] || '')
+		const match = header.match(/filename="?([^";]+)"?/i)
+		downloadBlobFile(res.data, match?.[1] || `group-${groupTargetOrderID.value}-credentials-template.xlsx`)
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function beforeUploadGroupSocksXLSX(file: File) {
+	if (!groupTargetOrderID.value) {
+		message.warning('请先选择组头订单')
+		return false
+	}
+	try {
+		await panel.updateOrderGroupSocks5XLSX(groupTargetOrderID.value, file)
+		groupSocksModalOpen.value = false
+		groupSocksLines.value = ''
+		message.success('已通过 xlsx 回填并更新组内 Socks5')
+	} catch (err) {
+		panel.setError(err)
+	}
+	return false
+}
+
+async function beforeUploadGroupCredXLSX(file: File) {
+	if (!groupTargetOrderID.value) {
+		message.warning('请先选择组头订单')
+		return false
+	}
+	try {
+		await panel.updateOrderGroupCredentialsXLSX(groupTargetOrderID.value, file)
+		groupCredModalOpen.value = false
+		groupCredLines.value = ''
+		groupCredRegenerate.value = false
+		message.success('已通过 xlsx 回填并更新组内凭据')
+	} catch (err) {
+		panel.setError(err)
+	}
+	return false
 }
 
 async function createForwardOutbound() {
@@ -1435,6 +1475,11 @@ function restoreBackup(name: string) {
 
 function downloadTextFile(text: string, filename: string) {
 	const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+	downloadBlobFile(blob, filename)
+}
+
+function downloadBlobFile(data: Blob, filename: string) {
+	const blob = data instanceof Blob ? data : new Blob([data])
 	const url = URL.createObjectURL(blob)
 	const a = document.createElement('a')
 	a.href = url
@@ -1763,8 +1808,8 @@ function downloadTextFile(text: string, filename: string) {
 				  </a-select-option>
 				</a-select>
 				<a-space class="mt-2" wrap>
-				  <a-button size="small" @click="downloadGroupSocksTemplate">下载Socks5模板</a-button>
-				  <span class="text-xs text-slate-500">创建阶段模板默认按 1 行生成，可自行复制扩展</span>
+				  <a-button size="small" @click="downloadDedicatedCreateSample">下载示例</a-button>
+				  <span class="text-xs text-slate-500">示例格式: ip:port:user:pass，可直接复制多行</span>
 				</a-space>
 				<a-textarea v-model:value="orderForm.dedicated_egress_lines" class="mt-2" :rows="6" placeholder="每行: ip:port:user:pass（按顺序创建子订单）" />
 				<a-alert class="mt-2" type="info" show-icon :message="`专线数量 = ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}，订单将自动拆分为子订单 1:1`" />
@@ -2327,7 +2372,10 @@ function downloadTextFile(text: string, filename: string) {
 	  <a-alert type="info" show-icon message="每行格式: ip:port:user:pass；顺序必须与子订单顺序一致" class="mb-2" />
 	  <a-space class="mb-2">
 		<a-button size="small" @click="downloadGroupSocksTemplate">下载模板</a-button>
-		<span class="text-xs text-slate-500">模板行数按当前组头 quantity 生成</span>
+		<a-upload :show-upload-list="false" accept=".xlsx" :before-upload="beforeUploadGroupSocksXLSX">
+		  <a-button size="small">上传XLSX回填</a-button>
+		</a-upload>
+		<span class="text-xs text-slate-500">模板按子订单顺序生成，上传后自动回填</span>
 	  </a-space>
 	  <a-textarea v-model:value="groupSocksLines" :rows="10" placeholder="按顺序粘贴 Socks5 列表" />
 	</a-modal>
@@ -2336,6 +2384,9 @@ function downloadTextFile(text: string, filename: string) {
 	  <a-alert type="info" show-icon message="每行格式: user:pass[:uuid]；不填 uuid 自动生成" class="mb-2" />
 	  <a-space class="mb-2">
 		<a-button size="small" @click="downloadGroupCredentialTemplate">下载模板</a-button>
+		<a-upload :show-upload-list="false" accept=".xlsx" :before-upload="beforeUploadGroupCredXLSX">
+		  <a-button size="small">上传XLSX回填</a-button>
+		</a-upload>
 		<span class="text-xs text-slate-500">第三段 uuid 留空则自动生成</span>
 	  </a-space>
 	  <a-checkbox v-model:checked="groupCredRegenerate" class="mb-2">忽略文本，随机重置全组凭据</a-checkbox>

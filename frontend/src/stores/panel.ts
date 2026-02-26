@@ -310,9 +310,31 @@ export const usePanelStore = defineStore('panel', {
 			await http.post(`/api/orders/${orderID}/group/update-socks5`, { lines })
 			await this.loadOrders()
 		},
+		async updateOrderGroupSocks5XLSX(orderID: number, file: File) {
+			const form = new FormData()
+			form.append('file', file)
+			await http.post(`/api/orders/${orderID}/group/update-socks5/xlsx`, form, {
+				headers: { 'Content-Type': 'multipart/form-data' }
+			})
+			await this.loadOrders()
+		},
 		async updateOrderGroupCredentials(orderID: number, payload: { lines?: string; regenerate?: boolean }) {
 			await http.post(`/api/orders/${orderID}/group/update-credentials`, payload)
 			await this.loadOrders()
+		},
+		async updateOrderGroupCredentialsXLSX(orderID: number, file: File) {
+			const form = new FormData()
+			form.append('file', file)
+			await http.post(`/api/orders/${orderID}/group/update-credentials/xlsx`, form, {
+				headers: { 'Content-Type': 'multipart/form-data' }
+			})
+			await this.loadOrders()
+		},
+		async downloadOrderGroupSocks5Template(orderID: number) {
+			return http.get(`/api/orders/${orderID}/group/template/socks5.xlsx`, { responseType: 'blob' })
+		},
+		async downloadOrderGroupCredentialsTemplate(orderID: number) {
+			return http.get(`/api/orders/${orderID}/group/template/credentials.xlsx`, { responseType: 'blob' })
 		},
     async deactivateOrder(orderID: number) {
       await http.post(`/api/orders/${orderID}/deactivate`, {})

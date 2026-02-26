@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -115,8 +116,12 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/orders", a.createOrder)
 	secure.PUT("/orders/:id", a.updateOrder)
 	secure.POST("/orders/:id/split", a.splitOrder)
+	secure.GET("/orders/:id/group/template/socks5.xlsx", a.downloadOrderGroupSocks5Template)
+	secure.GET("/orders/:id/group/template/credentials.xlsx", a.downloadOrderGroupCredentialsTemplate)
 	secure.POST("/orders/:id/group/update-socks5", a.updateOrderGroupSocks5)
+	secure.POST("/orders/:id/group/update-socks5/xlsx", a.updateOrderGroupSocks5ByXLSX)
 	secure.POST("/orders/:id/group/update-credentials", a.updateOrderGroupCredentials)
+	secure.POST("/orders/:id/group/update-credentials/xlsx", a.updateOrderGroupCredentialsByXLSX)
 	secure.POST("/orders/:id/deactivate", a.deactivateOrder)
 	secure.POST("/orders/:id/renew", a.renewOrder)
 	secure.POST("/orders/batch/deactivate", a.batchDeactivateOrders)
@@ -957,6 +962,34 @@ func (a *API) splitOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"children": rows})
 }
 
+func (a *API) downloadOrderGroupSocks5Template(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	body, filename, err := a.orders.GroupSocks5TemplateXLSX(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body)
+}
+
+func (a *API) downloadOrderGroupCredentialsTemplate(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	body, filename, err := a.orders.GroupCredentialsTemplateXLSX(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body)
+}
+
 func (a *API) updateOrderGroupSocks5(c *gin.Context) {
 	id, ok := parseUintParam(c, "id")
 	if !ok {
@@ -970,6 +1003,34 @@ func (a *API) updateOrderGroupSocks5(c *gin.Context) {
 		return
 	}
 	if err := a.orders.UpdateGroupSocks5(c.Request.Context(), id, req.Lines); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupSocks5ByXLSX(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	h, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer h.Close()
+	body, err := io.ReadAll(h)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.orders.UpdateGroupSocks5FromXLSX(c.Request.Context(), id, body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -990,6 +1051,34 @@ func (a *API) updateOrderGroupCredentials(c *gin.Context) {
 		return
 	}
 	if err := a.orders.UpdateGroupCredentials(c.Request.Context(), id, req.Lines, req.Regenerate); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupCredentialsByXLSX(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	h, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	defer h.Close()
+	body, err := io.ReadAll(h)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.orders.UpdateGroupCredentialsFromXLSX(c.Request.Context(), id, body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
