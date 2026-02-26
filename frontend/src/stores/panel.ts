@@ -5,6 +5,7 @@ import type {
   BackupInfo,
   Customer,
   CustomerRuntimeStat,
+	DedicatedEntry,
   ForwardOutbound,
   HostIP,
   ImportPreviewRow,
@@ -48,7 +49,8 @@ export const usePanelStore = defineStore('panel', {
     singboxScan: null as SingboxScanResult | null,
     nodes: [] as XrayNode[],
     migrationPreview: null as SocksMigrationPreviewResult | null,
-    forwardOutbounds: [] as ForwardOutbound[]
+		forwardOutbounds: [] as ForwardOutbound[],
+		dedicatedEntries: [] as DedicatedEntry[]
   }),
   getters: {
     activeOrderCount: (state) => state.orders.filter((o) => o.status === 'active').length,
@@ -77,6 +79,7 @@ export const usePanelStore = defineStore('panel', {
         this.loadOrders(),
         this.loadNodes(),
         this.loadForwardOutbounds(),
+			this.loadDedicatedEntries(),
         this.loadSettings(),
         this.loadTaskLogs(),
         this.loadBackups(),
@@ -131,6 +134,51 @@ export const usePanelStore = defineStore('panel', {
       const res = await http.get('/api/orders/forward-outbounds')
       this.forwardOutbounds = res.data || []
     },
+		async loadDedicatedEntries() {
+			const res = await http.get('/api/orders/dedicated-entries')
+			this.dedicatedEntries = res.data || []
+		},
+		async createDedicatedEntry(payload: {
+			name: string
+			domain: string
+			mixed_port: number
+			vmess_port: number
+			vless_port: number
+			shadowsocks_port: number
+			priority: number
+			features: string[]
+			enabled: boolean
+			notes?: string
+		}) {
+			await http.post('/api/orders/dedicated-entries', payload)
+			await this.loadDedicatedEntries()
+			this.setNotice('专线入口已创建')
+		},
+		async updateDedicatedEntry(id: number, payload: {
+			name: string
+			domain: string
+			mixed_port: number
+			vmess_port: number
+			vless_port: number
+			shadowsocks_port: number
+			priority: number
+			features: string[]
+			enabled: boolean
+			notes?: string
+		}) {
+			await http.put(`/api/orders/dedicated-entries/${id}`, payload)
+			await this.loadDedicatedEntries()
+			this.setNotice('专线入口已更新')
+		},
+		async toggleDedicatedEntry(id: number, enabled: boolean) {
+			await http.post(`/api/orders/dedicated-entries/${id}/toggle`, { enabled })
+			await this.loadDedicatedEntries()
+		},
+		async deleteDedicatedEntry(id: number) {
+			await http.delete(`/api/orders/dedicated-entries/${id}`)
+			await this.loadDedicatedEntries()
+			this.setNotice('专线入口已删除')
+		},
     async createForwardOutbound(payload: {
       name: string
       address: string
@@ -253,6 +301,19 @@ export const usePanelStore = defineStore('panel', {
 		const order = (body.order || body) as Order
 		return { order, warnings } as OrderSubmitResult
     },
+		async splitOrder(orderID: number) {
+			const res = await http.post(`/api/orders/${orderID}/split`, {})
+			await this.loadOrders()
+			return res.data?.children || []
+		},
+		async updateOrderGroupSocks5(orderID: number, lines: string) {
+			await http.post(`/api/orders/${orderID}/group/update-socks5`, { lines })
+			await this.loadOrders()
+		},
+		async updateOrderGroupCredentials(orderID: number, payload: { lines?: string; regenerate?: boolean }) {
+			await http.post(`/api/orders/${orderID}/group/update-credentials`, payload)
+			await this.loadOrders()
+		},
     async deactivateOrder(orderID: number) {
       await http.post(`/api/orders/${orderID}/deactivate`, {})
       await this.loadOrders()
@@ -339,11 +400,12 @@ export const usePanelStore = defineStore('panel', {
     },
     async batchExport(orderIDs: number[]) {
       const res = await http.post('/api/orders/batch/export', {
-        order_ids: orderIDs
+			order_ids: orderIDs,
+			format: 'xlsx'
       }, {
-        responseType: 'text'
+			responseType: 'blob'
       })
-      return typeof res.data === 'string' ? res.data : String(res.data)
+		return res
     },
     async loadSettings() {
       const res = await http.get('/api/settings')

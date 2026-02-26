@@ -23,22 +23,23 @@ import (
 )
 
 type API struct {
-	db      *gorm.DB
-	store   *store.Store
-	orders  *service.OrderService
-	singbox *service.SingboxImportService
-	nodes   *service.NodeService
-	forward *service.ForwardOutboundService
-	hostIPs *service.HostIPService
-	backups *service.BackupService
-	bark    *service.BarkService
-	runtime *service.RuntimeStatsService
-	cfg     config.Config
-	logger  *zap.Logger
+	db        *gorm.DB
+	store     *store.Store
+	orders    *service.OrderService
+	singbox   *service.SingboxImportService
+	nodes     *service.NodeService
+	forward   *service.ForwardOutboundService
+	dedicated *service.DedicatedEntryService
+	hostIPs   *service.HostIPService
+	backups   *service.BackupService
+	bark      *service.BarkService
+	runtime   *service.RuntimeStatsService
+	cfg       config.Config
+	logger    *zap.Logger
 }
 
 func New(db *gorm.DB, st *store.Store, orders *service.OrderService, singbox *service.SingboxImportService, nodes *service.NodeService, forward *service.ForwardOutboundService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
-	return &API{db: db, store: st, orders: orders, singbox: singbox, nodes: nodes, forward: forward, hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
+	return &API{db: db, store: st, orders: orders, singbox: singbox, nodes: nodes, forward: forward, dedicated: service.NewDedicatedEntryService(db), hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
 }
 
 func (a *API) Router() *gin.Engine {
@@ -101,6 +102,11 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/orders/forward-outbounds/import", a.importForwardOutbounds)
 	secure.POST("/orders/forward-outbounds/:id/probe", a.probeForwardOutbound)
 	secure.POST("/orders/forward-outbounds/probe-all", a.probeAllForwardOutbounds)
+	secure.GET("/orders/dedicated-entries", a.listDedicatedEntries)
+	secure.POST("/orders/dedicated-entries", a.createDedicatedEntry)
+	secure.PUT("/orders/dedicated-entries/:id", a.updateDedicatedEntry)
+	secure.DELETE("/orders/dedicated-entries/:id", a.deleteDedicatedEntry)
+	secure.POST("/orders/dedicated-entries/:id/toggle", a.toggleDedicatedEntry)
 
 	secure.GET("/orders", a.listOrders)
 	secure.POST("/orders/forward/reuse-warnings", a.forwardReuseWarnings)
@@ -108,6 +114,9 @@ func (a *API) Router() *gin.Engine {
 	secure.GET("/orders/:id", a.getOrder)
 	secure.POST("/orders", a.createOrder)
 	secure.PUT("/orders/:id", a.updateOrder)
+	secure.POST("/orders/:id/split", a.splitOrder)
+	secure.POST("/orders/:id/group/update-socks5", a.updateOrderGroupSocks5)
+	secure.POST("/orders/:id/group/update-credentials", a.updateOrderGroupCredentials)
 	secure.POST("/orders/:id/deactivate", a.deactivateOrder)
 	secure.POST("/orders/:id/renew", a.renewOrder)
 	secure.POST("/orders/batch/deactivate", a.batchDeactivateOrders)
@@ -549,6 +558,78 @@ func (a *API) forwardReuseWarnings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"warnings": warnings})
 }
 
+func (a *API) listDedicatedEntries(c *gin.Context) {
+	rows, err := a.dedicated.List()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) createDedicatedEntry(c *gin.Context) {
+	var req service.DedicatedEntryInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.dedicated.Create(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) updateDedicatedEntry(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req service.DedicatedEntryInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := a.dedicated.Update(id, req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) toggleDedicatedEntry(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.dedicated.Toggle(id, req.Enabled); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) deleteDedicatedEntry(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.dedicated.Delete(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (a *API) listHostIPs(c *gin.Context) {
 	rows, err := a.hostIPs.List()
 	if err != nil {
@@ -749,29 +830,33 @@ func (a *API) getOrder(c *gin.Context) {
 
 func (a *API) createOrder(c *gin.Context) {
 	var req struct {
-		CustomerID         uint   `json:"customer_id"`
-		Name               string `json:"name"`
-		Quantity           int    `json:"quantity"`
-		DurationDay        int    `json:"duration_day"`
-		ExpiresAt          string `json:"expires_at"`
-		Mode               string `json:"mode"`
-		Port               int    `json:"port"`
-		ManualIPIDs        []uint `json:"manual_ip_ids"`
-		ForwardOutboundIDs []uint `json:"forward_outbound_ids"`
+		CustomerID           uint   `json:"customer_id"`
+		Name                 string `json:"name"`
+		Quantity             int    `json:"quantity"`
+		DurationDay          int    `json:"duration_day"`
+		ExpiresAt            string `json:"expires_at"`
+		Mode                 string `json:"mode"`
+		Port                 int    `json:"port"`
+		ManualIPIDs          []uint `json:"manual_ip_ids"`
+		ForwardOutboundIDs   []uint `json:"forward_outbound_ids"`
+		DedicatedEntryID     uint   `json:"dedicated_entry_id"`
+		DedicatedEgressLines string `json:"dedicated_egress_lines"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	input := service.CreateOrderInput{
-		CustomerID:         req.CustomerID,
-		Name:               req.Name,
-		Quantity:           req.Quantity,
-		DurationDay:        req.DurationDay,
-		Mode:               req.Mode,
-		Port:               req.Port,
-		ManualIPIDs:        req.ManualIPIDs,
-		ForwardOutboundIDs: req.ForwardOutboundIDs,
+		CustomerID:           req.CustomerID,
+		Name:                 req.Name,
+		Quantity:             req.Quantity,
+		DurationDay:          req.DurationDay,
+		Mode:                 req.Mode,
+		Port:                 req.Port,
+		ManualIPIDs:          req.ManualIPIDs,
+		ForwardOutboundIDs:   req.ForwardOutboundIDs,
+		DedicatedEntryID:     req.DedicatedEntryID,
+		DedicatedEgressLines: req.DedicatedEgressLines,
 	}
 	if strings.TrimSpace(req.ExpiresAt) != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -804,23 +889,31 @@ func (a *API) updateOrder(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name               string `json:"name"`
-		Quantity           int    `json:"quantity"`
-		Port               int    `json:"port"`
-		ExpiresAt          string `json:"expires_at"`
-		ManualIPIDs        []uint `json:"manual_ip_ids"`
-		ForwardOutboundIDs []uint `json:"forward_outbound_ids"`
+		Name                           string `json:"name"`
+		Quantity                       int    `json:"quantity"`
+		Port                           int    `json:"port"`
+		ExpiresAt                      string `json:"expires_at"`
+		ManualIPIDs                    []uint `json:"manual_ip_ids"`
+		ForwardOutboundIDs             []uint `json:"forward_outbound_ids"`
+		DedicatedEntryID               uint   `json:"dedicated_entry_id"`
+		DedicatedEgressLines           string `json:"dedicated_egress_lines"`
+		DedicatedCredentialLines       string `json:"dedicated_credential_lines"`
+		RegenerateDedicatedCredentials bool   `json:"regenerate_dedicated_credentials"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	input := service.UpdateOrderInput{
-		Name:               req.Name,
-		Quantity:           req.Quantity,
-		Port:               req.Port,
-		ManualIPIDs:        req.ManualIPIDs,
-		ForwardOutboundIDs: req.ForwardOutboundIDs,
+		Name:                           req.Name,
+		Quantity:                       req.Quantity,
+		Port:                           req.Port,
+		ManualIPIDs:                    req.ManualIPIDs,
+		ForwardOutboundIDs:             req.ForwardOutboundIDs,
+		DedicatedEntryID:               req.DedicatedEntryID,
+		DedicatedEgressLines:           req.DedicatedEgressLines,
+		DedicatedCredentialLines:       req.DedicatedCredentialLines,
+		RegenerateDedicatedCredentials: req.RegenerateDedicatedCredentials,
 	}
 	if strings.TrimSpace(req.ExpiresAt) != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -849,6 +942,58 @@ func (a *API) updateOrder(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"order": order, "warnings": warnings})
+}
+
+func (a *API) splitOrder(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := a.orders.SplitOrder(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"children": rows})
+}
+
+func (a *API) updateOrderGroupSocks5(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Lines string `json:"lines"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.orders.UpdateGroupSocks5(c.Request.Context(), id, req.Lines); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupCredentials(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Lines      string `json:"lines"`
+		Regenerate bool   `json:"regenerate"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.orders.UpdateGroupCredentials(c.Request.Context(), id, req.Lines, req.Regenerate); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (a *API) deactivateOrder(c *gin.Context) {
@@ -957,6 +1102,7 @@ func (a *API) batchTestOrders(c *gin.Context) {
 func (a *API) batchExportOrders(c *gin.Context) {
 	var req struct {
 		OrderIDs []uint `json:"order_ids"`
+		Format   string `json:"format"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -964,6 +1110,20 @@ func (a *API) batchExportOrders(c *gin.Context) {
 	}
 	if len(req.OrderIDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is empty"})
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(req.Format))
+	if format == "" {
+		format = "txt"
+	}
+	if format == "xlsx" {
+		data, filename, err := a.orders.BatchExportXLSX(req.OrderIDs)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+		c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
 		return
 	}
 	text, err := a.orders.BatchExport(req.OrderIDs)
@@ -982,6 +1142,17 @@ func (a *API) exportOrder(c *gin.Context) {
 	}
 	count, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("count", "0")))
 	shuffle := strings.ToLower(strings.TrimSpace(c.DefaultQuery("shuffle", "true"))) != "false"
+	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "txt")))
+	if format == "xlsx" {
+		data, filename, err := a.orders.ExportOrderXLSX(id, service.ExportOrderOptions{Count: count, Shuffle: shuffle})
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+		c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+		return
+	}
 	text, filename, err := a.orders.ExportOrderLinesWithMeta(id, service.ExportOrderOptions{Count: count, Shuffle: shuffle})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

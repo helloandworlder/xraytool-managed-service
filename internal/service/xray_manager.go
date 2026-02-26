@@ -51,6 +51,10 @@ func InboundTag(port int) string {
 	return fmt.Sprintf("xtool-in-%d", port)
 }
 
+func dedicatedInboundTag(protocol string, port int) string {
+	return fmt.Sprintf("xtool-in-%s-%d", strings.ToLower(strings.TrimSpace(protocol)), port)
+}
+
 func OutboundTag(itemID uint) string {
 	return fmt.Sprintf("xtool-out-%d", itemID)
 }
@@ -439,32 +443,47 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		Port            int
 		Username        string
 		Password        string
+		VmessUUID       string
 		Managed         bool
+		OrderMode       string
 		OutboundType    string
 		ForwardAddress  string
 		ForwardPort     int
 		ForwardUsername string
 		ForwardPassword string
+		EntryFeatures   string
+		EntryDomain     string
+		EntryEnabled    bool
+		EntryMixedPort  int
+		EntryVmessPort  int
+		EntryVlessPort  int
+		EntrySSPort     int
 	}
 
 	var rows []activeRow
 	err := m.db.WithContext(ctx).
 		Table("order_items oi").
-		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.managed, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password").
+		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password, de.features as entry_features, de.domain as entry_domain, de.enabled as entry_enabled, de.mixed_port as entry_mixed_port, de.vmess_port as entry_vmess_port, de.vless_port as entry_vless_port, de.shadowsocks_port as entry_ss_port").
 		Joins("join orders o on o.id = oi.order_id").
+		Joins("left join dedicated_entries de on de.id = o.dedicated_entry_id").
 		Where("oi.status = ? and o.status = ? and o.expires_at > ?", model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
 		Scan(&rows).Error
 	if err != nil {
 		return err
 	}
 
-	accountsByPort := map[int]map[string]string{}
+	legacyMixedAccountsByPort := map[int]map[string]string{}
+	dedicatedMixedAccountsByPort := map[int]map[string]string{}
+	vmessClientsByPort := map[int]map[string]string{}
+	vlessClientsByPort := map[int]map[string]string{}
+	ssClientsByPort := map[int]map[string]string{}
 	type managedItem struct {
 		itemID          uint
 		ip              string
-		port            int
 		user            string
 		password        string
+		vmessUUID       string
+		inboundTags     []string
 		outboundType    string
 		forwardAddress  string
 		forwardPort     int
@@ -477,16 +496,52 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		if !row.Managed {
 			continue
 		}
-		if _, ok := accountsByPort[row.Port]; !ok {
-			accountsByPort[row.Port] = map[string]string{}
+		inboundTags := make([]string, 0, 4)
+		if strings.EqualFold(strings.TrimSpace(row.OrderMode), model.OrderModeDedicated) {
+			features := parseDedicatedFeatures(row.EntryFeatures)
+			if _, ok := features[model.DedicatedFeatureMixed]; ok && row.EntryMixedPort > 0 {
+				if _, exists := dedicatedMixedAccountsByPort[row.EntryMixedPort]; !exists {
+					dedicatedMixedAccountsByPort[row.EntryMixedPort] = map[string]string{}
+				}
+				dedicatedMixedAccountsByPort[row.EntryMixedPort][row.Username] = row.Password
+				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureMixed, row.EntryMixedPort))
+			}
+			if _, ok := features[model.DedicatedFeatureVmess]; ok && row.EntryVmessPort > 0 && strings.TrimSpace(row.VmessUUID) != "" {
+				if _, exists := vmessClientsByPort[row.EntryVmessPort]; !exists {
+					vmessClientsByPort[row.EntryVmessPort] = map[string]string{}
+				}
+				vmessClientsByPort[row.EntryVmessPort][row.Username] = strings.TrimSpace(row.VmessUUID)
+				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVmess, row.EntryVmessPort))
+			}
+			if _, ok := features[model.DedicatedFeatureVless]; ok && row.EntryVlessPort > 0 && strings.TrimSpace(row.VmessUUID) != "" {
+				if _, exists := vlessClientsByPort[row.EntryVlessPort]; !exists {
+					vlessClientsByPort[row.EntryVlessPort] = map[string]string{}
+				}
+				vlessClientsByPort[row.EntryVlessPort][row.Username] = strings.TrimSpace(row.VmessUUID)
+				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVless, row.EntryVlessPort))
+			}
+			if _, ok := features[model.DedicatedFeatureShadowsocks]; ok && row.EntrySSPort > 0 {
+				if _, exists := ssClientsByPort[row.EntrySSPort]; !exists {
+					ssClientsByPort[row.EntrySSPort] = map[string]string{}
+				}
+				ssClientsByPort[row.EntrySSPort][row.Username] = row.Password
+				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureShadowsocks, row.EntrySSPort))
+			}
 		}
-		accountsByPort[row.Port][row.Username] = row.Password
+		if len(inboundTags) == 0 && row.Port > 0 {
+			if _, ok := legacyMixedAccountsByPort[row.Port]; !ok {
+				legacyMixedAccountsByPort[row.Port] = map[string]string{}
+			}
+			legacyMixedAccountsByPort[row.Port][row.Username] = row.Password
+			inboundTags = append(inboundTags, InboundTag(row.Port))
+		}
 		items = append(items, managedItem{
 			itemID:          row.ItemID,
 			ip:              row.IP,
-			port:            row.Port,
 			user:            row.Username,
 			password:        row.Password,
+			vmessUUID:       row.VmessUUID,
+			inboundTags:     inboundTags,
 			outboundType:    row.OutboundType,
 			forwardAddress:  row.ForwardAddress,
 			forwardPort:     row.ForwardPort,
@@ -504,13 +559,13 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			"settings": map[string]interface{}{"address": "127.0.0.1"},
 		},
 	}
-	ports := make([]int, 0, len(accountsByPort))
-	for p := range accountsByPort {
+	ports := make([]int, 0, len(legacyMixedAccountsByPort))
+	for p := range legacyMixedAccountsByPort {
 		ports = append(ports, p)
 	}
 	sort.Ints(ports)
 	for _, p := range ports {
-		accounts := accountsByPort[p]
+		accounts := legacyMixedAccountsByPort[p]
 		users := make([]string, 0, len(accounts))
 		for u := range accounts {
 			users = append(users, u)
@@ -529,6 +584,132 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 				"auth":     "password",
 				"accounts": accs,
 				"udp":      false,
+			},
+		})
+	}
+
+	dedicatedMixedPorts := make([]int, 0, len(dedicatedMixedAccountsByPort))
+	for p := range dedicatedMixedAccountsByPort {
+		dedicatedMixedPorts = append(dedicatedMixedPorts, p)
+	}
+	sort.Ints(dedicatedMixedPorts)
+	for _, p := range dedicatedMixedPorts {
+		accounts := dedicatedMixedAccountsByPort[p]
+		users := make([]string, 0, len(accounts))
+		for u := range accounts {
+			users = append(users, u)
+		}
+		sort.Strings(users)
+		accs := make([]map[string]string, 0, len(users))
+		for _, u := range users {
+			accs = append(accs, map[string]string{"user": u, "pass": accounts[u]})
+		}
+		inbounds = append(inbounds, map[string]interface{}{
+			"tag":      dedicatedInboundTag(model.DedicatedFeatureMixed, p),
+			"listen":   "0.0.0.0",
+			"port":     p,
+			"protocol": "mixed",
+			"settings": map[string]interface{}{
+				"auth":     "password",
+				"accounts": accs,
+				"udp":      false,
+			},
+		})
+	}
+
+	vmessPorts := make([]int, 0, len(vmessClientsByPort))
+	for p := range vmessClientsByPort {
+		vmessPorts = append(vmessPorts, p)
+	}
+	sort.Ints(vmessPorts)
+	for _, p := range vmessPorts {
+		clientsMap := vmessClientsByPort[p]
+		users := make([]string, 0, len(clientsMap))
+		for u := range clientsMap {
+			users = append(users, u)
+		}
+		sort.Strings(users)
+		clients := make([]map[string]interface{}, 0, len(users))
+		for _, user := range users {
+			clients = append(clients, map[string]interface{}{
+				"id":    clientsMap[user],
+				"level": 0,
+				"email": user,
+			})
+		}
+		inbounds = append(inbounds, map[string]interface{}{
+			"tag":      dedicatedInboundTag(model.DedicatedFeatureVmess, p),
+			"listen":   "0.0.0.0",
+			"port":     p,
+			"protocol": "vmess",
+			"settings": map[string]interface{}{
+				"clients": clients,
+			},
+		})
+	}
+
+	vlessPorts := make([]int, 0, len(vlessClientsByPort))
+	for p := range vlessClientsByPort {
+		vlessPorts = append(vlessPorts, p)
+	}
+	sort.Ints(vlessPorts)
+	for _, p := range vlessPorts {
+		clientsMap := vlessClientsByPort[p]
+		users := make([]string, 0, len(clientsMap))
+		for u := range clientsMap {
+			users = append(users, u)
+		}
+		sort.Strings(users)
+		clients := make([]map[string]interface{}, 0, len(users))
+		for _, user := range users {
+			clients = append(clients, map[string]interface{}{
+				"id":         clientsMap[user],
+				"level":      0,
+				"email":      user,
+				"decryption": "none",
+			})
+		}
+		inbounds = append(inbounds, map[string]interface{}{
+			"tag":      dedicatedInboundTag(model.DedicatedFeatureVless, p),
+			"listen":   "0.0.0.0",
+			"port":     p,
+			"protocol": "vless",
+			"settings": map[string]interface{}{
+				"clients":    clients,
+				"decryption": "none",
+			},
+		})
+	}
+
+	ssPorts := make([]int, 0, len(ssClientsByPort))
+	for p := range ssClientsByPort {
+		ssPorts = append(ssPorts, p)
+	}
+	sort.Ints(ssPorts)
+	for _, p := range ssPorts {
+		clientsMap := ssClientsByPort[p]
+		users := make([]string, 0, len(clientsMap))
+		for u := range clientsMap {
+			users = append(users, u)
+		}
+		sort.Strings(users)
+		clients := make([]map[string]interface{}, 0, len(users))
+		for _, user := range users {
+			clients = append(clients, map[string]interface{}{
+				"password": clientsMap[user],
+				"method":   DedicatedShadowsocksMethod,
+				"level":    0,
+				"email":    user,
+			})
+		}
+		inbounds = append(inbounds, map[string]interface{}{
+			"tag":      dedicatedInboundTag(model.DedicatedFeatureShadowsocks, p),
+			"listen":   "0.0.0.0",
+			"port":     p,
+			"protocol": "shadowsocks",
+			"settings": map[string]interface{}{
+				"network": "tcp",
+				"clients": clients,
 			},
 		})
 	}
@@ -565,13 +746,19 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 				"settings":    map[string]interface{}{},
 			})
 		}
-		rules = append(rules, map[string]interface{}{
-			"type":        "field",
-			"ruleTag":     RuleTag(item.itemID),
-			"inboundTag":  []string{InboundTag(item.port)},
-			"user":        []string{item.user},
-			"outboundTag": OutboundTag(item.itemID),
-		})
+		for idx, inTag := range item.inboundTags {
+			ruleTag := RuleTag(item.itemID)
+			if idx > 0 {
+				ruleTag = fmt.Sprintf("%s-%d", RuleTag(item.itemID), idx+1)
+			}
+			rules = append(rules, map[string]interface{}{
+				"type":        "field",
+				"ruleTag":     ruleTag,
+				"inboundTag":  []string{inTag},
+				"user":        []string{item.user},
+				"outboundTag": OutboundTag(item.itemID),
+			})
+		}
 	}
 
 	payload := map[string]interface{}{

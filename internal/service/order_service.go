@@ -40,24 +40,30 @@ type BatchTestResult struct {
 }
 
 type CreateOrderInput struct {
-	CustomerID         uint      `json:"customer_id"`
-	Name               string    `json:"name"`
-	Quantity           int       `json:"quantity"`
-	DurationDay        int       `json:"duration_day"`
-	ExpiresAt          time.Time `json:"expires_at"`
-	Mode               string    `json:"mode"`
-	Port               int       `json:"port"`
-	ManualIPIDs        []uint    `json:"manual_ip_ids"`
-	ForwardOutboundIDs []uint    `json:"forward_outbound_ids"`
+	CustomerID           uint      `json:"customer_id"`
+	Name                 string    `json:"name"`
+	Quantity             int       `json:"quantity"`
+	DurationDay          int       `json:"duration_day"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	Mode                 string    `json:"mode"`
+	Port                 int       `json:"port"`
+	ManualIPIDs          []uint    `json:"manual_ip_ids"`
+	ForwardOutboundIDs   []uint    `json:"forward_outbound_ids"`
+	DedicatedEntryID     uint      `json:"dedicated_entry_id"`
+	DedicatedEgressLines string    `json:"dedicated_egress_lines"`
 }
 
 type UpdateOrderInput struct {
-	Name               string    `json:"name"`
-	Quantity           int       `json:"quantity"`
-	Port               int       `json:"port"`
-	ExpiresAt          time.Time `json:"expires_at"`
-	ManualIPIDs        []uint    `json:"manual_ip_ids"`
-	ForwardOutboundIDs []uint    `json:"forward_outbound_ids"`
+	Name                           string    `json:"name"`
+	Quantity                       int       `json:"quantity"`
+	Port                           int       `json:"port"`
+	ExpiresAt                      time.Time `json:"expires_at"`
+	ManualIPIDs                    []uint    `json:"manual_ip_ids"`
+	ForwardOutboundIDs             []uint    `json:"forward_outbound_ids"`
+	DedicatedEntryID               uint      `json:"dedicated_entry_id"`
+	DedicatedEgressLines           string    `json:"dedicated_egress_lines"`
+	DedicatedCredentialLines       string    `json:"dedicated_credential_lines"`
+	RegenerateDedicatedCredentials bool      `json:"regenerate_dedicated_credentials"`
 }
 
 type AllocationPreview struct {
@@ -102,13 +108,13 @@ func NewOrderService(db *gorm.DB, xray *XrayManager, log *zap.Logger) *OrderServ
 
 func (s *OrderService) ListOrders() ([]model.Order, error) {
 	var orders []model.Order
-	err := s.db.Preload("Customer").Preload("Items").Order("id desc").Find(&orders).Error
+	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("Items").Order("id desc").Find(&orders).Error
 	return orders, err
 }
 
 func (s *OrderService) GetOrder(orderID uint) (*model.Order, error) {
 	var order model.Order
-	err := s.db.Preload("Customer").Preload("Items").Preload("Items.Resources").First(&order, orderID).Error
+	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("Items").Preload("Items.Resources").First(&order, orderID).Error
 	if err != nil {
 		return nil, err
 	}
@@ -140,8 +146,18 @@ func (s *OrderService) AllocationPreview(customerID uint, excludeOrderID uint) (
 
 func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateOrderInput) (*model.Order, error) {
 	var order model.Order
-	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
+	if err := s.db.Preload("Items").Preload("DedicatedEntry").First(&order, orderID).Error; err != nil {
 		return nil, err
+	}
+	if order.IsGroupHead {
+		if err := s.updateOrderGroup(ctx, order, in); err != nil {
+			return nil, err
+		}
+		updated, err := s.GetOrder(order.ID)
+		if err != nil {
+			return nil, err
+		}
+		return updated, nil
 	}
 
 	targetName := strings.TrimSpace(order.Name)
@@ -167,6 +183,19 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	} else if in.Quantity > 0 {
 		targetQuantity = in.Quantity
 	}
+	if order.Mode == model.OrderModeDedicated {
+		targetQuantity = len(order.Items)
+		if in.DedicatedEntryID > 0 {
+			entry := model.DedicatedEntry{}
+			if err := s.db.Where("id = ? and enabled = 1", in.DedicatedEntryID).First(&entry).Error; err != nil {
+				return nil, fmt.Errorf("dedicated entry invalid: %w", err)
+			}
+			targetPort = chooseDedicatedPrimaryPort(entry)
+			if targetPort <= 0 {
+				return nil, errors.New("dedicated entry has no usable port")
+			}
+		}
+	}
 	targetExpiresAt := order.ExpiresAt
 	if !in.ExpiresAt.IsZero() {
 		targetExpiresAt = in.ExpiresAt
@@ -181,10 +210,13 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	if order.Mode == model.OrderModeForward && len(targetForwardOutboundIDs) == 0 {
 		return nil, errors.New("forward_outbound_ids is required for forward mode")
 	}
+	if order.Mode == model.OrderModeDedicated && in.Quantity > 0 && in.Quantity != len(order.Items) {
+		return nil, errors.New("dedicated order quantity is fixed to item count")
+	}
 	if order.Mode == model.OrderModeImport && targetQuantity > len(order.Items) {
 		return nil, errors.New("import order quantity cannot be increased")
 	}
-	if targetPort != order.Port {
+	if targetPort != order.Port && order.Mode != model.OrderModeDedicated {
 		if err := s.ensurePortReadyForManaged(targetPort); err != nil {
 			return nil, err
 		}
@@ -310,9 +342,23 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 	if in.Mode == "" {
 		in.Mode = model.OrderModeAuto
 	}
-	if in.Mode != model.OrderModeAuto && in.Mode != model.OrderModeManual && in.Mode != model.OrderModeForward {
-		return nil, errors.New("mode must be auto/manual/forward")
+	if in.Mode != model.OrderModeAuto && in.Mode != model.OrderModeManual && in.Mode != model.OrderModeForward && in.Mode != model.OrderModeDedicated {
+		return nil, errors.New("mode must be auto/manual/forward/dedicated")
 	}
+
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(in.DurationDay) * 24 * time.Hour)
+	if !in.ExpiresAt.IsZero() {
+		if !in.ExpiresAt.After(now) {
+			return nil, errors.New("expires_at must be in the future")
+		}
+		expiresAt = in.ExpiresAt
+	}
+
+	if in.Mode == model.OrderModeDedicated {
+		return s.createDedicatedOrder(ctx, in, now, expiresAt)
+	}
+
 	if in.Mode == model.OrderModeForward {
 		in.ForwardOutboundIDs = uniqueUintIDs(in.ForwardOutboundIDs)
 		if len(in.ForwardOutboundIDs) == 0 {
@@ -353,15 +399,6 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	now := time.Now()
-	expiresAt := now.Add(time.Duration(in.DurationDay) * 24 * time.Hour)
-	if !in.ExpiresAt.IsZero() {
-		if !in.ExpiresAt.After(now) {
-			return nil, errors.New("expires_at must be in the future")
-		}
-		expiresAt = in.ExpiresAt
 	}
 	order := &model.Order{
 		CustomerID: in.CustomerID,
@@ -434,6 +471,9 @@ func (s *OrderService) SyncOrderRuntime(ctx context.Context, orderID uint) error
 	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
 		return err
 	}
+	if order.Mode == model.OrderModeDedicated || order.IsGroupHead || order.ParentOrderID != nil {
+		return s.rebuildManagedRuntime(ctx)
+	}
 
 	return s.xray.ApplyOrFallback(ctx, func(ctx context.Context) error {
 		for _, item := range order.Items {
@@ -479,6 +519,26 @@ func (s *OrderService) DeactivateOrder(ctx context.Context, orderID uint, status
 	var order model.Order
 	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
 		return err
+	}
+	if order.IsGroupHead {
+		return s.deactivateOrderGroup(ctx, order, status, itemStatus)
+	}
+	if order.Mode == model.OrderModeDedicated || order.ParentOrderID != nil {
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&model.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
+				"status":     status,
+				"updated_at": time.Now(),
+			}).Error; err != nil {
+				return err
+			}
+			return tx.Model(&model.OrderItem{}).Where("order_id = ?", orderID).Updates(map[string]interface{}{
+				"status":     itemStatus,
+				"updated_at": time.Now(),
+			}).Error
+		}); err != nil {
+			return err
+		}
+		return s.rebuildManagedRuntime(ctx)
 	}
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
@@ -543,6 +603,9 @@ func (s *OrderService) RenewOrder(ctx context.Context, orderID uint, moreDays in
 	var order model.Order
 	if err := s.db.First(&order, orderID).Error; err != nil {
 		return err
+	}
+	if order.IsGroupHead {
+		return s.renewOrderGroup(ctx, order, moreDays)
 	}
 	base := order.ExpiresAt
 	if base.Before(time.Now()) {

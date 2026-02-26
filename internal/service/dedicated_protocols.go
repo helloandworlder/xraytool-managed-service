@@ -1,0 +1,192 @@
+package service
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"xraytool/internal/model"
+)
+
+const DedicatedShadowsocksMethod = "chacha20-ietf-poly1305"
+
+var dedicatedFeatureOrder = []string{
+	model.DedicatedFeatureMixed,
+	model.DedicatedFeatureVmess,
+	model.DedicatedFeatureVless,
+	model.DedicatedFeatureShadowsocks,
+}
+
+func normalizeDedicatedFeatures(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("features is required")
+	}
+	seen := map[string]struct{}{}
+	for _, row := range raw {
+		v := strings.ToLower(strings.TrimSpace(row))
+		if v == "" {
+			continue
+		}
+		switch v {
+		case model.DedicatedFeatureMixed, model.DedicatedFeatureVmess, model.DedicatedFeatureVless, model.DedicatedFeatureShadowsocks:
+			seen[v] = struct{}{}
+		default:
+			return nil, fmt.Errorf("unsupported feature %s", v)
+		}
+	}
+	if len(seen) == 0 {
+		return nil, errors.New("features is required")
+	}
+	out := make([]string, 0, len(seen))
+	for _, key := range dedicatedFeatureOrder {
+		if _, ok := seen[key]; ok {
+			out = append(out, key)
+		}
+	}
+	return out, nil
+}
+
+func parseDedicatedFeatures(raw string) map[string]struct{} {
+	out := map[string]struct{}{}
+	parts := strings.Split(raw, ",")
+	for _, part := range parts {
+		v := strings.ToLower(strings.TrimSpace(part))
+		if v == "" {
+			continue
+		}
+		out[v] = struct{}{}
+	}
+	return out
+}
+
+func joinDedicatedFeatures(features []string) string {
+	if len(features) == 0 {
+		return ""
+	}
+	parts := make([]string, len(features))
+	copy(parts, features)
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func hasDedicatedFeature(raw string, feature string) bool {
+	_, ok := parseDedicatedFeatures(raw)[strings.ToLower(strings.TrimSpace(feature))]
+	return ok
+}
+
+type DedicatedEgressLine struct {
+	Address  string
+	Port     int
+	Username string
+	Password string
+}
+
+func parseDedicatedEgressLines(lines string) ([]DedicatedEgressLine, error) {
+	scanner := bufio.NewScanner(strings.NewReader(lines))
+	out := make([]DedicatedEgressLine, 0)
+	for scanner.Scan() {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		parts := strings.Split(raw, ":")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("invalid line %q, expect ip:port:user:pass", raw)
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || port <= 0 || port > 65535 {
+			return nil, fmt.Errorf("invalid port in line %q", raw)
+		}
+		row := DedicatedEgressLine{
+			Address:  strings.TrimSpace(parts[0]),
+			Port:     port,
+			Username: strings.TrimSpace(parts[2]),
+			Password: strings.TrimSpace(parts[3]),
+		}
+		if row.Address == "" || row.Username == "" || row.Password == "" {
+			return nil, fmt.Errorf("invalid line %q, address/user/pass required", raw)
+		}
+		out = append(out, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no valid socks5 lines")
+	}
+	return out, nil
+}
+
+type DedicatedCredentialLine struct {
+	Username string
+	Password string
+	UUID     string
+}
+
+func parseDedicatedCredentialLines(lines string) ([]DedicatedCredentialLine, error) {
+	scanner := bufio.NewScanner(strings.NewReader(lines))
+	out := make([]DedicatedCredentialLine, 0)
+	for scanner.Scan() {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		parts := strings.Split(raw, ":")
+		if len(parts) != 2 && len(parts) != 3 {
+			return nil, fmt.Errorf("invalid credential line %q, expect user:pass[:uuid]", raw)
+		}
+		row := DedicatedCredentialLine{
+			Username: strings.TrimSpace(parts[0]),
+			Password: strings.TrimSpace(parts[1]),
+		}
+		if len(parts) == 3 {
+			row.UUID = strings.TrimSpace(parts[2])
+		}
+		if row.Username == "" || row.Password == "" {
+			return nil, fmt.Errorf("invalid credential line %q, username/password required", raw)
+		}
+		if row.UUID == "" {
+			row.UUID = randomUUID()
+		}
+		out = append(out, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no valid credential lines")
+	}
+	return out, nil
+}
+
+func chooseDedicatedPrimaryPort(entry model.DedicatedEntry) int {
+	features := parseDedicatedFeatures(entry.Features)
+	if _, ok := features[model.DedicatedFeatureMixed]; ok && entry.MixedPort > 0 {
+		return entry.MixedPort
+	}
+	if _, ok := features[model.DedicatedFeatureVmess]; ok && entry.VmessPort > 0 {
+		return entry.VmessPort
+	}
+	if _, ok := features[model.DedicatedFeatureVless]; ok && entry.VlessPort > 0 {
+		return entry.VlessPort
+	}
+	if _, ok := features[model.DedicatedFeatureShadowsocks]; ok && entry.ShadowsocksPort > 0 {
+		return entry.ShadowsocksPort
+	}
+	if entry.MixedPort > 0 {
+		return entry.MixedPort
+	}
+	if entry.VmessPort > 0 {
+		return entry.VmessPort
+	}
+	if entry.VlessPort > 0 {
+		return entry.VlessPort
+	}
+	if entry.ShadowsocksPort > 0 {
+		return entry.ShadowsocksPort
+	}
+	return 0
+}

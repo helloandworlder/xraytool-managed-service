@@ -37,7 +37,9 @@ const orderForm = reactive({
   mode: 'auto',
   port: 23457,
   manual_ip_ids: [] as number[],
-  forward_outbound_ids: [] as number[]
+	forward_outbound_ids: [] as number[],
+	dedicated_entry_id: 0,
+	dedicated_egress_lines: ''
 })
 const importForm = reactive({
 	customer_id: 0,
@@ -66,6 +68,21 @@ const forwardForm = reactive({
 const forwardImportLines = ref('')
 const forwardManagerOpen = ref(false)
 const forwardEditOpen = ref(false)
+const dedicatedManagerOpen = ref(false)
+const dedicatedEditOpen = ref(false)
+const dedicatedForm = reactive({
+	id: 0,
+	name: '',
+	domain: '',
+	mixed_port: 1080,
+	vmess_port: 10086,
+	vless_port: 10087,
+	shadowsocks_port: 10088,
+	priority: 100,
+	features: ['mixed', 'vmess', 'vless', 'shadowsocks'] as string[],
+	enabled: true,
+	notes: ''
+})
 const forwardEditForm = reactive({
   id: 0,
   name: '',
@@ -103,7 +120,11 @@ const orderEditForm = reactive({
 	port: 23457,
 	expires_at: '',
 	manual_ip_ids: [] as number[],
-	forward_outbound_ids: [] as number[]
+	forward_outbound_ids: [] as number[],
+	dedicated_entry_id: 0,
+	dedicated_egress_lines: '',
+	dedicated_credential_lines: '',
+	regenerate_dedicated_credentials: false
 })
 const oversellCustomerID = ref<number>(0)
 const testSamplePercent = ref<number>(100)
@@ -113,6 +134,12 @@ const streamMeta = reactive({ total: 0, sampled: 0, sample_percent: 100, success
 const streamRows = ref<Array<{ item_id: number; status: string; detail: string }>>([])
 const exportingOrderID = ref<number | null>(null)
 const exportCount = ref<number>(0)
+const groupSocksModalOpen = ref(false)
+const groupCredModalOpen = ref(false)
+const groupTargetOrderID = ref<number>(0)
+const groupSocksLines = ref('')
+const groupCredLines = ref('')
+const groupCredRegenerate = ref(false)
 
 const siderCollapsed = ref(false)
 const probeResult = ref('')
@@ -167,6 +194,7 @@ const manualHostIPOptions = computed(() => {
 })
 
 const enabledForwardOutbounds = computed(() => panel.forwardOutbounds.filter((row) => row.enabled))
+const enabledDedicatedEntries = computed(() => panel.dedicatedEntries.filter((row) => row.enabled))
 const selectableSingboxFiles = computed(() => (panel.singboxScan?.files || []).filter((file) => file.selectable).map((file) => file.path))
 const allSingboxSelected = computed(
 	() =>
@@ -177,13 +205,14 @@ const allSingboxSelected = computed(
 const ordersColumns = [
 	{ title: 'ID', dataIndex: 'id', width: 80 },
 	{ title: '客户', key: 'customer', width: 180 },
+	{ title: '订单', key: 'order_name', width: 220 },
 	{ title: '状态', dataIndex: 'status', width: 110 },
 	{ title: '模式', dataIndex: 'mode', width: 110 },
 	{ title: '数量', dataIndex: 'quantity', width: 90 },
-	{ title: '转发出口', key: 'forward_summary', width: 240 },
+	{ title: '线路信息', key: 'forward_summary', width: 280 },
 	{ title: '端口', dataIndex: 'port', width: 100 },
 	{ title: '到期', key: 'expires', width: 210 },
-	{ title: '动作', key: 'action', fixed: 'right', width: 420 }
+	{ title: '动作', key: 'action', fixed: 'right', width: 620 }
 ]
 
 const customerColumns = [
@@ -373,6 +402,7 @@ function modeColor(mode: string) {
   if (mode === 'import') return 'blue'
   if (mode === 'manual') return 'purple'
   if (mode === 'forward') return 'cyan'
+  if (mode === 'dedicated') return 'magenta'
   return 'default'
 }
 
@@ -384,6 +414,28 @@ function forwardSummary(order: any) {
 	const preview = names.slice(0, 2).join(' | ')
 	if (names.length <= 2) return `${rows.length} 条 / ${preview}`
 	return `${rows.length} 条 / ${preview} +${names.length - 2}`
+}
+
+function dedicatedLinesCount(lines: string): number {
+	if (!lines) return 0
+	return lines
+		.split('\n')
+		.map((row) => row.trim())
+		.filter((row) => row.length > 0).length
+}
+
+function dedicatedSummary(order: any) {
+	if (order.mode !== 'dedicated') return '-'
+	const entry = order.dedicated_entry
+	if (!entry) return '专线入口未绑定'
+	const features = String(entry.features || '')
+	const ports: string[] = []
+	if (features.includes('mixed') && Number(entry.mixed_port) > 0) ports.push(`Socks:${entry.mixed_port}`)
+	if (features.includes('vmess') && Number(entry.vmess_port) > 0) ports.push(`Vmess:${entry.vmess_port}`)
+	if (features.includes('vless') && Number(entry.vless_port) > 0) ports.push(`Vless:${entry.vless_port}`)
+	if (features.includes('shadowsocks') && Number(entry.shadowsocks_port) > 0) ports.push(`SS:${entry.shadowsocks_port}`)
+	const entryText = entry.name || `${entry.domain}`
+	return `${entryText} / ${ports.join(' | ')}`
 }
 
 function migrationStateColor(state: string) {
@@ -522,6 +574,16 @@ async function createOrder() {
       message.warning('请至少选择 1 个 SOCKS5 出口')
       return
     }
+		if (orderForm.mode === 'dedicated') {
+			if (!orderForm.dedicated_entry_id) {
+				message.warning('请选择专线入口')
+				return
+			}
+			if (dedicatedLinesCount(orderForm.dedicated_egress_lines) <= 0) {
+				message.warning('请粘贴至少 1 行 Socks5 上游')
+				return
+			}
+		}
     const payload: Record<string, unknown> = {
       customer_id: Number(orderForm.customer_id),
       name: orderForm.name,
@@ -533,16 +595,23 @@ async function createOrder() {
     }
     if (orderForm.mode === 'forward') {
       payload.forward_outbound_ids = orderForm.forward_outbound_ids.map((v) => Number(v))
+		} else if (orderForm.mode === 'dedicated') {
+			payload.dedicated_entry_id = Number(orderForm.dedicated_entry_id)
+			payload.dedicated_egress_lines = String(orderForm.dedicated_egress_lines || '')
     } else {
       payload.quantity = Number(orderForm.quantity)
     }
     const result = await panel.createOrder(payload)
     orderForm.name = ''
     orderForm.expires_at = ''
-    if (orderForm.mode === 'forward') {
-      orderForm.forward_outbound_ids = []
-      createForwardReuseHints.value = []
-    }
+		if (orderForm.mode === 'forward') {
+			orderForm.forward_outbound_ids = []
+			createForwardReuseHints.value = []
+		}
+		if (orderForm.mode === 'dedicated') {
+			orderForm.dedicated_entry_id = 0
+			orderForm.dedicated_egress_lines = ''
+		}
     panel.orderSelection = []
     message.success('订单创建成功')
     showForwardWarnings(result?.warnings || [])
@@ -571,6 +640,10 @@ function openOrderEdit(row: Order) {
 	orderEditForm.expires_at = row.expires_at ? new Date(row.expires_at).toISOString().slice(0, 19) : ''
 	orderEditForm.manual_ip_ids = []
 	orderEditForm.forward_outbound_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.socks_outbound_id || 0)).filter((v) => v > 0)))
+	orderEditForm.dedicated_entry_id = Number((row as any).dedicated_entry_id || 0)
+	orderEditForm.dedicated_egress_lines = ''
+	orderEditForm.dedicated_credential_lines = ''
+	orderEditForm.regenerate_dedicated_credentials = false
 	editForwardReuseHints.value = []
 	orderEditOpen.value = true
 	void panel.loadAllocationPreview(row.customer_id, row.id)
@@ -582,6 +655,10 @@ async function saveOrderEdit() {
 			message.warning('请至少选择 1 个 SOCKS5 出口')
 			return
 		}
+		if (orderEditForm.mode === 'dedicated' && !orderEditForm.dedicated_entry_id) {
+			message.warning('请选择专线入口')
+			return
+		}
 		const payload: Record<string, unknown> = {
 			name: orderEditForm.name,
 			port: Number(orderEditForm.port),
@@ -590,6 +667,17 @@ async function saveOrderEdit() {
 		}
 		if (orderEditForm.mode === 'forward') {
 			payload.forward_outbound_ids = orderEditForm.forward_outbound_ids.map((v) => Number(v))
+		} else if (orderEditForm.mode === 'dedicated') {
+			payload.dedicated_entry_id = Number(orderEditForm.dedicated_entry_id)
+			if (String(orderEditForm.dedicated_egress_lines || '').trim()) {
+				payload.dedicated_egress_lines = String(orderEditForm.dedicated_egress_lines || '')
+			}
+			if (String(orderEditForm.dedicated_credential_lines || '').trim()) {
+				payload.dedicated_credential_lines = String(orderEditForm.dedicated_credential_lines || '')
+			}
+			if (orderEditForm.regenerate_dedicated_credentials) {
+				payload.regenerate_dedicated_credentials = true
+			}
 		} else {
 			payload.quantity = Number(orderEditForm.quantity)
 		}
@@ -662,8 +750,16 @@ async function doBatchTest() {
 async function doBatchExport() {
 	if (panel.orderSelection.length === 0) return
 	try {
-		const text = await panel.batchExport(panel.orderSelection)
-		downloadTextFile(text, `orders-batch-${Date.now()}.txt`)
+		const res = await panel.batchExport(panel.orderSelection)
+		const header = String(res.headers?.['content-disposition'] || '')
+		const match = header.match(/filename="?([^";]+)"?/i)
+		const filename = match?.[1] || `orders-batch-${Date.now()}.xlsx`
+		const url = URL.createObjectURL(res.data)
+		const a = document.createElement('a')
+		a.href = url
+		a.download = filename
+		a.click()
+		URL.revokeObjectURL(url)
 	} catch (err) {
 		panel.setError(err)
 	}
@@ -697,13 +793,19 @@ async function exportOrder(orderID: number) {
 		if (Number(exportCount.value) > 0) {
 			params.set('count', String(Number(exportCount.value)))
 		}
+		params.set('format', 'xlsx')
 		params.set('shuffle', 'true')
 		const query = params.toString()
-		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'text' })
-		const text = typeof res.data === 'string' ? res.data : String(res.data)
+		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'blob' })
 		const header = String(res.headers['content-disposition'] || '')
 		const match = header.match(/filename="?([^";]+)"?/i)
-		downloadTextFile(text, match?.[1] || `order-${orderID}-socks5.txt`)
+		const filename = match?.[1] || `order-${orderID}-export.xlsx`
+		const url = URL.createObjectURL(res.data)
+		const a = document.createElement('a')
+		a.href = url
+		a.download = filename
+		a.click()
+		URL.revokeObjectURL(url)
 	} catch (err) {
 		panel.setError(err)
 	} finally {
@@ -773,10 +875,28 @@ async function openOrderDetail(order: Order) {
   }
 }
 
-async function copyOrderLines(items: Order['items']) {
-  const lines = items.map((item) => `${item.ip}:${item.port}:${item.username}:${item.password}`).join('\n')
-  await navigator.clipboard.writeText(lines)
-  message.success('发货内容已复制')
+function dedicatedCopyPort(order: Order): number {
+	const entry = order.dedicated_entry
+	if (!entry) return Number(order.port || 0)
+	const features = String(entry.features || '')
+	if (features.includes('mixed') && Number(entry.mixed_port) > 0) return Number(entry.mixed_port)
+	if (features.includes('vmess') && Number(entry.vmess_port) > 0) return Number(entry.vmess_port)
+	if (features.includes('vless') && Number(entry.vless_port) > 0) return Number(entry.vless_port)
+	if (features.includes('shadowsocks') && Number(entry.shadowsocks_port) > 0) return Number(entry.shadowsocks_port)
+	return Number(order.port || 0)
+}
+
+async function copyOrderLines(order: Order) {
+	const lines = order.items.map((item) => {
+		if (order.mode === 'dedicated' && order.dedicated_entry) {
+			const host = String(order.dedicated_entry.domain || item.ip)
+			const port = dedicatedCopyPort(order)
+			return `${host}:${port}:${item.username}:${item.password}`
+		}
+		return `${item.ip}:${item.port}:${item.username}:${item.password}`
+	}).join('\n')
+	await navigator.clipboard.writeText(lines)
+	message.success('发货内容已复制')
 }
 
 async function previewImport() {
@@ -864,6 +984,187 @@ async function removeNode(id: number) {
 function openForwardManager() {
 	forwardManagerOpen.value = true
 	void panel.loadForwardOutbounds()
+}
+
+function resetDedicatedForm() {
+	dedicatedForm.id = 0
+	dedicatedForm.name = ''
+	dedicatedForm.domain = ''
+	dedicatedForm.mixed_port = 1080
+	dedicatedForm.vmess_port = 10086
+	dedicatedForm.vless_port = 10087
+	dedicatedForm.shadowsocks_port = 10088
+	dedicatedForm.priority = 100
+	dedicatedForm.features = ['mixed', 'vmess', 'vless', 'shadowsocks']
+	dedicatedForm.enabled = true
+	dedicatedForm.notes = ''
+}
+
+function openDedicatedManager() {
+	dedicatedManagerOpen.value = true
+	void panel.loadDedicatedEntries()
+}
+
+async function createDedicatedEntry() {
+	try {
+		await panel.createDedicatedEntry({
+			name: dedicatedForm.name,
+			domain: dedicatedForm.domain,
+			mixed_port: Number(dedicatedForm.mixed_port),
+			vmess_port: Number(dedicatedForm.vmess_port),
+			vless_port: Number(dedicatedForm.vless_port),
+			shadowsocks_port: Number(dedicatedForm.shadowsocks_port),
+			priority: Number(dedicatedForm.priority),
+			features: dedicatedForm.features,
+			enabled: dedicatedForm.enabled,
+			notes: dedicatedForm.notes
+		})
+		message.success('专线入口已创建')
+		resetDedicatedForm()
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function openDedicatedEdit(row: any) {
+	dedicatedForm.id = Number(row.id)
+	dedicatedForm.name = String(row.name || '')
+	dedicatedForm.domain = String(row.domain || '')
+	dedicatedForm.mixed_port = Number(row.mixed_port || 1080)
+	dedicatedForm.vmess_port = Number(row.vmess_port || 10086)
+	dedicatedForm.vless_port = Number(row.vless_port || 10087)
+	dedicatedForm.shadowsocks_port = Number(row.shadowsocks_port || 10088)
+	dedicatedForm.priority = Number(row.priority || 100)
+	dedicatedForm.features = String(row.features || '')
+		.split(',')
+		.map((v) => v.trim())
+		.filter((v) => v)
+	dedicatedForm.enabled = Boolean(row.enabled)
+	dedicatedForm.notes = String(row.notes || '')
+	dedicatedEditOpen.value = true
+}
+
+async function saveDedicatedEdit() {
+	try {
+		await panel.updateDedicatedEntry(Number(dedicatedForm.id), {
+			name: dedicatedForm.name,
+			domain: dedicatedForm.domain,
+			mixed_port: Number(dedicatedForm.mixed_port),
+			vmess_port: Number(dedicatedForm.vmess_port),
+			vless_port: Number(dedicatedForm.vless_port),
+			shadowsocks_port: Number(dedicatedForm.shadowsocks_port),
+			priority: Number(dedicatedForm.priority),
+			features: dedicatedForm.features,
+			enabled: dedicatedForm.enabled,
+			notes: dedicatedForm.notes
+		})
+		dedicatedEditOpen.value = false
+		message.success('专线入口已更新')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function removeDedicatedEntry(id: number) {
+	Modal.confirm({
+		title: '删除专线入口',
+		content: '确认删除这个专线入口吗？',
+		okText: '删除',
+		okType: 'danger',
+		onOk: async () => {
+			try {
+				await panel.deleteDedicatedEntry(id)
+			} catch (err) {
+				panel.setError(err)
+			}
+		}
+	})
+}
+
+async function splitOrderHead(orderID: number) {
+	try {
+		const rows = await panel.splitOrder(orderID)
+		message.success(`拆分完成，子订单 ${rows.length} 个`)
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function openGroupSocksModal(orderID: number) {
+	groupTargetOrderID.value = orderID
+	groupSocksLines.value = ''
+	groupSocksModalOpen.value = true
+}
+
+async function submitGroupSocksUpdate() {
+	if (!groupTargetOrderID.value) return
+	if (!groupSocksLines.value.trim()) {
+		message.warning('请粘贴 Socks5 列表')
+		return
+	}
+	try {
+		await panel.updateOrderGroupSocks5(groupTargetOrderID.value, groupSocksLines.value)
+		groupSocksModalOpen.value = false
+		groupSocksLines.value = ''
+		message.success('组内 Socks5 已顺序更新')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function groupTargetQuantity(): number {
+	const id = Number(groupTargetOrderID.value)
+	if (!id) return 1
+	const row = panel.orders.find((v) => Number(v.id) === id)
+	const q = Number(row?.quantity || 0)
+	if (Number.isFinite(q) && q > 0) return q
+	return 1
+}
+
+function downloadGroupSocksTemplate() {
+	const count = groupTargetQuantity()
+	const rows: string[] = []
+	for (let i = 1; i <= count; i += 1) {
+		rows.push(`127.0.0.${i}:1080:user${String(i).padStart(3, '0')}:pass${String(i).padStart(3, '0')}`)
+	}
+	downloadTextFile(rows.join('\n'), `group-socks5-template-${Date.now()}.txt`)
+}
+
+function openGroupCredModal(orderID: number) {
+	groupTargetOrderID.value = orderID
+	groupCredLines.value = ''
+	groupCredRegenerate.value = false
+	groupCredModalOpen.value = true
+}
+
+async function submitGroupCredentialUpdate() {
+	if (!groupTargetOrderID.value) return
+	if (!groupCredRegenerate.value && !groupCredLines.value.trim()) {
+		message.warning('请粘贴凭据列表或启用随机重置')
+		return
+	}
+	const regenerate = groupCredRegenerate.value
+	try {
+		await panel.updateOrderGroupCredentials(groupTargetOrderID.value, {
+			lines: groupCredLines.value,
+			regenerate
+		})
+		groupCredModalOpen.value = false
+		groupCredLines.value = ''
+		groupCredRegenerate.value = false
+		message.success(regenerate ? '组内凭据已随机重置' : '组内凭据已顺序更新')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function downloadGroupCredentialTemplate() {
+	const count = groupTargetQuantity()
+	const rows: string[] = []
+	for (let i = 1; i <= count; i += 1) {
+		rows.push(`user${String(i).padStart(3, '0')}:pass${String(i).padStart(3, '0')}:`) 
+	}
+	downloadTextFile(rows.join('\n'), `group-credentials-template-${Date.now()}.txt`)
 }
 
 async function createForwardOutbound() {
@@ -1390,13 +1691,15 @@ function downloadTextFile(text: string, filename: string) {
                   <a-select-option value="auto">自动分配</a-select-option>
                   <a-select-option value="manual">手动分配</a-select-option>
                   <a-select-option value="forward">转发分流</a-select-option>
+				  <a-select-option value="dedicated">专线分发</a-select-option>
                 </a-select></a-col>
               </a-row>
               <a-row :gutter="8" class="mt-2">
-                <a-col v-if="orderForm.mode !== 'forward'" :xs="24" :md="8"><a-input-number v-model:value="orderForm.quantity" :min="1" style="width: 100%" placeholder="数量" /></a-col>
-                <a-col v-else :xs="24" :md="8"><a-input :value="`规则数: ${orderForm.forward_outbound_ids.length}`" disabled /></a-col>
+                <a-col v-if="orderForm.mode !== 'forward' && orderForm.mode !== 'dedicated'" :xs="24" :md="8"><a-input-number v-model:value="orderForm.quantity" :min="1" style="width: 100%" placeholder="数量" /></a-col>
+                <a-col v-else-if="orderForm.mode === 'forward'" :xs="24" :md="8"><a-input :value="`规则数: ${orderForm.forward_outbound_ids.length}`" disabled /></a-col>
+				<a-col v-else :xs="24" :md="8"><a-input :value="`专线数: ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}`" disabled /></a-col>
                 <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.duration_day" :min="1" style="width: 100%" placeholder="有效天数" /></a-col>
-                <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.port" :min="1" :max="65535" style="width: 100%" placeholder="端口" /></a-col>
+                <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.port" :min="1" :max="65535" :disabled="orderForm.mode === 'dedicated'" style="width: 100%" placeholder="端口" /></a-col>
               </a-row>
               <a-row :gutter="8" class="mt-2">
                 <a-col :xs="24" :md="12">
@@ -1448,6 +1751,23 @@ function downloadTextFile(text: string, filename: string) {
                   :message="`复用提醒（不阻断）: ${createForwardReuseHints.length} 条`"
                   :description="createForwardReuseHints.join('；')"
                 />
+			  </div>
+			  <div v-else-if="orderForm.mode === 'dedicated'" class="mt-2">
+				<a-space class="mb-2" wrap>
+				  <a-button size="small" @click="openDedicatedManager">管理专线入口</a-button>
+				  <span class="text-xs text-slate-500">每个订单只绑定 1 个入口，数量按 Socks5 行数自动计算</span>
+				</a-space>
+				<a-select v-model:value="orderForm.dedicated_entry_id" style="width:100%" placeholder="选择专线入口">
+				  <a-select-option v-for="row in enabledDedicatedEntries" :key="row.id" :value="row.id">
+					{{ row.name || row.domain }} / {{ row.domain }} / mixed {{ row.mixed_port }} / vmess {{ row.vmess_port }} / vless {{ row.vless_port }} / ss {{ row.shadowsocks_port }}
+				  </a-select-option>
+				</a-select>
+				<a-space class="mt-2" wrap>
+				  <a-button size="small" @click="downloadGroupSocksTemplate">下载Socks5模板</a-button>
+				  <span class="text-xs text-slate-500">创建阶段模板默认按 1 行生成，可自行复制扩展</span>
+				</a-space>
+				<a-textarea v-model:value="orderForm.dedicated_egress_lines" class="mt-2" :rows="6" placeholder="每行: ip:port:user:pass（按顺序创建子订单）" />
+				<a-alert class="mt-2" type="info" show-icon :message="`专线数量 = ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}，订单将自动拆分为子订单 1:1`" />
               </div>
               <div class="mt-3 flex justify-end">
                 <a-button type="primary" @click="createOrder">下单并同步Xray</a-button>
@@ -1482,9 +1802,20 @@ function downloadTextFile(text: string, filename: string) {
                 size="small"
               >
                 <template #bodyCell="{ column, record }">
-                  <template v-if="column.key === 'customer'">
-                    {{ record.customer?.name || record.customer_id }}
-                  </template>
+				  <template v-if="column.key === 'customer'">
+					{{ record.customer?.name || record.customer_id }}
+				  </template>
+				  <template v-else-if="column.key === 'order_name'">
+					<div class="text-xs">
+					  <div class="font-medium text-slate-700">{{ record.name || '-' }}</div>
+					  <div class="text-slate-500">
+						<span v-if="record.is_group_head">组头单</span>
+						<span v-else-if="record.parent_order_id">子单 #{{ record.sequence_no || '-' }}</span>
+						<span v-else>普通单</span>
+						<span class="ml-2" v-if="record.group_id">G{{ record.group_id }}</span>
+					  </div>
+					</div>
+				  </template>
                   <template v-else-if="column.dataIndex === 'status'">
                     <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
                   </template>
@@ -1492,22 +1823,27 @@ function downloadTextFile(text: string, filename: string) {
                     <a-tag :color="modeColor(record.mode)">{{ record.mode }}</a-tag>
                   </template>
                   <template v-else-if="column.key === 'forward_summary'">
-                    <span class="text-xs" :class="record.mode === 'forward' ? 'font-mono text-slate-700' : 'text-slate-400'">{{ forwardSummary(record) }}</span>
-                  </template>
+					<span class="text-xs" :class="(record.mode === 'forward' || record.mode === 'dedicated') ? 'font-mono text-slate-700' : 'text-slate-400'">
+						{{ record.mode === 'dedicated' ? dedicatedSummary(record) : forwardSummary(record) }}
+					</span>
+				  </template>
                   <template v-else-if="column.key === 'expires'">
                     <div>{{ expiresHint(record.expires_at) }}</div>
                     <div class="text-xs text-slate-500">{{ formatTime(record.expires_at) }}</div>
                   </template>
                   <template v-else-if="column.key === 'action'">
-                    <a-space :size="4" wrap>
-                      <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
-                      <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
-                      <a-button size="small" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
-                      <a-button size="small" @click="streamTestOrder(record.id)">流式测活</a-button>
-                      <a-button size="small" @click="openOrderEdit(record)">编辑</a-button>
-                      <a-button size="small" @click="renewOrder(record.id)">续期</a-button>
-                      <a-button size="small" danger @click="deactivateOrder(record.id)">停用</a-button>
-                    </a-space>
+					<a-space :size="4" wrap>
+					  <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
+					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
+					  <a-button size="small" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
+					  <a-button size="small" @click="streamTestOrder(record.id)">流式测活</a-button>
+					  <a-button v-if="!record.parent_order_id && record.quantity > 1" size="small" @click="splitOrderHead(record.id)">拆分</a-button>
+					  <a-button v-if="record.is_group_head" size="small" @click="openGroupSocksModal(record.id)">顺序改Socks5</a-button>
+					  <a-button v-if="record.is_group_head" size="small" @click="openGroupCredModal(record.id)">批量改凭据</a-button>
+					  <a-button size="small" @click="openOrderEdit(record)">编辑</a-button>
+					  <a-button size="small" @click="renewOrder(record.id)">续期</a-button>
+					  <a-button size="small" danger @click="deactivateOrder(record.id)">停用</a-button>
+					</a-space>
                   </template>
                 </template>
               </a-table>
@@ -1805,6 +2141,65 @@ function downloadTextFile(text: string, filename: string) {
       </a-row>
     </a-drawer>
 
+	<a-drawer v-model:open="dedicatedManagerOpen" title="专线入口管理" width="980" :destroy-on-close="false">
+	  <a-row :gutter="12">
+		<a-col :xs="24" :lg="10">
+		  <a-space direction="vertical" style="width:100%">
+			<a-input v-model:value="dedicatedForm.name" placeholder="入口名称(可空)" />
+			<a-input v-model:value="dedicatedForm.domain" placeholder="域名或IP，如 line-us.example.com" />
+			<a-input-number v-model:value="dedicatedForm.priority" :min="1" :max="999" style="width:100%" placeholder="优先级(越小越高)" />
+			<a-input-number v-model:value="dedicatedForm.mixed_port" :min="1" :max="65535" style="width:100%" addon-before="Mixed" />
+			<a-input-number v-model:value="dedicatedForm.vmess_port" :min="1" :max="65535" style="width:100%" addon-before="Vmess" />
+			<a-input-number v-model:value="dedicatedForm.vless_port" :min="1" :max="65535" style="width:100%" addon-before="Vless" />
+			<a-input-number v-model:value="dedicatedForm.shadowsocks_port" :min="1" :max="65535" style="width:100%" addon-before="Shadowsocks" />
+			<a-checkbox-group v-model:value="dedicatedForm.features" :options="['mixed','vmess','vless','shadowsocks']" />
+			<a-input v-model:value="dedicatedForm.notes" placeholder="备注" />
+			<a-space>
+			  <a-switch :checked="dedicatedForm.enabled" @change="(v:boolean)=>dedicatedForm.enabled=v" />
+			  <span class="text-xs text-slate-500">启用</span>
+			</a-space>
+			<a-space>
+			  <a-button @click="resetDedicatedForm">重置</a-button>
+			  <a-button type="primary" @click="createDedicatedEntry">新增入口</a-button>
+			</a-space>
+		  </a-space>
+		</a-col>
+		<a-col :xs="24" :lg="14">
+		  <a-table :data-source="panel.dedicatedEntries" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 8 }">
+			<a-table-column title="入口" key="entry" width="240">
+			  <template #default="{ record }">
+				<div class="font-mono text-xs">{{ record.name || '-' }} / {{ record.domain }}</div>
+			  </template>
+			</a-table-column>
+			<a-table-column title="协议端口" key="ports" width="240">
+			  <template #default="{ record }">
+				<div class="text-xs">M {{ record.mixed_port }} | VM {{ record.vmess_port }} | VL {{ record.vless_port }} | SS {{ record.shadowsocks_port }}</div>
+			  </template>
+			</a-table-column>
+			<a-table-column title="特性" key="features" width="160">
+			  <template #default="{ record }">
+				<span class="text-xs">{{ record.features }}</span>
+			  </template>
+			</a-table-column>
+			<a-table-column title="优先级" data-index="priority" key="priority" width="90" />
+			<a-table-column title="启用" key="enabled" width="90">
+			  <template #default="{ record }">
+				<a-switch :checked="record.enabled" @change="(checked:boolean)=>panel.toggleDedicatedEntry(record.id, checked)" />
+			  </template>
+			</a-table-column>
+			<a-table-column title="动作" key="action" width="150">
+			  <template #default="{ record }">
+				<a-space :size="4">
+				  <a-button size="small" @click="openDedicatedEdit(record)">编辑</a-button>
+				  <a-button size="small" danger @click="removeDedicatedEntry(record.id)">删除</a-button>
+				</a-space>
+			  </template>
+			</a-table-column>
+		  </a-table>
+		</a-col>
+	  </a-row>
+	</a-drawer>
+
     <a-modal v-model:open="orderDetailOpen" title="订单详情" width="980px" :footer="null">
       <div v-if="orderDetailLoading" class="py-8 text-center">加载中...</div>
       <div v-else-if="panel.selectedOrder">
@@ -1822,7 +2217,7 @@ function downloadTextFile(text: string, filename: string) {
           <a-space>
             <a-input-number v-model:value="exportCount" :min="0" :max="panel.selectedOrder.items.length" size="small" />
             <a-button size="small" :loading="exportingOrderID===panel.selectedOrder.id" @click="exportOrder(panel.selectedOrder.id)">提取导出</a-button>
-            <a-button size="small" @click="copyOrderLines(panel.selectedOrder.items)">复制发货内容</a-button>
+            <a-button size="small" @click="copyOrderLines(panel.selectedOrder)">复制发货内容</a-button>
           </a-space>
         </div>
 
@@ -1871,8 +2266,8 @@ function downloadTextFile(text: string, filename: string) {
       <a-form layout="vertical">
         <a-form-item label="模式"><a-tag :color="modeColor(orderEditForm.mode)">{{ orderEditForm.mode }}</a-tag></a-form-item>
         <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" /></a-form-item>
-        <a-form-item v-if="orderEditForm.mode !== 'forward'" label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
-        <a-form-item v-else label="SOCKS5转发出口">
+        <a-form-item v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'" label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
+        <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="SOCKS5转发出口">
           <a-space class="mb-2" wrap>
             <a-button size="small" @click="openForwardManager">管理SOCKS5出口</a-button>
             <a-button size="small" @click="probeAllForwardOutbounds">批量探测出口</a-button>
@@ -1883,7 +2278,20 @@ function downloadTextFile(text: string, filename: string) {
             </a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item label="端口"><a-input-number v-model:value="orderEditForm.port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+        <a-form-item v-else label="专线入口">
+          <a-space class="mb-2" wrap>
+            <a-button size="small" @click="openDedicatedManager">管理专线入口</a-button>
+          </a-space>
+          <a-select v-model:value="orderEditForm.dedicated_entry_id" style="width:100%" placeholder="选择专线入口">
+            <a-select-option v-for="row in enabledDedicatedEntries" :key="row.id" :value="row.id">
+              {{ row.name || row.domain }} / {{ row.domain }} / mixed {{ row.mixed_port }} / vmess {{ row.vmess_port }} / vless {{ row.vless_port }} / ss {{ row.shadowsocks_port }}
+            </a-select-option>
+          </a-select>
+          <a-textarea v-model:value="orderEditForm.dedicated_egress_lines" class="mt-2" :rows="4" placeholder="可选: 顺序更新上游，每行 ip:port:user:pass" />
+          <a-textarea v-model:value="orderEditForm.dedicated_credential_lines" class="mt-2" :rows="3" placeholder="可选: 顺序更新入站凭据，每行 user:pass[:uuid]" />
+          <a-checkbox v-model:checked="orderEditForm.regenerate_dedicated_credentials" class="mt-2">随机重置组内凭据</a-checkbox>
+        </a-form-item>
+        <a-form-item label="端口"><a-input-number v-model:value="orderEditForm.port" :min="1" :max="65535" :disabled="orderEditForm.mode === 'dedicated'" style="width:100%" /></a-form-item>
         <a-form-item label="到期时间"><a-date-picker v-model:value="orderEditForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" /></a-form-item>
         <a-space class="mb-2">
           <a-button size="small" @click="setQuickExpiry(7, 'edit')">7天</a-button>
@@ -1894,6 +2302,45 @@ function downloadTextFile(text: string, filename: string) {
         <a-alert v-if="orderEditForm.mode === 'forward' && editForwardReuseHints.length" class="mt-2" type="warning" show-icon :message="`复用提醒（不阻断）: ${editForwardReuseHints.length} 条`" :description="editForwardReuseHints.join('；')" />
       </a-form>
     </a-modal>
+
+	<a-modal v-model:open="dedicatedEditOpen" title="编辑专线入口" @ok="saveDedicatedEdit">
+	  <a-form layout="vertical">
+		<a-form-item label="入口名称"><a-input v-model:value="dedicatedForm.name" /></a-form-item>
+		<a-form-item label="域名"><a-input v-model:value="dedicatedForm.domain" /></a-form-item>
+		<a-form-item label="优先级"><a-input-number v-model:value="dedicatedForm.priority" :min="1" :max="999" style="width:100%" /></a-form-item>
+		<a-form-item label="Mixed端口"><a-input-number v-model:value="dedicatedForm.mixed_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+		<a-form-item label="Vmess端口"><a-input-number v-model:value="dedicatedForm.vmess_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+		<a-form-item label="Vless端口"><a-input-number v-model:value="dedicatedForm.vless_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+		<a-form-item label="Shadowsocks端口"><a-input-number v-model:value="dedicatedForm.shadowsocks_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+		<a-form-item label="特性">
+		  <a-checkbox-group v-model:value="dedicatedForm.features" :options="['mixed','vmess','vless','shadowsocks']" />
+		</a-form-item>
+		<a-form-item label="备注"><a-input v-model:value="dedicatedForm.notes" /></a-form-item>
+		<a-form-item>
+		  <a-switch :checked="dedicatedForm.enabled" @change="(v:boolean)=>dedicatedForm.enabled=v" />
+		  <span class="ml-2 text-xs text-slate-500">启用</span>
+		</a-form-item>
+	  </a-form>
+	</a-modal>
+
+	<a-modal v-model:open="groupSocksModalOpen" title="顺序更新组内 Socks5" @ok="submitGroupSocksUpdate">
+	  <a-alert type="info" show-icon message="每行格式: ip:port:user:pass；顺序必须与子订单顺序一致" class="mb-2" />
+	  <a-space class="mb-2">
+		<a-button size="small" @click="downloadGroupSocksTemplate">下载模板</a-button>
+		<span class="text-xs text-slate-500">模板行数按当前组头 quantity 生成</span>
+	  </a-space>
+	  <a-textarea v-model:value="groupSocksLines" :rows="10" placeholder="按顺序粘贴 Socks5 列表" />
+	</a-modal>
+
+	<a-modal v-model:open="groupCredModalOpen" title="批量更新组内入站凭据" @ok="submitGroupCredentialUpdate">
+	  <a-alert type="info" show-icon message="每行格式: user:pass[:uuid]；不填 uuid 自动生成" class="mb-2" />
+	  <a-space class="mb-2">
+		<a-button size="small" @click="downloadGroupCredentialTemplate">下载模板</a-button>
+		<span class="text-xs text-slate-500">第三段 uuid 留空则自动生成</span>
+	  </a-space>
+	  <a-checkbox v-model:checked="groupCredRegenerate" class="mb-2">忽略文本，随机重置全组凭据</a-checkbox>
+	  <a-textarea v-model:value="groupCredLines" :rows="8" :disabled="groupCredRegenerate" placeholder="按顺序粘贴凭据" />
+	</a-modal>
 
     <a-modal v-model:open="forwardEditOpen" title="编辑转发出口" @ok="saveForwardEdit">
       <a-form layout="vertical">

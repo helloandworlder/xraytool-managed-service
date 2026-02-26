@@ -11,13 +11,19 @@ const (
 	OrderItemStatusExpired  = "expired"
 	OrderItemStatusDisabled = "disabled"
 
-	OrderModeAuto    = "auto"
-	OrderModeManual  = "manual"
-	OrderModeImport  = "import"
-	OrderModeForward = "forward"
+	OrderModeAuto      = "auto"
+	OrderModeManual    = "manual"
+	OrderModeImport    = "import"
+	OrderModeForward   = "forward"
+	OrderModeDedicated = "dedicated"
 
 	OutboundTypeDirect = "direct"
 	OutboundTypeSocks5 = "socks5"
+
+	DedicatedFeatureMixed       = "mixed"
+	DedicatedFeatureVmess       = "vmess"
+	DedicatedFeatureVless       = "vless"
+	DedicatedFeatureShadowsocks = "shadowsocks"
 )
 
 type Admin struct {
@@ -86,9 +92,32 @@ type SocksOutbound struct {
 	OrderItems []OrderItem `json:"order_items,omitempty"`
 }
 
+type DedicatedEntry struct {
+	ID              uint      `gorm:"primaryKey" json:"id"`
+	Name            string    `gorm:"size:128" json:"name"`
+	Domain          string    `gorm:"size:255;not null;index" json:"domain"`
+	MixedPort       int       `gorm:"not null;default:0" json:"mixed_port"`
+	VmessPort       int       `gorm:"not null;default:0" json:"vmess_port"`
+	VlessPort       int       `gorm:"not null;default:0" json:"vless_port"`
+	ShadowsocksPort int       `gorm:"not null;default:0" json:"shadowsocks_port"`
+	Priority        int       `gorm:"not null;default:100;index" json:"priority"`
+	Features        string    `gorm:"size:255;not null;default:mixed" json:"features"`
+	Enabled         bool      `gorm:"default:true;index" json:"enabled"`
+	Notes           string    `gorm:"size:255" json:"notes"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+
+	Orders []Order `json:"orders,omitempty"`
+}
+
 type Order struct {
 	ID                uint      `gorm:"primaryKey" json:"id"`
 	CustomerID        uint      `gorm:"index;not null" json:"customer_id"`
+	GroupID           uint      `gorm:"index" json:"group_id"`
+	ParentOrderID     *uint     `gorm:"index" json:"parent_order_id,omitempty"`
+	IsGroupHead       bool      `gorm:"default:false;index" json:"is_group_head"`
+	SequenceNo        int       `gorm:"default:0;index" json:"sequence_no"`
+	DedicatedEntryID  *uint     `gorm:"index" json:"dedicated_entry_id,omitempty"`
 	Name              string    `gorm:"size:128;not null" json:"name"`
 	Mode              string    `gorm:"size:32;not null" json:"mode"`
 	Status            string    `gorm:"size:32;not null;index" json:"status"`
@@ -101,8 +130,9 @@ type Order struct {
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 
-	Customer Customer    `json:"customer"`
-	Items    []OrderItem `json:"items"`
+	Customer       Customer        `json:"customer"`
+	DedicatedEntry *DedicatedEntry `json:"dedicated_entry,omitempty"`
+	Items          []OrderItem     `json:"items"`
 }
 
 type OrderItem struct {
@@ -115,6 +145,7 @@ type OrderItem struct {
 	Port            int    `gorm:"not null;index" json:"port"`
 	Username        string `gorm:"size:64;not null;index:idx_order_items_auth" json:"username"`
 	Password        string `gorm:"size:64;not null" json:"password"`
+	VmessUUID       string `gorm:"size:64;index" json:"vmess_uuid,omitempty"`
 	OutboundType    string `gorm:"size:16;not null;default:direct;index" json:"outbound_type"`
 	ForwardAddress  string `gorm:"size:128" json:"forward_address,omitempty"`
 	ForwardPort     int    `json:"forward_port,omitempty"`
@@ -126,10 +157,26 @@ type OrderItem struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	HostIP        *HostIP        `json:"host_ip,omitempty"`
-	SocksOutbound *SocksOutbound `json:"socks_outbound,omitempty"`
-	Order         Order          `json:"-"`
-	Resources     []XrayResource `json:"resources,omitempty"`
+	HostIP          *HostIP          `json:"host_ip,omitempty"`
+	SocksOutbound   *SocksOutbound   `json:"socks_outbound,omitempty"`
+	DedicatedEgress *DedicatedEgress `json:"dedicated_egress,omitempty"`
+	Order           Order            `json:"-"`
+	Resources       []XrayResource   `json:"resources,omitempty"`
+}
+
+type DedicatedEgress struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	OrderID     uint      `gorm:"index;not null" json:"order_id"`
+	OrderItemID uint      `gorm:"index;uniqueIndex;not null" json:"order_item_id"`
+	Address     string    `gorm:"size:128;not null" json:"address"`
+	Port        int       `gorm:"not null" json:"port"`
+	Username    string    `gorm:"size:128;not null" json:"username"`
+	Password    string    `gorm:"size:128;not null" json:"password"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+
+	Order     Order     `json:"-"`
+	OrderItem OrderItem `json:"-"`
 }
 
 type XrayResource struct {

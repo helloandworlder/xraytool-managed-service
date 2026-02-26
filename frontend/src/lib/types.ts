@@ -22,6 +22,7 @@ export interface OrderItem {
   port: number
   username: string
   password: string
+  vmess_uuid?: string
   outbound_type?: string
   socks_outbound_id?: number
   forward_address?: string
@@ -37,9 +38,29 @@ export interface OrderItem {
   }>
 }
 
+export interface DedicatedEntry {
+  id: number
+  name: string
+  domain: string
+  mixed_port: number
+  vmess_port: number
+  vless_port: number
+  shadowsocks_port: number
+  priority: number
+  features: string
+  enabled: boolean
+  notes: string
+}
+
 export interface Order {
   id: number
   customer_id: number
+  group_id?: number
+  parent_order_id?: number
+  is_group_head?: boolean
+  sequence_no?: number
+  dedicated_entry_id?: number
+  dedicated_entry?: DedicatedEntry
   customer?: Customer
   name: string
   mode: string
