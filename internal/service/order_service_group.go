@@ -15,16 +15,21 @@ import (
 )
 
 func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderInput, now time.Time, expiresAt time.Time) (*model.Order, error) {
-	if in.DedicatedEntryID == 0 {
-		return nil, errors.New("dedicated_entry_id is required for dedicated mode")
+	protocol := strings.TrimSpace(in.DedicatedProtocol)
+	if protocol == "" {
+		protocol = model.DedicatedFeatureMixed
 	}
-	entry := model.DedicatedEntry{}
-	if err := s.db.Where("id = ? and enabled = 1", in.DedicatedEntryID).First(&entry).Error; err != nil {
-		return nil, fmt.Errorf("dedicated entry invalid: %w", err)
+	protocol, err := normalizeDedicatedProtocol(protocol)
+	if err != nil {
+		return nil, err
 	}
-	primaryPort := chooseDedicatedPrimaryPort(entry)
+	inbound, ingress, entry, err := s.resolveDedicatedBindingForCreate(in, protocol)
+	if err != nil {
+		return nil, err
+	}
+	primaryPort := inbound.ListenPort
 	if primaryPort <= 0 {
-		return nil, errors.New("dedicated entry has no usable protocol port")
+		return nil, fmt.Errorf("dedicated inbound has no usable port for protocol %s", protocol)
 	}
 	egressRows, err := parseDedicatedEgressLines(in.DedicatedEgressLines)
 	if err != nil {
@@ -36,25 +41,43 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 	in.Quantity = len(egressRows)
 	baseName := strings.TrimSpace(in.Name)
 	if baseName == "" {
-		baseName = fmt.Sprintf("Dedicated-%d-%s", in.CustomerID, now.Format("20060102150405"))
+		customer := model.Customer{}
+		if err := s.db.First(&customer, in.CustomerID).Error; err == nil {
+			code := strings.TrimSpace(customer.Code)
+			if code == "" {
+				code = fmt.Sprintf("C%d", customer.ID)
+			}
+			baseName = fmt.Sprintf("%s-%s-%s", code, protocol, now.Format("20060102150405"))
+		} else {
+			baseName = fmt.Sprintf("Dedicated-%d-%s", in.CustomerID, now.Format("20060102150405"))
+		}
 	}
 
 	head := &model.Order{
-		CustomerID:       in.CustomerID,
-		Name:             baseName,
-		Mode:             model.OrderModeDedicated,
-		Status:           model.OrderStatusActive,
-		Quantity:         len(egressRows),
-		Port:             primaryPort,
-		StartsAt:         now,
-		ExpiresAt:        expiresAt,
-		IsGroupHead:      true,
-		DedicatedEntryID: &entry.ID,
+		CustomerID:         in.CustomerID,
+		Name:               baseName,
+		Mode:               model.OrderModeDedicated,
+		DedicatedProtocol:  protocol,
+		Status:             model.OrderStatusActive,
+		Quantity:           len(egressRows),
+		Port:               primaryPort,
+		StartsAt:           now,
+		ExpiresAt:          expiresAt,
+		IsGroupHead:        true,
+		DedicatedEntryID:   uintPtrOrNil(entry.ID),
+		DedicatedInboundID: uintPtrOrNil(inbound.ID),
+		DedicatedIngressID: uintPtrOrNil(ingress.ID),
 	}
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(head).Error; err != nil {
 			return err
+		}
+		if strings.TrimSpace(in.Name) == "" {
+			head.Name = fmt.Sprintf("%s-%d", baseName, head.ID)
+			if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(map[string]interface{}{"name": head.Name, "updated_at": now}).Error; err != nil {
+				return err
+			}
 		}
 		if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(map[string]interface{}{
 			"group_id":   head.ID,
@@ -63,22 +86,26 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 			return err
 		}
 		for i, outbound := range egressRows {
-			childName := fmt.Sprintf("%s-%03d", baseName, i+1)
+			childName := fmt.Sprintf("%s-%03d", head.Name, i+1)
 			seq := i + 1
 			parentID := head.ID
+			itemUser, itemPass, itemUUID := generateDedicatedCredentialsByProtocol(protocol)
 			child := model.Order{
-				CustomerID:       in.CustomerID,
-				GroupID:          head.ID,
-				ParentOrderID:    &parentID,
-				SequenceNo:       seq,
-				DedicatedEntryID: &entry.ID,
-				Name:             childName,
-				Mode:             model.OrderModeDedicated,
-				Status:           model.OrderStatusActive,
-				Quantity:         1,
-				Port:             primaryPort,
-				StartsAt:         now,
-				ExpiresAt:        expiresAt,
+				CustomerID:         in.CustomerID,
+				GroupID:            head.ID,
+				ParentOrderID:      &parentID,
+				SequenceNo:         seq,
+				DedicatedEntryID:   uintPtrOrNil(entry.ID),
+				DedicatedInboundID: uintPtrOrNil(inbound.ID),
+				DedicatedIngressID: uintPtrOrNil(ingress.ID),
+				DedicatedProtocol:  protocol,
+				Name:               childName,
+				Mode:               model.OrderModeDedicated,
+				Status:             model.OrderStatusActive,
+				Quantity:           1,
+				Port:               primaryPort,
+				StartsAt:           now,
+				ExpiresAt:          expiresAt,
 			}
 			if err := tx.Create(&child).Error; err != nil {
 				return err
@@ -87,9 +114,9 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 				OrderID:         child.ID,
 				IP:              "127.0.0.1",
 				Port:            primaryPort,
-				Username:        randomString(8),
-				Password:        randomString(12),
-				VmessUUID:       randomUUID(),
+				Username:        itemUser,
+				Password:        itemPass,
+				VmessUUID:       itemUUID,
 				OutboundType:    model.OutboundTypeSocks5,
 				ForwardAddress:  outbound.Address,
 				ForwardPort:     outbound.Port,
@@ -113,7 +140,13 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 				CreatedAt:   now,
 				UpdatedAt:   now,
 			}
+			fillDedicatedEgressProbe(&egress)
 			if err := tx.Create(&egress).Error; err != nil {
+				return err
+			}
+			country := normalizeCountryPrefix(egress.CountryCode)
+			childFinalName := fmt.Sprintf("%s-%s-%03d", head.Name, country, seq)
+			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(map[string]interface{}{"name": childFinalName, "updated_at": now}).Error; err != nil {
 				return err
 			}
 		}
@@ -127,10 +160,126 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 		s.log.Warn("sync runtime after dedicated create failed", zap.Error(err), zap.Uint("order_id", head.ID))
 	}
 
-	if err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("Items").First(head, head.ID).Error; err != nil {
+	if err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Preload("Items").First(head, head.ID).Error; err != nil {
 		return nil, err
 	}
 	return head, nil
+}
+
+func uintPtrOrNil(v uint) *uint {
+	if v == 0 {
+		return nil
+	}
+	vv := v
+	return &vv
+}
+
+func (s *OrderService) resolveDedicatedBindingForCreate(in CreateOrderInput, protocol string) (model.DedicatedInbound, model.DedicatedIngress, model.DedicatedEntry, error) {
+	inbound := model.DedicatedInbound{}
+	ingress := model.DedicatedIngress{}
+	entry := model.DedicatedEntry{}
+	if in.DedicatedInboundID > 0 && in.DedicatedIngressID > 0 {
+		if err := s.db.Where("id = ? and enabled = 1", in.DedicatedInboundID).First(&inbound).Error; err != nil {
+			return inbound, ingress, entry, fmt.Errorf("dedicated inbound invalid: %w", err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(inbound.Protocol), protocol) {
+			return inbound, ingress, entry, fmt.Errorf("inbound protocol mismatch, expect %s got %s", protocol, inbound.Protocol)
+		}
+		if err := s.db.Where("id = ? and dedicated_inbound_id = ? and enabled = 1", in.DedicatedIngressID, inbound.ID).First(&ingress).Error; err != nil {
+			return inbound, ingress, entry, fmt.Errorf("dedicated ingress invalid: %w", err)
+		}
+		if in.DedicatedEntryID > 0 {
+			_ = s.db.Where("id = ?", in.DedicatedEntryID).First(&entry).Error
+		}
+		return inbound, ingress, entry, nil
+	}
+	if in.DedicatedEntryID == 0 {
+		return inbound, ingress, entry, errors.New("dedicated_inbound_id + dedicated_ingress_id required")
+	}
+	if err := s.db.Where("id = ? and enabled = 1", in.DedicatedEntryID).First(&entry).Error; err != nil {
+		return inbound, ingress, entry, fmt.Errorf("dedicated entry invalid: %w", err)
+	}
+	if !hasDedicatedFeature(entry.Features, protocol) {
+		return inbound, ingress, entry, fmt.Errorf("dedicated entry does not support protocol %s", protocol)
+	}
+	port := dedicatedPortByProtocol(entry, protocol)
+	if port <= 0 {
+		return inbound, ingress, entry, fmt.Errorf("dedicated entry has no usable port for protocol %s", protocol)
+	}
+	if err := s.db.Where("protocol = ? and listen_port = ?", protocol, port).First(&inbound).Error; err != nil {
+		return inbound, ingress, entry, errors.New("missing migrated inbound for legacy dedicated entry")
+	}
+	if err := s.db.Where("dedicated_inbound_id = ? and domain = ? and ingress_port = ?", inbound.ID, entry.Domain, port).First(&ingress).Error; err != nil {
+		return inbound, ingress, entry, errors.New("missing migrated ingress for legacy dedicated entry")
+	}
+	return inbound, ingress, entry, nil
+}
+
+func (s *OrderService) resolveDedicatedBindingForUpdateTx(tx *gorm.DB, protocol string, entryID *uint, inboundID *uint, ingressID *uint) (*uint, *uint, *uint, int, error) {
+	protocol, err := normalizeDedicatedProtocol(protocol)
+	if err != nil {
+		return nil, nil, nil, 0, err
+	}
+
+	entry := model.DedicatedEntry{}
+	hasEntry := entryID != nil && *entryID > 0
+	if hasEntry {
+		if err := tx.Where("id = ?", *entryID).First(&entry).Error; err != nil {
+			return nil, nil, nil, 0, fmt.Errorf("dedicated entry invalid: %w", err)
+		}
+		if !hasDedicatedFeature(entry.Features, protocol) {
+			return nil, nil, nil, 0, fmt.Errorf("dedicated entry does not support protocol %s", protocol)
+		}
+	}
+
+	inbound := model.DedicatedInbound{}
+	hasInbound := inboundID != nil && *inboundID > 0
+	if hasInbound {
+		if err := tx.Where("id = ?", *inboundID).First(&inbound).Error; err != nil {
+			return nil, nil, nil, 0, fmt.Errorf("dedicated inbound invalid: %w", err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(inbound.Protocol), protocol) {
+			return nil, nil, nil, 0, fmt.Errorf("inbound protocol mismatch, expect %s got %s", protocol, inbound.Protocol)
+		}
+	} else {
+		if !hasEntry {
+			return nil, nil, nil, 0, errors.New("dedicated_inbound_id + dedicated_ingress_id required")
+		}
+		port := dedicatedPortByProtocol(entry, protocol)
+		if port <= 0 {
+			return nil, nil, nil, 0, fmt.Errorf("dedicated entry has no usable port for protocol %s", protocol)
+		}
+		if err := tx.Where("protocol = ? and listen_port = ?", protocol, port).First(&inbound).Error; err != nil {
+			return nil, nil, nil, 0, errors.New("missing migrated inbound for legacy dedicated entry")
+		}
+	}
+
+	if inbound.ListenPort <= 0 {
+		return nil, nil, nil, 0, fmt.Errorf("dedicated inbound has no usable port for protocol %s", protocol)
+	}
+
+	ingress := model.DedicatedIngress{}
+	hasIngress := ingressID != nil && *ingressID > 0
+	if hasIngress {
+		if err := tx.Where("id = ? and dedicated_inbound_id = ?", *ingressID, inbound.ID).First(&ingress).Error; err != nil {
+			return nil, nil, nil, 0, fmt.Errorf("dedicated ingress invalid: %w", err)
+		}
+	} else {
+		if !hasEntry {
+			return nil, nil, nil, 0, errors.New("dedicated_ingress_id is required")
+		}
+		if err := tx.Where("dedicated_inbound_id = ? and domain = ? and ingress_port = ?", inbound.ID, entry.Domain, inbound.ListenPort).First(&ingress).Error; err != nil {
+			return nil, nil, nil, 0, errors.New("missing migrated ingress for legacy dedicated entry")
+		}
+	}
+
+	resolvedEntryID := (*uint)(nil)
+	if hasEntry {
+		resolvedEntryID = uintPtrOrNil(entry.ID)
+	}
+	resolvedInboundID := uintPtrOrNil(inbound.ID)
+	resolvedIngressID := uintPtrOrNil(ingress.ID)
+	return resolvedEntryID, resolvedInboundID, resolvedIngressID, inbound.ListenPort, nil
 }
 
 func (s *OrderService) rebuildManagedRuntime(ctx context.Context) error {
@@ -164,18 +313,37 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 		}
 
 		targetEntryID := head.DedicatedEntryID
+		targetInboundID := head.DedicatedInboundID
+		targetIngressID := head.DedicatedIngressID
+		targetProtocol := strings.TrimSpace(head.DedicatedProtocol)
+		if targetProtocol == "" {
+			targetProtocol = model.DedicatedFeatureMixed
+		}
+		if strings.TrimSpace(in.DedicatedProtocol) != "" {
+			targetProtocol, err = normalizeDedicatedProtocol(in.DedicatedProtocol)
+			if err != nil {
+				return err
+			}
+		}
 		targetPort := head.Port
-		if head.Mode == model.OrderModeDedicated && in.DedicatedEntryID > 0 {
-			entry := model.DedicatedEntry{}
-			if err := tx.Where("id = ? and enabled = 1", in.DedicatedEntryID).First(&entry).Error; err != nil {
-				return fmt.Errorf("dedicated entry invalid: %w", err)
+		if head.Mode == model.OrderModeDedicated {
+			if in.DedicatedEntryID > 0 {
+				targetEntryID = &in.DedicatedEntryID
 			}
-			port := chooseDedicatedPrimaryPort(entry)
-			if port <= 0 {
-				return errors.New("dedicated entry has no usable protocol port")
+			if in.DedicatedInboundID > 0 {
+				targetInboundID = &in.DedicatedInboundID
 			}
-			targetPort = port
-			targetEntryID = &entry.ID
+			if in.DedicatedIngressID > 0 {
+				targetIngressID = &in.DedicatedIngressID
+			}
+			resolvedEntryID, resolvedInboundID, resolvedIngressID, resolvedPort, resolveErr := s.resolveDedicatedBindingForUpdateTx(tx, targetProtocol, targetEntryID, targetInboundID, targetIngressID)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			targetEntryID = resolvedEntryID
+			targetInboundID = resolvedInboundID
+			targetIngressID = resolvedIngressID
+			targetPort = resolvedPort
 		}
 
 		if strings.TrimSpace(in.DedicatedEgressLines) != "" {
@@ -195,11 +363,18 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 			"expires_at":          targetExpires,
 			"notify_one_day_sent": false,
 			"notify_expired_sent": false,
+			"dedicated_protocol":  targetProtocol,
 			"port":                targetPort,
 			"updated_at":          now,
 		}
 		if targetEntryID != nil {
 			headUpdates["dedicated_entry_id"] = *targetEntryID
+		}
+		if targetInboundID != nil {
+			headUpdates["dedicated_inbound_id"] = *targetInboundID
+		}
+		if targetIngressID != nil {
+			headUpdates["dedicated_ingress_id"] = *targetIngressID
 		}
 		if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(headUpdates).Error; err != nil {
 			return err
@@ -210,11 +385,18 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 				"expires_at":          targetExpires,
 				"notify_one_day_sent": false,
 				"notify_expired_sent": false,
+				"dedicated_protocol":  targetProtocol,
 				"port":                targetPort,
 				"updated_at":          now,
 			}
 			if targetEntryID != nil {
 				childUpdates["dedicated_entry_id"] = *targetEntryID
+			}
+			if targetInboundID != nil {
+				childUpdates["dedicated_inbound_id"] = *targetInboundID
+			}
+			if targetIngressID != nil {
+				childUpdates["dedicated_ingress_id"] = *targetIngressID
 			}
 			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(childUpdates).Error; err != nil {
 				return err
@@ -283,6 +465,93 @@ func (s *OrderService) renewOrderGroup(ctx context.Context, head model.Order, mo
 	return s.rebuildManagedRuntime(ctx)
 }
 
+func (s *OrderService) RenewOrderGroupSelected(ctx context.Context, headOrderID uint, childOrderIDs []uint, moreDays int) error {
+	if headOrderID == 0 {
+		return errors.New("order_id is required")
+	}
+	ids := uniqueUintIDs(childOrderIDs)
+	if len(ids) == 0 {
+		return errors.New("child_order_ids is empty")
+	}
+	if moreDays <= 0 {
+		moreDays = 30
+	}
+
+	head := model.Order{}
+	if err := s.db.First(&head, headOrderID).Error; err != nil {
+		return err
+	}
+	if !head.IsGroupHead {
+		return errors.New("only group head order supports selected renew")
+	}
+
+	now := time.Now()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		children := []model.Order{}
+		if err := tx.Where("parent_order_id = ? and id in ?", head.ID, ids).Find(&children).Error; err != nil {
+			return err
+		}
+		if len(children) == 0 {
+			return errors.New("no matched child orders")
+		}
+		if len(children) != len(ids) {
+			return fmt.Errorf("matched child orders %d not equal request %d", len(children), len(ids))
+		}
+
+		for _, child := range children {
+			base := child.ExpiresAt
+			if base.Before(now) {
+				base = now
+			}
+			newExpires := base.Add(time.Duration(moreDays) * 24 * time.Hour)
+			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(map[string]interface{}{
+				"status":              model.OrderStatusActive,
+				"expires_at":          newExpires,
+				"notify_one_day_sent": false,
+				"notify_expired_sent": false,
+				"updated_at":          now,
+			}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&model.OrderItem{}).Where("order_id = ?", child.ID).Updates(map[string]interface{}{
+				"status":     model.OrderItemStatusActive,
+				"updated_at": now,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		allChildren := []model.Order{}
+		if err := tx.Select("id", "status", "expires_at").Where("parent_order_id = ?", head.ID).Find(&allChildren).Error; err != nil {
+			return err
+		}
+		headExpires := now
+		headStatus := model.OrderStatusExpired
+		for _, child := range allChildren {
+			if child.ExpiresAt.After(headExpires) {
+				headExpires = child.ExpiresAt
+			}
+			if child.Status == model.OrderStatusActive && child.ExpiresAt.After(now) {
+				headStatus = model.OrderStatusActive
+			}
+		}
+		if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(map[string]interface{}{
+			"status":              headStatus,
+			"expires_at":          headExpires,
+			"notify_one_day_sent": false,
+			"notify_expired_sent": false,
+			"updated_at":          now,
+		}).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return s.rebuildManagedRuntime(ctx)
+}
+
 func (s *OrderService) loadGroupChildrenTx(tx *gorm.DB, headID uint) ([]model.Order, error) {
 	rows := []model.Order{}
 	err := tx.Preload("Items").Where("parent_order_id = ?", headID).Order("sequence_no asc, id asc").Find(&rows).Error
@@ -330,19 +599,22 @@ func (s *OrderService) SplitOrder(ctx context.Context, orderID uint) ([]model.Or
 		for i, item := range head.Items {
 			parentID := head.ID
 			child := model.Order{
-				CustomerID:       head.CustomerID,
-				GroupID:          head.ID,
-				ParentOrderID:    &parentID,
-				IsGroupHead:      false,
-				SequenceNo:       i + 1,
-				DedicatedEntryID: head.DedicatedEntryID,
-				Name:             fmt.Sprintf("%s-%03d", head.Name, i+1),
-				Mode:             head.Mode,
-				Status:           head.Status,
-				Quantity:         1,
-				Port:             head.Port,
-				StartsAt:         head.StartsAt,
-				ExpiresAt:        head.ExpiresAt,
+				CustomerID:         head.CustomerID,
+				GroupID:            head.ID,
+				ParentOrderID:      &parentID,
+				IsGroupHead:        false,
+				SequenceNo:         i + 1,
+				DedicatedEntryID:   head.DedicatedEntryID,
+				DedicatedInboundID: head.DedicatedInboundID,
+				DedicatedIngressID: head.DedicatedIngressID,
+				DedicatedProtocol:  head.DedicatedProtocol,
+				Name:               fmt.Sprintf("%s-%03d", head.Name, i+1),
+				Mode:               head.Mode,
+				Status:             head.Status,
+				Quantity:           1,
+				Port:               head.Port,
+				StartsAt:           head.StartsAt,
+				ExpiresAt:          head.ExpiresAt,
 			}
 			if err := tx.Create(&child).Error; err != nil {
 				return err
@@ -366,6 +638,7 @@ func (s *OrderService) SplitOrder(ctx context.Context, orderID uint) ([]model.Or
 					CreatedAt:   now,
 					UpdatedAt:   now,
 				}
+				fillDedicatedEgressProbe(&egress)
 				if err := tx.Where("order_item_id = ?", item.ID).Delete(&model.DedicatedEgress{}).Error; err != nil {
 					return err
 				}
@@ -482,6 +755,7 @@ func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, childr
 		egress.Port = eg.Port
 		egress.Username = eg.Username
 		egress.Password = eg.Password
+		fillDedicatedEgressProbe(&egress)
 		egress.UpdatedAt = now
 		if err := tx.Save(&egress).Error; err != nil {
 			return err
@@ -491,20 +765,24 @@ func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, childr
 }
 
 func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, head model.Order, children []model.Order, lines string, regenerate bool, now time.Time) error {
-	_ = head
+	protocol := strings.TrimSpace(head.DedicatedProtocol)
+	if protocol == "" {
+		protocol = model.DedicatedFeatureMixed
+	}
 	credRows := []DedicatedCredentialLine{}
 	var err error
 	if regenerate {
 		credRows = make([]DedicatedCredentialLine, 0, len(children))
 		for range children {
+			user, pass, uuid := generateDedicatedCredentialsByProtocol(protocol)
 			credRows = append(credRows, DedicatedCredentialLine{
-				Username: randomString(8),
-				Password: randomString(12),
-				UUID:     randomUUID(),
+				Username: user,
+				Password: pass,
+				UUID:     uuid,
 			})
 		}
 	} else {
-		credRows, err = parseDedicatedCredentialLines(lines)
+		credRows, err = parseDedicatedCredentialLinesForProtocol(lines, protocol)
 		if err != nil {
 			return err
 		}
@@ -518,17 +796,70 @@ func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, head model.Order, c
 		}
 		item := child.Items[0]
 		cred := credRows[i]
-		if cred.UUID == "" {
-			cred.UUID = randomUUID()
+		updates := map[string]interface{}{"updated_at": now}
+		switch protocol {
+		case model.DedicatedFeatureMixed:
+			if strings.TrimSpace(cred.Username) == "" {
+				cred.Username = randomString(8)
+			}
+			if strings.TrimSpace(cred.Password) == "" {
+				cred.Password = randomString(12)
+			}
+			if strings.TrimSpace(cred.UUID) == "" {
+				cred.UUID = randomUUID()
+			}
+			updates["username"] = cred.Username
+			updates["password"] = cred.Password
+			updates["vmess_uuid"] = cred.UUID
+		case model.DedicatedFeatureVmess, model.DedicatedFeatureVless:
+			if strings.TrimSpace(cred.UUID) == "" {
+				cred.UUID = randomUUID()
+			}
+			updates["vmess_uuid"] = cred.UUID
+		case model.DedicatedFeatureShadowsocks:
+			if strings.TrimSpace(cred.Password) == "" {
+				cred.Password = randomString(12)
+			}
+			updates["password"] = cred.Password
 		}
-		if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
-			"username":   cred.Username,
-			"password":   cred.Password,
-			"vmess_uuid": cred.UUID,
-			"updated_at": now,
-		}).Error; err != nil {
+		if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(updates).Error; err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func generateDedicatedCredentialsByProtocol(protocol string) (string, string, string) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	username := randomString(8)
+	password := randomString(12)
+	uuid := randomUUID()
+	switch protocol {
+	case model.DedicatedFeatureVmess, model.DedicatedFeatureVless:
+		return username, password, uuid
+	case model.DedicatedFeatureShadowsocks:
+		return username, password, uuid
+	default:
+		return username, password, uuid
+	}
+}
+
+func fillDedicatedEgressProbe(row *model.DedicatedEgress) {
+	if row == nil {
+		return
+	}
+	now := time.Now()
+	exitIP, country, err := probeSocksOutbound(row.Address, row.Port, row.Username, row.Password)
+	row.LastProbedAt = &now
+	if err != nil {
+		row.ProbeStatus = "failed"
+		row.ProbeError = err.Error()
+		row.ExitIP = ""
+		row.CountryCode = ""
+		return
+	}
+	row.ProbeStatus = "ok"
+	row.ProbeError = ""
+	row.ExitIP = strings.TrimSpace(exitIP)
+	row.CountryCode = strings.ToLower(strings.TrimSpace(country))
 }

@@ -48,9 +48,18 @@ func (s *OrderService) GroupCredentialsTemplateXLSX(orderID uint) ([]byte, strin
 	if err != nil {
 		return nil, "", err
 	}
+	protocol := exportOrderProtocol(*head)
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
-	headers := []string{"序号", "Username", "Password", "UUID(可空)"}
+	headers := []string{"序号"}
+	switch protocol {
+	case model.DedicatedFeatureVmess, model.DedicatedFeatureVless:
+		headers = append(headers, "UUID")
+	case model.DedicatedFeatureShadowsocks:
+		headers = append(headers, "Password")
+	default:
+		headers = append(headers, "Username", "Password", "UUID(可空)")
+	}
 	for i, title := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		_ = f.SetCellValue(sheet, cell, title)
@@ -59,12 +68,23 @@ func (s *OrderService) GroupCredentialsTemplateXLSX(orderID uint) ([]byte, strin
 		line := idx + 2
 		item := child.Items[0]
 		_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", line), idx+1)
-		_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", line), strings.TrimSpace(item.Username))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", line), strings.TrimSpace(item.Password))
-		_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", line), strings.TrimSpace(item.VmessUUID))
+		switch protocol {
+		case model.DedicatedFeatureVmess, model.DedicatedFeatureVless:
+			_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", line), strings.TrimSpace(item.VmessUUID))
+		case model.DedicatedFeatureShadowsocks:
+			_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", line), strings.TrimSpace(item.Password))
+		default:
+			_ = f.SetCellValue(sheet, fmt.Sprintf("B%d", line), strings.TrimSpace(item.Username))
+			_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", line), strings.TrimSpace(item.Password))
+			_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", line), strings.TrimSpace(item.VmessUUID))
+		}
 	}
 	_ = f.SetColWidth(sheet, "A", "A", 8)
-	_ = f.SetColWidth(sheet, "B", "D", 28)
+	if protocol == model.DedicatedFeatureMixed {
+		_ = f.SetColWidth(sheet, "B", "D", 28)
+	} else {
+		_ = f.SetColWidth(sheet, "B", "B", 36)
+	}
 	body, err := f.WriteToBuffer()
 	if err != nil {
 		return nil, "", err
@@ -81,7 +101,12 @@ func (s *OrderService) UpdateGroupSocks5FromXLSX(ctx context.Context, orderID ui
 }
 
 func (s *OrderService) UpdateGroupCredentialsFromXLSX(ctx context.Context, orderID uint, body []byte) error {
-	lines, err := parseGroupCredentialLinesFromXLSX(body)
+	head, _, err := s.loadGroupHeadAndChildren(orderID)
+	if err != nil {
+		return err
+	}
+	protocol := exportOrderProtocol(*head)
+	lines, err := parseGroupCredentialLinesFromXLSX(body, protocol)
 	if err != nil {
 		return err
 	}
@@ -149,7 +174,7 @@ func parseGroupSocks5LinesFromXLSX(body []byte) ([]string, error) {
 	return lines, nil
 }
 
-func parseGroupCredentialLinesFromXLSX(body []byte) ([]string, error) {
+func parseGroupCredentialLinesFromXLSX(body []byte, protocol string) ([]string, error) {
 	book, err := excelize.OpenReader(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("read xlsx failed: %w", err)
@@ -165,20 +190,35 @@ func parseGroupCredentialLinesFromXLSX(body []byte) ([]string, error) {
 	lines := make([]string, 0)
 	for idx := 1; idx < len(rows); idx++ {
 		row := rows[idx]
-		user := trimCell(row, 1)
-		pass := trimCell(row, 2)
-		uuid := trimCell(row, 3)
-		if user == "" && pass == "" && uuid == "" {
-			continue
+		switch strings.ToLower(strings.TrimSpace(protocol)) {
+		case model.DedicatedFeatureVmess, model.DedicatedFeatureVless:
+			uuid := trimCell(row, 1)
+			if uuid == "" {
+				continue
+			}
+			lines = append(lines, uuid)
+		case model.DedicatedFeatureShadowsocks:
+			pass := trimCell(row, 1)
+			if pass == "" {
+				continue
+			}
+			lines = append(lines, pass)
+		default:
+			user := trimCell(row, 1)
+			pass := trimCell(row, 2)
+			uuid := trimCell(row, 3)
+			if user == "" && pass == "" && uuid == "" {
+				continue
+			}
+			if user == "" || pass == "" {
+				return nil, fmt.Errorf("row %d incomplete", idx+1)
+			}
+			if uuid == "" {
+				lines = append(lines, fmt.Sprintf("%s:%s", user, pass))
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s:%s:%s", user, pass, uuid))
 		}
-		if user == "" || pass == "" {
-			return nil, fmt.Errorf("row %d incomplete", idx+1)
-		}
-		if uuid == "" {
-			lines = append(lines, fmt.Sprintf("%s:%s", user, pass))
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("%s:%s:%s", user, pass, uuid))
 	}
 	if len(lines) == 0 {
 		return nil, errors.New("xlsx has no valid rows")

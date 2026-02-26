@@ -20,6 +20,36 @@ var dedicatedFeatureOrder = []string{
 	model.DedicatedFeatureShadowsocks,
 }
 
+func normalizeDedicatedProtocol(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "socks5" {
+		v = model.DedicatedFeatureMixed
+	}
+	switch v {
+	case model.DedicatedFeatureMixed, model.DedicatedFeatureVmess, model.DedicatedFeatureVless, model.DedicatedFeatureShadowsocks:
+		return v, nil
+	default:
+		return "", fmt.Errorf("unsupported protocol %s", raw)
+	}
+}
+
+func dedicatedPortByProtocol(entry model.DedicatedEntry, protocol string) int {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == model.DedicatedFeatureMixed {
+		return entry.MixedPort
+	}
+	if protocol == model.DedicatedFeatureVmess {
+		return entry.VmessPort
+	}
+	if protocol == model.DedicatedFeatureVless {
+		return entry.VlessPort
+	}
+	if protocol == model.DedicatedFeatureShadowsocks {
+		return entry.ShadowsocksPort
+	}
+	return 0
+}
+
 func normalizeDedicatedFeatures(raw []string) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, errors.New("features is required")
@@ -152,6 +182,36 @@ func parseDedicatedCredentialLines(lines string) ([]DedicatedCredentialLine, err
 			row.UUID = randomUUID()
 		}
 		out = append(out, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no valid credential lines")
+	}
+	return out, nil
+}
+
+func parseDedicatedCredentialLinesForProtocol(lines string, protocol string) ([]DedicatedCredentialLine, error) {
+	protocol, err := normalizeDedicatedProtocol(protocol)
+	if err != nil {
+		return nil, err
+	}
+	if protocol == model.DedicatedFeatureMixed {
+		return parseDedicatedCredentialLines(lines)
+	}
+	scanner := bufio.NewScanner(strings.NewReader(lines))
+	out := make([]DedicatedCredentialLine, 0)
+	for scanner.Scan() {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		if protocol == model.DedicatedFeatureVmess || protocol == model.DedicatedFeatureVless {
+			out = append(out, DedicatedCredentialLine{UUID: raw})
+			continue
+		}
+		out = append(out, DedicatedCredentialLine{Password: raw})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err

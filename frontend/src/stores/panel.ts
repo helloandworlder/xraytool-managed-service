@@ -5,6 +5,8 @@ import type {
   BackupInfo,
   Customer,
   CustomerRuntimeStat,
+	DedicatedInbound,
+	DedicatedIngress,
 	DedicatedEntry,
   ForwardOutbound,
   HostIP,
@@ -48,9 +50,11 @@ export const usePanelStore = defineStore('panel', {
     importPreview: [] as ImportPreviewRow[],
     singboxScan: null as SingboxScanResult | null,
     nodes: [] as XrayNode[],
-    migrationPreview: null as SocksMigrationPreviewResult | null,
+		migrationPreview: null as SocksMigrationPreviewResult | null,
 		forwardOutbounds: [] as ForwardOutbound[],
-		dedicatedEntries: [] as DedicatedEntry[]
+		dedicatedEntries: [] as DedicatedEntry[],
+		dedicatedInbounds: [] as DedicatedInbound[],
+		dedicatedIngresses: [] as DedicatedIngress[]
   }),
   getters: {
     activeOrderCount: (state) => state.orders.filter((o) => o.status === 'active').length,
@@ -80,6 +84,8 @@ export const usePanelStore = defineStore('panel', {
         this.loadNodes(),
         this.loadForwardOutbounds(),
 			this.loadDedicatedEntries(),
+			this.loadDedicatedInbounds(),
+			this.loadDedicatedIngresses(),
         this.loadSettings(),
         this.loadTaskLogs(),
         this.loadBackups(),
@@ -137,6 +143,86 @@ export const usePanelStore = defineStore('panel', {
 		async loadDedicatedEntries() {
 			const res = await http.get('/api/orders/dedicated-entries')
 			this.dedicatedEntries = res.data || []
+		},
+		async loadDedicatedInbounds() {
+			const res = await http.get('/api/orders/dedicated-inbounds')
+			this.dedicatedInbounds = res.data || []
+		},
+		async loadDedicatedIngresses() {
+			const res = await http.get('/api/orders/dedicated-ingresses')
+			this.dedicatedIngresses = res.data || []
+		},
+		async createDedicatedInbound(payload: {
+			name: string
+			protocol: string
+			listen_port: number
+			priority: number
+			enabled: boolean
+			notes?: string
+		}) {
+			await http.post('/api/orders/dedicated-inbounds', payload)
+			await this.loadDedicatedInbounds()
+			this.setNotice('Inbound已创建')
+		},
+		async updateDedicatedInbound(id: number, payload: {
+			name: string
+			protocol: string
+			listen_port: number
+			priority: number
+			enabled: boolean
+			notes?: string
+		}) {
+			await http.put(`/api/orders/dedicated-inbounds/${id}`, payload)
+			await this.loadDedicatedInbounds()
+			this.setNotice('Inbound已更新')
+		},
+		async toggleDedicatedInbound(id: number, enabled: boolean) {
+			await http.post(`/api/orders/dedicated-inbounds/${id}/toggle`, { enabled })
+			await this.loadDedicatedInbounds()
+		},
+		async deleteDedicatedInbound(id: number) {
+			await http.delete(`/api/orders/dedicated-inbounds/${id}`)
+			await this.loadDedicatedInbounds()
+			this.setNotice('Inbound已删除')
+		},
+		async createDedicatedIngress(payload: {
+			dedicated_inbound_id: number
+			name: string
+			domain: string
+			ingress_port: number
+			country_code?: string
+			region?: string
+			priority: number
+			enabled: boolean
+			notes?: string
+		}) {
+			await http.post('/api/orders/dedicated-ingresses', payload)
+			await this.loadDedicatedIngresses()
+			this.setNotice('Ingress已创建')
+		},
+		async updateDedicatedIngress(id: number, payload: {
+			dedicated_inbound_id: number
+			name: string
+			domain: string
+			ingress_port: number
+			country_code?: string
+			region?: string
+			priority: number
+			enabled: boolean
+			notes?: string
+		}) {
+			await http.put(`/api/orders/dedicated-ingresses/${id}`, payload)
+			await this.loadDedicatedIngresses()
+			this.setNotice('Ingress已更新')
+		},
+		async toggleDedicatedIngress(id: number, enabled: boolean) {
+			await http.post(`/api/orders/dedicated-ingresses/${id}/toggle`, { enabled })
+			await this.loadDedicatedIngresses()
+		},
+		async deleteDedicatedIngress(id: number) {
+			await http.delete(`/api/orders/dedicated-ingresses/${id}`)
+			await this.loadDedicatedIngresses()
+			this.setNotice('Ingress已删除')
 		},
 		async createDedicatedEntry(payload: {
 			name: string
@@ -330,6 +416,14 @@ export const usePanelStore = defineStore('panel', {
 			})
 			await this.loadOrders()
 		},
+		async renewOrderGroupSelected(orderID: number, childOrderIDs: number[], moreDays: number) {
+			await http.post(`/api/orders/${orderID}/group/renew-selected`, {
+				child_order_ids: childOrderIDs,
+				more_days: moreDays
+			})
+			await this.loadOrders()
+			this.setNotice('组内选中子订单续期完成')
+		},
 		async downloadOrderGroupSocks5Template(orderID: number) {
 			return http.get(`/api/orders/${orderID}/group/template/socks5.xlsx`, { responseType: 'blob' })
 		},
@@ -420,10 +514,11 @@ export const usePanelStore = defineStore('panel', {
       })
       return (res.data.results || []) as Array<{ id: number; success: boolean; result?: Record<string, string>; error?: string }>
     },
-    async batchExport(orderIDs: number[]) {
+    async batchExport(orderIDs: number[], includeRawSocks5 = false) {
       const res = await http.post('/api/orders/batch/export', {
 			order_ids: orderIDs,
-			format: 'xlsx'
+			format: 'xlsx',
+			include_raw_socks5: includeRawSocks5
       }, {
 			responseType: 'blob'
       })

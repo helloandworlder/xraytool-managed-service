@@ -110,29 +110,67 @@ type DedicatedEntry struct {
 	Orders []Order `json:"orders,omitempty"`
 }
 
-type Order struct {
-	ID                uint      `gorm:"primaryKey" json:"id"`
-	CustomerID        uint      `gorm:"index;not null" json:"customer_id"`
-	GroupID           uint      `gorm:"index" json:"group_id"`
-	ParentOrderID     *uint     `gorm:"index" json:"parent_order_id,omitempty"`
-	IsGroupHead       bool      `gorm:"default:false;index" json:"is_group_head"`
-	SequenceNo        int       `gorm:"default:0;index" json:"sequence_no"`
-	DedicatedEntryID  *uint     `gorm:"index" json:"dedicated_entry_id,omitempty"`
-	Name              string    `gorm:"size:128;not null" json:"name"`
-	Mode              string    `gorm:"size:32;not null" json:"mode"`
-	Status            string    `gorm:"size:32;not null;index" json:"status"`
-	Quantity          int       `gorm:"not null" json:"quantity"`
-	Port              int       `gorm:"not null;index" json:"port"`
-	StartsAt          time.Time `gorm:"not null" json:"starts_at"`
-	ExpiresAt         time.Time `gorm:"not null;index" json:"expires_at"`
-	NotifyOneDaySent  bool      `gorm:"default:false" json:"notify_one_day_sent"`
-	NotifyExpiredSent bool      `gorm:"default:false" json:"notify_expired_sent"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+type DedicatedInbound struct {
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	Name       string    `gorm:"size:128" json:"name"`
+	Protocol   string    `gorm:"size:32;not null;index" json:"protocol"`
+	ListenPort int       `gorm:"not null;index" json:"listen_port"`
+	Priority   int       `gorm:"not null;default:100;index" json:"priority"`
+	Enabled    bool      `gorm:"default:true;index" json:"enabled"`
+	Notes      string    `gorm:"size:255" json:"notes"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 
-	Customer       Customer        `json:"customer"`
-	DedicatedEntry *DedicatedEntry `json:"dedicated_entry,omitempty"`
-	Items          []OrderItem     `json:"items"`
+	Ingresses []DedicatedIngress `json:"ingresses,omitempty"`
+	Orders    []Order            `json:"orders,omitempty"`
+}
+
+type DedicatedIngress struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	DedicatedInboundID uint      `gorm:"not null;index" json:"dedicated_inbound_id"`
+	Name               string    `gorm:"size:128" json:"name"`
+	Domain             string    `gorm:"size:255;not null;index" json:"domain"`
+	IngressPort        int       `gorm:"not null;index" json:"ingress_port"`
+	CountryCode        string    `gorm:"size:16;index" json:"country_code"`
+	Region             string    `gorm:"size:64;index" json:"region"`
+	Priority           int       `gorm:"not null;default:100;index" json:"priority"`
+	Enabled            bool      `gorm:"default:true;index" json:"enabled"`
+	Notes              string    `gorm:"size:255" json:"notes"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+
+	DedicatedInbound DedicatedInbound `json:"dedicated_inbound,omitempty"`
+	Orders           []Order          `json:"orders,omitempty"`
+}
+
+type Order struct {
+	ID                 uint      `gorm:"primaryKey" json:"id"`
+	CustomerID         uint      `gorm:"index;not null" json:"customer_id"`
+	GroupID            uint      `gorm:"index" json:"group_id"`
+	ParentOrderID      *uint     `gorm:"index" json:"parent_order_id,omitempty"`
+	IsGroupHead        bool      `gorm:"default:false;index" json:"is_group_head"`
+	SequenceNo         int       `gorm:"default:0;index" json:"sequence_no"`
+	DedicatedEntryID   *uint     `gorm:"index" json:"dedicated_entry_id,omitempty"`
+	DedicatedInboundID *uint     `gorm:"index" json:"dedicated_inbound_id,omitempty"`
+	DedicatedIngressID *uint     `gorm:"index" json:"dedicated_ingress_id,omitempty"`
+	DedicatedProtocol  string    `gorm:"size:32;index" json:"dedicated_protocol,omitempty"`
+	Name               string    `gorm:"size:128;not null" json:"name"`
+	Mode               string    `gorm:"size:32;not null" json:"mode"`
+	Status             string    `gorm:"size:32;not null;index" json:"status"`
+	Quantity           int       `gorm:"not null" json:"quantity"`
+	Port               int       `gorm:"not null;index" json:"port"`
+	StartsAt           time.Time `gorm:"not null" json:"starts_at"`
+	ExpiresAt          time.Time `gorm:"not null;index" json:"expires_at"`
+	NotifyOneDaySent   bool      `gorm:"default:false" json:"notify_one_day_sent"`
+	NotifyExpiredSent  bool      `gorm:"default:false" json:"notify_expired_sent"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+
+	Customer         Customer          `json:"customer"`
+	DedicatedEntry   *DedicatedEntry   `json:"dedicated_entry,omitempty"`
+	DedicatedInbound *DedicatedInbound `json:"dedicated_inbound,omitempty"`
+	DedicatedIngress *DedicatedIngress `json:"dedicated_ingress,omitempty"`
+	Items            []OrderItem       `json:"items"`
 }
 
 type OrderItem struct {
@@ -165,15 +203,20 @@ type OrderItem struct {
 }
 
 type DedicatedEgress struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	OrderID     uint      `gorm:"index;not null" json:"order_id"`
-	OrderItemID uint      `gorm:"index;uniqueIndex;not null" json:"order_item_id"`
-	Address     string    `gorm:"size:128;not null" json:"address"`
-	Port        int       `gorm:"not null" json:"port"`
-	Username    string    `gorm:"size:128;not null" json:"username"`
-	Password    string    `gorm:"size:128;not null" json:"password"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	OrderID      uint       `gorm:"index;not null" json:"order_id"`
+	OrderItemID  uint       `gorm:"index;uniqueIndex;not null" json:"order_item_id"`
+	Address      string     `gorm:"size:128;not null" json:"address"`
+	Port         int        `gorm:"not null" json:"port"`
+	Username     string     `gorm:"size:128;not null" json:"username"`
+	Password     string     `gorm:"size:128;not null" json:"password"`
+	ExitIP       string     `gorm:"size:64" json:"exit_ip,omitempty"`
+	CountryCode  string     `gorm:"size:8;index" json:"country_code,omitempty"`
+	ProbeStatus  string     `gorm:"size:32" json:"probe_status,omitempty"`
+	ProbeError   string     `gorm:"size:255" json:"probe_error,omitempty"`
+	LastProbedAt *time.Time `json:"last_probed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 
 	Order     Order     `json:"-"`
 	OrderItem OrderItem `json:"-"`

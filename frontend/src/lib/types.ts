@@ -18,6 +18,7 @@ export interface HostIP {
 export interface OrderItem {
   id: number
   order_id: number
+  host_ip_id?: number
   ip: string
   port: number
   username: string
@@ -52,6 +53,30 @@ export interface DedicatedEntry {
   notes: string
 }
 
+export interface DedicatedInbound {
+  id: number
+  name: string
+  protocol: string
+  listen_port: number
+  priority: number
+  enabled: boolean
+  notes: string
+}
+
+export interface DedicatedIngress {
+  id: number
+  dedicated_inbound_id: number
+  dedicated_inbound?: DedicatedInbound
+  name: string
+  domain: string
+  ingress_port: number
+  country_code: string
+  region: string
+  priority: number
+  enabled: boolean
+  notes: string
+}
+
 export interface Order {
   id: number
   customer_id: number
@@ -60,7 +85,12 @@ export interface Order {
   is_group_head?: boolean
   sequence_no?: number
   dedicated_entry_id?: number
+  dedicated_inbound_id?: number
+  dedicated_ingress_id?: number
+  dedicated_protocol?: string
   dedicated_entry?: DedicatedEntry
+  dedicated_inbound?: DedicatedInbound
+  dedicated_ingress?: DedicatedIngress
   customer?: Customer
   name: string
   mode: string

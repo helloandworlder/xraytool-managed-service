@@ -446,26 +446,19 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		VmessUUID       string
 		Managed         bool
 		OrderMode       string
+		OrderProtocol   string
 		OutboundType    string
 		ForwardAddress  string
 		ForwardPort     int
 		ForwardUsername string
 		ForwardPassword string
-		EntryFeatures   string
-		EntryDomain     string
-		EntryEnabled    bool
-		EntryMixedPort  int
-		EntryVmessPort  int
-		EntryVlessPort  int
-		EntrySSPort     int
 	}
 
 	var rows []activeRow
 	err := m.db.WithContext(ctx).
 		Table("order_items oi").
-		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password, de.features as entry_features, de.domain as entry_domain, de.enabled as entry_enabled, de.mixed_port as entry_mixed_port, de.vmess_port as entry_vmess_port, de.vless_port as entry_vless_port, de.shadowsocks_port as entry_ss_port").
+		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, o.dedicated_protocol as order_protocol, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password").
 		Joins("join orders o on o.id = oi.order_id").
-		Joins("left join dedicated_entries de on de.id = o.dedicated_entry_id").
 		Where("oi.status = ? and o.status = ? and o.expires_at > ?", model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
 		Scan(&rows).Error
 	if err != nil {
@@ -497,35 +490,40 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			continue
 		}
 		inboundTags := make([]string, 0, 4)
-		if strings.EqualFold(strings.TrimSpace(row.OrderMode), model.OrderModeDedicated) {
-			features := parseDedicatedFeatures(row.EntryFeatures)
-			if _, ok := features[model.DedicatedFeatureMixed]; ok && row.EntryMixedPort > 0 {
-				if _, exists := dedicatedMixedAccountsByPort[row.EntryMixedPort]; !exists {
-					dedicatedMixedAccountsByPort[row.EntryMixedPort] = map[string]string{}
-				}
-				dedicatedMixedAccountsByPort[row.EntryMixedPort][row.Username] = row.Password
-				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureMixed, row.EntryMixedPort))
+		if strings.EqualFold(strings.TrimSpace(row.OrderMode), model.OrderModeDedicated) && row.Port > 0 {
+			protocol := strings.ToLower(strings.TrimSpace(row.OrderProtocol))
+			if protocol == "" {
+				protocol = model.DedicatedFeatureMixed
 			}
-			if _, ok := features[model.DedicatedFeatureVmess]; ok && row.EntryVmessPort > 0 && strings.TrimSpace(row.VmessUUID) != "" {
-				if _, exists := vmessClientsByPort[row.EntryVmessPort]; !exists {
-					vmessClientsByPort[row.EntryVmessPort] = map[string]string{}
+			switch protocol {
+			case model.DedicatedFeatureVmess:
+				if strings.TrimSpace(row.VmessUUID) != "" {
+					if _, exists := vmessClientsByPort[row.Port]; !exists {
+						vmessClientsByPort[row.Port] = map[string]string{}
+					}
+					vmessClientsByPort[row.Port][row.Username] = strings.TrimSpace(row.VmessUUID)
+					inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVmess, row.Port))
 				}
-				vmessClientsByPort[row.EntryVmessPort][row.Username] = strings.TrimSpace(row.VmessUUID)
-				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVmess, row.EntryVmessPort))
-			}
-			if _, ok := features[model.DedicatedFeatureVless]; ok && row.EntryVlessPort > 0 && strings.TrimSpace(row.VmessUUID) != "" {
-				if _, exists := vlessClientsByPort[row.EntryVlessPort]; !exists {
-					vlessClientsByPort[row.EntryVlessPort] = map[string]string{}
+			case model.DedicatedFeatureVless:
+				if strings.TrimSpace(row.VmessUUID) != "" {
+					if _, exists := vlessClientsByPort[row.Port]; !exists {
+						vlessClientsByPort[row.Port] = map[string]string{}
+					}
+					vlessClientsByPort[row.Port][row.Username] = strings.TrimSpace(row.VmessUUID)
+					inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVless, row.Port))
 				}
-				vlessClientsByPort[row.EntryVlessPort][row.Username] = strings.TrimSpace(row.VmessUUID)
-				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVless, row.EntryVlessPort))
-			}
-			if _, ok := features[model.DedicatedFeatureShadowsocks]; ok && row.EntrySSPort > 0 {
-				if _, exists := ssClientsByPort[row.EntrySSPort]; !exists {
-					ssClientsByPort[row.EntrySSPort] = map[string]string{}
+			case model.DedicatedFeatureShadowsocks:
+				if _, exists := ssClientsByPort[row.Port]; !exists {
+					ssClientsByPort[row.Port] = map[string]string{}
 				}
-				ssClientsByPort[row.EntrySSPort][row.Username] = row.Password
-				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureShadowsocks, row.EntrySSPort))
+				ssClientsByPort[row.Port][row.Username] = row.Password
+				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureShadowsocks, row.Port))
+			default:
+				if _, exists := dedicatedMixedAccountsByPort[row.Port]; !exists {
+					dedicatedMixedAccountsByPort[row.Port] = map[string]string{}
+				}
+				dedicatedMixedAccountsByPort[row.Port][row.Username] = row.Password
+				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureMixed, row.Port))
 			}
 		}
 		if len(inboundTags) == 0 && row.Port > 0 {

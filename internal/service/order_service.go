@@ -50,6 +50,9 @@ type CreateOrderInput struct {
 	ManualIPIDs          []uint    `json:"manual_ip_ids"`
 	ForwardOutboundIDs   []uint    `json:"forward_outbound_ids"`
 	DedicatedEntryID     uint      `json:"dedicated_entry_id"`
+	DedicatedInboundID   uint      `json:"dedicated_inbound_id"`
+	DedicatedIngressID   uint      `json:"dedicated_ingress_id"`
+	DedicatedProtocol    string    `json:"dedicated_protocol"`
 	DedicatedEgressLines string    `json:"dedicated_egress_lines"`
 }
 
@@ -61,6 +64,9 @@ type UpdateOrderInput struct {
 	ManualIPIDs                    []uint    `json:"manual_ip_ids"`
 	ForwardOutboundIDs             []uint    `json:"forward_outbound_ids"`
 	DedicatedEntryID               uint      `json:"dedicated_entry_id"`
+	DedicatedInboundID             uint      `json:"dedicated_inbound_id"`
+	DedicatedIngressID             uint      `json:"dedicated_ingress_id"`
+	DedicatedProtocol              string    `json:"dedicated_protocol"`
 	DedicatedEgressLines           string    `json:"dedicated_egress_lines"`
 	DedicatedCredentialLines       string    `json:"dedicated_credential_lines"`
 	RegenerateDedicatedCredentials bool      `json:"regenerate_dedicated_credentials"`
@@ -108,13 +114,13 @@ func NewOrderService(db *gorm.DB, xray *XrayManager, log *zap.Logger) *OrderServ
 
 func (s *OrderService) ListOrders() ([]model.Order, error) {
 	var orders []model.Order
-	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("Items").Order("id desc").Find(&orders).Error
+	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Preload("Items").Order("id desc").Find(&orders).Error
 	return orders, err
 }
 
 func (s *OrderService) GetOrder(orderID uint) (*model.Order, error) {
 	var order model.Order
-	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("Items").Preload("Items.Resources").First(&order, orderID).Error
+	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Preload("Items").Preload("Items.Resources").First(&order, orderID).Error
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +152,7 @@ func (s *OrderService) AllocationPreview(customerID uint, excludeOrderID uint) (
 
 func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateOrderInput) (*model.Order, error) {
 	var order model.Order
-	if err := s.db.Preload("Items").Preload("DedicatedEntry").First(&order, orderID).Error; err != nil {
+	if err := s.db.Preload("Items").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").First(&order, orderID).Error; err != nil {
 		return nil, err
 	}
 	if order.IsGroupHead {
@@ -169,6 +175,13 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 		targetPort = in.Port
 	}
 	targetQuantity := order.Quantity
+	targetDedicatedProtocol := strings.TrimSpace(order.DedicatedProtocol)
+	if targetDedicatedProtocol == "" {
+		targetDedicatedProtocol = model.DedicatedFeatureMixed
+	}
+	targetDedicatedEntryID := order.DedicatedEntryID
+	targetDedicatedInboundID := order.DedicatedInboundID
+	targetDedicatedIngressID := order.DedicatedIngressID
 	targetForwardOutboundIDs := uniqueUintIDs(in.ForwardOutboundIDs)
 	if order.Mode == model.OrderModeForward {
 		if len(targetForwardOutboundIDs) == 0 {
@@ -185,16 +198,30 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	}
 	if order.Mode == model.OrderModeDedicated {
 		targetQuantity = len(order.Items)
-		if in.DedicatedEntryID > 0 {
-			entry := model.DedicatedEntry{}
-			if err := s.db.Where("id = ? and enabled = 1", in.DedicatedEntryID).First(&entry).Error; err != nil {
-				return nil, fmt.Errorf("dedicated entry invalid: %w", err)
+		if strings.TrimSpace(in.DedicatedProtocol) != "" {
+			normalized, err := normalizeDedicatedProtocol(in.DedicatedProtocol)
+			if err != nil {
+				return nil, err
 			}
-			targetPort = chooseDedicatedPrimaryPort(entry)
-			if targetPort <= 0 {
-				return nil, errors.New("dedicated entry has no usable port")
-			}
+			targetDedicatedProtocol = normalized
 		}
+		if in.DedicatedEntryID > 0 {
+			targetDedicatedEntryID = &in.DedicatedEntryID
+		}
+		if in.DedicatedInboundID > 0 {
+			targetDedicatedInboundID = &in.DedicatedInboundID
+		}
+		if in.DedicatedIngressID > 0 {
+			targetDedicatedIngressID = &in.DedicatedIngressID
+		}
+		resolvedEntryID, resolvedInboundID, resolvedIngressID, resolvedPort, resolveErr := s.resolveDedicatedBindingForUpdateTx(s.db, targetDedicatedProtocol, targetDedicatedEntryID, targetDedicatedInboundID, targetDedicatedIngressID)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		targetDedicatedEntryID = resolvedEntryID
+		targetDedicatedInboundID = resolvedInboundID
+		targetDedicatedIngressID = resolvedIngressID
+		targetPort = resolvedPort
 	}
 	targetExpiresAt := order.ExpiresAt
 	if !in.ExpiresAt.IsZero() {
@@ -309,6 +336,18 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 			"notify_one_day_sent": false,
 			"notify_expired_sent": false,
 			"updated_at":          now,
+		}
+		if order.Mode == model.OrderModeDedicated {
+			orderUpdates["dedicated_protocol"] = targetDedicatedProtocol
+			if targetDedicatedEntryID != nil {
+				orderUpdates["dedicated_entry_id"] = *targetDedicatedEntryID
+			}
+			if targetDedicatedInboundID != nil {
+				orderUpdates["dedicated_inbound_id"] = *targetDedicatedInboundID
+			}
+			if targetDedicatedIngressID != nil {
+				orderUpdates["dedicated_ingress_id"] = *targetDedicatedIngressID
+			}
 		}
 		return tx.Model(&model.Order{}).Where("id = ?", order.ID).Updates(orderUpdates).Error
 	}); err != nil {
@@ -460,7 +499,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		s.log.Warn("sync runtime after create failed", zap.Error(err), zap.Uint("order_id", order.ID))
 	}
 
-	if err := s.db.Preload("Customer").Preload("Items").First(order, order.ID).Error; err != nil {
+	if err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Preload("Items").First(order, order.ID).Error; err != nil {
 		return nil, err
 	}
 	return order, nil

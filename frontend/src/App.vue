@@ -39,6 +39,9 @@ const orderForm = reactive({
   manual_ip_ids: [] as number[],
 	forward_outbound_ids: [] as number[],
 	dedicated_entry_id: 0,
+	dedicated_inbound_id: 0,
+	dedicated_ingress_id: 0,
+	dedicated_protocol: 'mixed',
 	dedicated_egress_lines: ''
 })
 const importForm = reactive({
@@ -70,6 +73,8 @@ const forwardManagerOpen = ref(false)
 const forwardEditOpen = ref(false)
 const dedicatedManagerOpen = ref(false)
 const dedicatedEditOpen = ref(false)
+const dedicatedInboundEditOpen = ref(false)
+const dedicatedIngressEditOpen = ref(false)
 const dedicatedForm = reactive({
 	id: 0,
 	name: '',
@@ -80,6 +85,46 @@ const dedicatedForm = reactive({
 	shadowsocks_port: 10088,
 	priority: 100,
 	features: ['mixed', 'vmess', 'vless', 'shadowsocks'] as string[],
+	enabled: true,
+	notes: ''
+})
+const dedicatedInboundForm = reactive({
+	name: '',
+	protocol: 'mixed',
+	listen_port: 1080,
+	priority: 100,
+	enabled: true,
+	notes: ''
+})
+const dedicatedInboundEditForm = reactive({
+	id: 0,
+	name: '',
+	protocol: 'mixed',
+	listen_port: 1080,
+	priority: 100,
+	enabled: true,
+	notes: ''
+})
+const dedicatedIngressForm = reactive({
+	dedicated_inbound_id: 0,
+	name: '',
+	domain: '',
+	ingress_port: 0,
+	country_code: '',
+	region: '',
+	priority: 100,
+	enabled: true,
+	notes: ''
+})
+const dedicatedIngressEditForm = reactive({
+	id: 0,
+	dedicated_inbound_id: 0,
+	name: '',
+	domain: '',
+	ingress_port: 0,
+	country_code: '',
+	region: '',
+	priority: 100,
 	enabled: true,
 	notes: ''
 })
@@ -122,6 +167,9 @@ const orderEditForm = reactive({
 	manual_ip_ids: [] as number[],
 	forward_outbound_ids: [] as number[],
 	dedicated_entry_id: 0,
+	dedicated_inbound_id: 0,
+	dedicated_ingress_id: 0,
+	dedicated_protocol: 'mixed',
 	dedicated_egress_lines: '',
 	dedicated_credential_lines: '',
 	regenerate_dedicated_credentials: false
@@ -134,12 +182,27 @@ const streamMeta = reactive({ total: 0, sampled: 0, sample_percent: 100, success
 const streamRows = ref<Array<{ item_id: number; status: string; detail: string }>>([])
 const exportingOrderID = ref<number | null>(null)
 const exportCount = ref<number>(0)
+const exportIncludeRawSocks5 = ref(false)
 const groupSocksModalOpen = ref(false)
 const groupCredModalOpen = ref(false)
 const groupTargetOrderID = ref<number>(0)
 const groupSocksLines = ref('')
 const groupCredLines = ref('')
 const groupCredRegenerate = ref(false)
+const groupRenewModalOpen = ref(false)
+const groupRenewHeadOrderID = ref<number>(0)
+const groupRenewDays = ref<number>(30)
+const groupRenewChildOrderIDs = ref<number[]>([])
+const creatingOrder = ref(false)
+const savingOrderEdit = ref(false)
+const confirmingImport = ref(false)
+const previewingImport = ref(false)
+const previewingSingboxImport = ref(false)
+const groupSocksSaving = ref(false)
+const groupCredSaving = ref(false)
+const groupRenewSaving = ref(false)
+const importPreviewFingerprint = ref('')
+const importPreviewSource = ref<'lines' | 'singbox' | ''>('')
 
 const siderCollapsed = ref(false)
 const probeResult = ref('')
@@ -195,6 +258,50 @@ const manualHostIPOptions = computed(() => {
 
 const enabledForwardOutbounds = computed(() => panel.forwardOutbounds.filter((row) => row.enabled))
 const enabledDedicatedEntries = computed(() => panel.dedicatedEntries.filter((row) => row.enabled))
+const enabledDedicatedInbounds = computed(() => panel.dedicatedInbounds.filter((row) => row.enabled))
+const enabledDedicatedIngresses = computed(() => panel.dedicatedIngresses.filter((row) => row.enabled))
+const dedicatedProtocolOptions = [
+	{ label: 'Socks5(Mixed)', value: 'mixed' },
+	{ label: 'Vmess', value: 'vmess' },
+	{ label: 'Vless', value: 'vless' },
+	{ label: 'Shadowsocks', value: 'shadowsocks' }
+]
+
+const filteredDedicatedInboundsForCreate = computed(() =>
+	enabledDedicatedInbounds.value.filter((row) => String(row.protocol || '') === String(orderForm.dedicated_protocol || 'mixed'))
+)
+
+const filteredDedicatedIngressesForCreate = computed(() =>
+	enabledDedicatedIngresses.value.filter((row) => Number(row.dedicated_inbound_id) === Number(orderForm.dedicated_inbound_id || 0))
+)
+
+const filteredDedicatedInboundsForEdit = computed(() =>
+	panel.dedicatedInbounds.filter((row) => {
+		if (String(row.protocol || '') !== String(orderEditForm.dedicated_protocol || 'mixed')) return false
+		if (row.enabled) return true
+		return Number(row.id) === Number(orderEditForm.dedicated_inbound_id || 0)
+	})
+)
+
+const filteredDedicatedIngressesForEdit = computed(() =>
+	panel.dedicatedIngresses.filter((row) => {
+		if (Number(row.dedicated_inbound_id) !== Number(orderEditForm.dedicated_inbound_id || 0)) return false
+		if (row.enabled) return true
+		return Number(row.id) === Number(orderEditForm.dedicated_ingress_id || 0)
+	})
+)
+
+const groupRenewCandidates = computed(() =>
+	panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(groupRenewHeadOrderID.value || 0))
+		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0))
+)
+
+const importPreviewValid = computed(() => {
+	if ((panel.importPreview || []).length === 0) return false
+	return importPreviewFingerprint.value !== '' && importPreviewFingerprint.value === currentImportPreviewFingerprint()
+})
+
 const selectableSingboxFiles = computed(() => (panel.singboxScan?.files || []).filter((file) => file.selectable).map((file) => file.path))
 const allSingboxSelected = computed(
 	() =>
@@ -212,7 +319,7 @@ const ordersColumns = [
 	{ title: '线路信息', key: 'forward_summary', width: 280 },
 	{ title: '端口', dataIndex: 'port', width: 100 },
 	{ title: '到期', key: 'expires', width: 210 },
-	{ title: '动作', key: 'action', fixed: 'right', width: 620 }
+	{ title: '动作', key: 'action', fixed: 'right', width: 360 }
 ]
 
 const customerColumns = [
@@ -371,6 +478,64 @@ watch(
 	}
 )
 
+watch(
+	() => orderForm.dedicated_protocol,
+	() => {
+		if (!filteredDedicatedInboundsForCreate.value.some((row: any) => Number(row.id) === Number(orderForm.dedicated_inbound_id))) {
+			orderForm.dedicated_inbound_id = 0
+			orderForm.dedicated_ingress_id = 0
+		}
+	}
+)
+
+watch(
+	() => orderEditForm.dedicated_protocol,
+	() => {
+		if (!orderEditOpen.value) return
+		if (!filteredDedicatedInboundsForEdit.value.some((row: any) => Number(row.id) === Number(orderEditForm.dedicated_inbound_id))) {
+			orderEditForm.dedicated_inbound_id = 0
+			orderEditForm.dedicated_ingress_id = 0
+		}
+	}
+)
+
+watch(
+	() => orderForm.dedicated_inbound_id,
+	() => {
+		if (!filteredDedicatedIngressesForCreate.value.some((row: any) => Number(row.id) === Number(orderForm.dedicated_ingress_id))) {
+			orderForm.dedicated_ingress_id = 0
+		}
+	}
+)
+
+watch(
+	() => orderEditForm.dedicated_inbound_id,
+	() => {
+		if (!orderEditOpen.value) return
+		if (!filteredDedicatedIngressesForEdit.value.some((row: any) => Number(row.id) === Number(orderEditForm.dedicated_ingress_id))) {
+			orderEditForm.dedicated_ingress_id = 0
+		}
+	}
+)
+
+watch(
+	() => importForm.lines,
+	() => {
+		if (importPreviewFingerprint.value && importPreviewSource.value === 'lines') {
+			importPreviewFingerprint.value = ''
+		}
+	}
+)
+
+watch(
+	() => singboxSelectedFiles.value.slice().sort().join('|'),
+	() => {
+		if (importPreviewFingerprint.value && importPreviewSource.value === 'singbox') {
+			importPreviewFingerprint.value = ''
+		}
+	}
+)
+
 function seedDefaultsFromSettings() {
   const p = Number(panel.settings.default_inbound_port || '23457')
   if (Number.isFinite(p) && p > 0) {
@@ -385,6 +550,15 @@ function seedDefaultsFromSettings() {
 function setImportExpiryDays(days: number) {
 	const value = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString().slice(0, 19)
 	importForm.expires_at = value
+}
+
+function currentImportPreviewFingerprint(): string {
+	if (importPreviewSource.value === 'singbox') {
+		const files = [...singboxSelectedFiles.value].map((v) => String(v)).sort().join('|')
+		return `singbox@@${files}`
+	}
+	const lines = String(importForm.lines || '').trim()
+	return `lines@@${lines}`
 }
 
 function toggleSingboxSelectAll(checked: boolean) {
@@ -426,16 +600,12 @@ function dedicatedLinesCount(lines: string): number {
 
 function dedicatedSummary(order: any) {
 	if (order.mode !== 'dedicated') return '-'
-	const entry = order.dedicated_entry
-	if (!entry) return '专线入口未绑定'
-	const features = String(entry.features || '')
-	const ports: string[] = []
-	if (features.includes('mixed') && Number(entry.mixed_port) > 0) ports.push(`Socks:${entry.mixed_port}`)
-	if (features.includes('vmess') && Number(entry.vmess_port) > 0) ports.push(`Vmess:${entry.vmess_port}`)
-	if (features.includes('vless') && Number(entry.vless_port) > 0) ports.push(`Vless:${entry.vless_port}`)
-	if (features.includes('shadowsocks') && Number(entry.shadowsocks_port) > 0) ports.push(`SS:${entry.shadowsocks_port}`)
-	const entryText = entry.name || `${entry.domain}`
-	return `${entryText} / ${ports.join(' | ')}`
+	const ingress = order.dedicated_ingress
+	const inbound = order.dedicated_inbound
+	if (!ingress || !inbound) return 'Inbound/Ingress 未绑定'
+	const protocol = String(order.dedicated_protocol || 'mixed')
+	const entryText = ingress.name || `${ingress.domain}`
+	return `${entryText}:${ingress.ingress_port} / ${protocol.toUpperCase()}@:${inbound.listen_port}`
 }
 
 function migrationStateColor(state: string) {
@@ -569,14 +739,28 @@ async function probePort() {
 }
 
 async function createOrder() {
+	if (creatingOrder.value) return
   try {
+		if (!Number(orderForm.customer_id || 0)) {
+			message.warning('请选择客户')
+			return
+		}
+		creatingOrder.value = true
     if (orderForm.mode === 'forward' && orderForm.forward_outbound_ids.length === 0) {
       message.warning('请至少选择 1 个 SOCKS5 出口')
       return
     }
 		if (orderForm.mode === 'dedicated') {
-			if (!orderForm.dedicated_entry_id) {
-				message.warning('请选择专线入口')
+			if (!orderForm.dedicated_protocol) {
+				message.warning('请选择协议')
+				return
+			}
+			if (!orderForm.dedicated_inbound_id) {
+				message.warning('请选择Inbound')
+				return
+			}
+			if (!orderForm.dedicated_ingress_id) {
+				message.warning('请选择Ingress入口')
 				return
 			}
 			if (dedicatedLinesCount(orderForm.dedicated_egress_lines) <= 0) {
@@ -597,6 +781,9 @@ async function createOrder() {
       payload.forward_outbound_ids = orderForm.forward_outbound_ids.map((v) => Number(v))
 		} else if (orderForm.mode === 'dedicated') {
 			payload.dedicated_entry_id = Number(orderForm.dedicated_entry_id)
+			payload.dedicated_inbound_id = Number(orderForm.dedicated_inbound_id)
+			payload.dedicated_ingress_id = Number(orderForm.dedicated_ingress_id)
+			payload.dedicated_protocol = String(orderForm.dedicated_protocol || 'mixed')
 			payload.dedicated_egress_lines = String(orderForm.dedicated_egress_lines || '')
     } else {
       payload.quantity = Number(orderForm.quantity)
@@ -610,6 +797,9 @@ async function createOrder() {
 		}
 		if (orderForm.mode === 'dedicated') {
 			orderForm.dedicated_entry_id = 0
+			orderForm.dedicated_inbound_id = 0
+			orderForm.dedicated_ingress_id = 0
+			orderForm.dedicated_protocol = 'mixed'
 			orderForm.dedicated_egress_lines = ''
 		}
     panel.orderSelection = []
@@ -617,6 +807,9 @@ async function createOrder() {
     showForwardWarnings(result?.warnings || [])
   } catch (err) {
     panel.setError(err)
+		message.error(panel.error || '创建订单失败')
+  } finally {
+		creatingOrder.value = false
   }
 }
 
@@ -638,9 +831,12 @@ function openOrderEdit(row: Order) {
 	orderEditForm.quantity = row.quantity
 	orderEditForm.port = row.port
 	orderEditForm.expires_at = row.expires_at ? new Date(row.expires_at).toISOString().slice(0, 19) : ''
-	orderEditForm.manual_ip_ids = []
+	orderEditForm.manual_ip_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.host_ip_id || 0)).filter((v) => v > 0)))
 	orderEditForm.forward_outbound_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.socks_outbound_id || 0)).filter((v) => v > 0)))
 	orderEditForm.dedicated_entry_id = Number((row as any).dedicated_entry_id || 0)
+	orderEditForm.dedicated_inbound_id = Number((row as any).dedicated_inbound_id || 0)
+	orderEditForm.dedicated_ingress_id = Number((row as any).dedicated_ingress_id || 0)
+	orderEditForm.dedicated_protocol = String((row as any).dedicated_protocol || 'mixed')
 	orderEditForm.dedicated_egress_lines = ''
 	orderEditForm.dedicated_credential_lines = ''
 	orderEditForm.regenerate_dedicated_credentials = false
@@ -650,25 +846,40 @@ function openOrderEdit(row: Order) {
 }
 
 async function saveOrderEdit() {
+	if (savingOrderEdit.value) return
 	try {
+		savingOrderEdit.value = true
 		if (orderEditForm.mode === 'forward' && orderEditForm.forward_outbound_ids.length === 0) {
 			message.warning('请至少选择 1 个 SOCKS5 出口')
 			return
 		}
-		if (orderEditForm.mode === 'dedicated' && !orderEditForm.dedicated_entry_id) {
-			message.warning('请选择专线入口')
+		if (orderEditForm.mode === 'dedicated' && !orderEditForm.dedicated_inbound_id) {
+			message.warning('请选择Inbound')
+			return
+		}
+		if (orderEditForm.mode === 'dedicated' && !orderEditForm.dedicated_ingress_id) {
+			message.warning('请选择Ingress入口')
+			return
+		}
+		if (orderEditForm.mode === 'dedicated' && !orderEditForm.dedicated_protocol) {
+			message.warning('请选择协议')
 			return
 		}
 		const payload: Record<string, unknown> = {
 			name: orderEditForm.name,
 			port: Number(orderEditForm.port),
-			expires_at: orderEditForm.expires_at ? new Date(orderEditForm.expires_at).toISOString() : '',
-			manual_ip_ids: orderEditForm.manual_ip_ids.map((v) => Number(v))
+			expires_at: orderEditForm.expires_at ? new Date(orderEditForm.expires_at).toISOString() : ''
+		}
+		if (orderEditForm.mode === 'manual') {
+			payload.manual_ip_ids = orderEditForm.manual_ip_ids.map((v) => Number(v))
 		}
 		if (orderEditForm.mode === 'forward') {
 			payload.forward_outbound_ids = orderEditForm.forward_outbound_ids.map((v) => Number(v))
 		} else if (orderEditForm.mode === 'dedicated') {
 			payload.dedicated_entry_id = Number(orderEditForm.dedicated_entry_id)
+			payload.dedicated_inbound_id = Number(orderEditForm.dedicated_inbound_id)
+			payload.dedicated_ingress_id = Number(orderEditForm.dedicated_ingress_id)
+			payload.dedicated_protocol = String(orderEditForm.dedicated_protocol || 'mixed')
 			if (String(orderEditForm.dedicated_egress_lines || '').trim()) {
 				payload.dedicated_egress_lines = String(orderEditForm.dedicated_egress_lines || '')
 			}
@@ -687,6 +898,9 @@ async function saveOrderEdit() {
 		showForwardWarnings(result?.warnings || [])
 	} catch (err) {
 		panel.setError(err)
+		message.error(panel.error || '更新订单失败')
+	} finally {
+		savingOrderEdit.value = false
 	}
 }
 
@@ -702,12 +916,21 @@ async function renewOrder(orderID: number, moreDays?: number) {
 }
 
 async function deactivateOrder(orderID: number) {
-  try {
-    await panel.deactivateOrder(orderID)
-    message.success('订单已停用')
-  } catch (err) {
-    panel.setError(err)
-  }
+	Modal.confirm({
+		title: '停用订单',
+		content: `确认停用订单 #${orderID} 吗？`,
+		okText: '停用',
+		okType: 'danger',
+		onOk: async () => {
+			try {
+				await panel.deactivateOrder(orderID)
+				message.success('订单已停用')
+			} catch (err) {
+				panel.setError(err)
+				message.error(panel.error || '停用失败')
+			}
+		}
+	})
 }
 
 async function doBatchRenew() {
@@ -750,16 +973,11 @@ async function doBatchTest() {
 async function doBatchExport() {
 	if (panel.orderSelection.length === 0) return
 	try {
-		const res = await panel.batchExport(panel.orderSelection)
+		const res = await panel.batchExport(panel.orderSelection, exportIncludeRawSocks5.value)
 		const header = String(res.headers?.['content-disposition'] || '')
 		const match = header.match(/filename="?([^";]+)"?/i)
-		const filename = match?.[1] || `orders-batch-${Date.now()}.xlsx`
-		const url = URL.createObjectURL(res.data)
-		const a = document.createElement('a')
-		a.href = url
-		a.download = filename
-		a.click()
-		URL.revokeObjectURL(url)
+		const filename = match?.[1] || `orders-batch-${Date.now()}.zip`
+		downloadBlobFile(res.data, filename)
 	} catch (err) {
 		panel.setError(err)
 	}
@@ -794,18 +1012,14 @@ async function exportOrder(orderID: number) {
 			params.set('count', String(Number(exportCount.value)))
 		}
 		params.set('format', 'xlsx')
+		params.set('include_raw_socks5', exportIncludeRawSocks5.value ? 'true' : 'false')
 		params.set('shuffle', 'true')
 		const query = params.toString()
 		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'blob' })
 		const header = String(res.headers['content-disposition'] || '')
 		const match = header.match(/filename="?([^";]+)"?/i)
 		const filename = match?.[1] || `order-${orderID}-export.xlsx`
-		const url = URL.createObjectURL(res.data)
-		const a = document.createElement('a')
-		a.href = url
-		a.download = filename
-		a.click()
-		URL.revokeObjectURL(url)
+		downloadBlobFile(res.data, filename)
 	} catch (err) {
 		panel.setError(err)
 	} finally {
@@ -876,20 +1090,15 @@ async function openOrderDetail(order: Order) {
 }
 
 function dedicatedCopyPort(order: Order): number {
-	const entry = order.dedicated_entry
-	if (!entry) return Number(order.port || 0)
-	const features = String(entry.features || '')
-	if (features.includes('mixed') && Number(entry.mixed_port) > 0) return Number(entry.mixed_port)
-	if (features.includes('vmess') && Number(entry.vmess_port) > 0) return Number(entry.vmess_port)
-	if (features.includes('vless') && Number(entry.vless_port) > 0) return Number(entry.vless_port)
-	if (features.includes('shadowsocks') && Number(entry.shadowsocks_port) > 0) return Number(entry.shadowsocks_port)
+	const ingress = order.dedicated_ingress
+	if (ingress && Number(ingress.ingress_port) > 0) return Number(ingress.ingress_port)
 	return Number(order.port || 0)
 }
 
 async function copyOrderLines(order: Order) {
 	const lines = order.items.map((item) => {
-		if (order.mode === 'dedicated' && order.dedicated_entry) {
-			const host = String(order.dedicated_entry.domain || item.ip)
+		if (order.mode === 'dedicated') {
+			const host = String(order.dedicated_ingress?.domain || order.dedicated_entry?.domain || item.ip)
 			const port = dedicatedCopyPort(order)
 			return `${host}:${port}:${item.username}:${item.password}`
 		}
@@ -900,11 +1109,22 @@ async function copyOrderLines(order: Order) {
 }
 
 async function previewImport() {
+	if (previewingImport.value) return
   try {
+		if (!String(importForm.lines || '').trim()) {
+			message.warning('请先粘贴导入内容')
+			return
+		}
+		previewingImport.value = true
     await panel.previewImport(importForm.lines)
+		importPreviewSource.value = 'lines'
+		importPreviewFingerprint.value = currentImportPreviewFingerprint()
     message.success('预检完成')
   } catch (err) {
     panel.setError(err)
+		message.error(panel.error || '预检失败')
+  } finally {
+		previewingImport.value = false
   }
 }
 
@@ -912,6 +1132,8 @@ async function scanSingboxConfigs() {
 	try {
 		const result = await panel.scanSingboxConfigs()
 		singboxSelectedFiles.value = (result?.files || []).filter((file) => file.selectable).map((file) => file.path)
+		importPreviewSource.value = ''
+		importPreviewFingerprint.value = ''
 		if (!importForm.expires_at) {
 			setImportExpiryDays(15)
 		}
@@ -926,11 +1148,18 @@ async function previewSelectedSingboxFiles() {
 		message.warning('请先选择至少 1 个配置文件')
 		return
 	}
+	if (previewingSingboxImport.value) return
 	try {
+		previewingSingboxImport.value = true
 		await panel.previewSingboxImport(singboxSelectedFiles.value)
+		importPreviewSource.value = 'singbox'
+		importPreviewFingerprint.value = currentImportPreviewFingerprint()
 		message.success('sing-box 预检完成')
 	} catch (err) {
 		panel.setError(err)
+		message.error(panel.error || 'sing-box 预检失败')
+	} finally {
+		previewingSingboxImport.value = false
 	}
 }
 
@@ -1000,9 +1229,36 @@ function resetDedicatedForm() {
 	dedicatedForm.notes = ''
 }
 
+function resetDedicatedInboundForm() {
+	dedicatedInboundForm.name = ''
+	dedicatedInboundForm.protocol = 'mixed'
+	dedicatedInboundForm.listen_port = 1080
+	dedicatedInboundForm.priority = 100
+	dedicatedInboundForm.enabled = true
+	dedicatedInboundForm.notes = ''
+}
+
+function resetDedicatedIngressForm() {
+	if (!dedicatedIngressForm.dedicated_inbound_id && enabledDedicatedInbounds.value.length > 0) {
+		dedicatedIngressForm.dedicated_inbound_id = Number(enabledDedicatedInbounds.value[0]?.id || 0)
+	}
+	dedicatedIngressForm.name = ''
+	dedicatedIngressForm.domain = ''
+	dedicatedIngressForm.ingress_port = 0
+	dedicatedIngressForm.country_code = ''
+	dedicatedIngressForm.region = ''
+	dedicatedIngressForm.priority = 100
+	dedicatedIngressForm.enabled = true
+	dedicatedIngressForm.notes = ''
+}
+
 function openDedicatedManager() {
 	dedicatedManagerOpen.value = true
 	void panel.loadDedicatedEntries()
+	void panel.loadDedicatedInbounds()
+	void panel.loadDedicatedIngresses()
+	resetDedicatedInboundForm()
+	resetDedicatedIngressForm()
 }
 
 async function createDedicatedEntry() {
@@ -1024,6 +1280,144 @@ async function createDedicatedEntry() {
 	} catch (err) {
 		panel.setError(err)
 	}
+}
+
+async function createDedicatedInbound() {
+	try {
+		await panel.createDedicatedInbound({
+			name: dedicatedInboundForm.name,
+			protocol: dedicatedInboundForm.protocol,
+			listen_port: Number(dedicatedInboundForm.listen_port),
+			priority: Number(dedicatedInboundForm.priority),
+			enabled: dedicatedInboundForm.enabled,
+			notes: dedicatedInboundForm.notes
+		})
+		if (!dedicatedIngressForm.dedicated_inbound_id && enabledDedicatedInbounds.value.length > 0) {
+			dedicatedIngressForm.dedicated_inbound_id = Number(enabledDedicatedInbounds.value[0]?.id || 0)
+		}
+		resetDedicatedInboundForm()
+		message.success('Inbound已创建')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function createDedicatedIngress() {
+	try {
+		if (!Number(dedicatedIngressForm.dedicated_inbound_id || 0)) {
+			message.warning('请先选择绑定的Inbound')
+			return
+		}
+		await panel.createDedicatedIngress({
+			dedicated_inbound_id: Number(dedicatedIngressForm.dedicated_inbound_id),
+			name: dedicatedIngressForm.name,
+			domain: dedicatedIngressForm.domain,
+			ingress_port: Number(dedicatedIngressForm.ingress_port),
+			country_code: dedicatedIngressForm.country_code,
+			region: dedicatedIngressForm.region,
+			priority: Number(dedicatedIngressForm.priority),
+			enabled: dedicatedIngressForm.enabled,
+			notes: dedicatedIngressForm.notes
+		})
+		resetDedicatedIngressForm()
+		message.success('Ingress已创建')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function openDedicatedInboundEdit(row: any) {
+	dedicatedInboundEditForm.id = Number(row.id)
+	dedicatedInboundEditForm.name = String(row.name || '')
+	dedicatedInboundEditForm.protocol = String(row.protocol || 'mixed')
+	dedicatedInboundEditForm.listen_port = Number(row.listen_port || 0)
+	dedicatedInboundEditForm.priority = Number(row.priority || 100)
+	dedicatedInboundEditForm.enabled = Boolean(row.enabled)
+	dedicatedInboundEditForm.notes = String(row.notes || '')
+	dedicatedInboundEditOpen.value = true
+}
+
+async function saveDedicatedInboundEdit() {
+	try {
+		await panel.updateDedicatedInbound(Number(dedicatedInboundEditForm.id), {
+			name: dedicatedInboundEditForm.name,
+			protocol: dedicatedInboundEditForm.protocol,
+			listen_port: Number(dedicatedInboundEditForm.listen_port),
+			priority: Number(dedicatedInboundEditForm.priority),
+			enabled: dedicatedInboundEditForm.enabled,
+			notes: dedicatedInboundEditForm.notes
+		})
+		dedicatedInboundEditOpen.value = false
+		message.success('Inbound已更新')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function openDedicatedIngressEdit(row: any) {
+	dedicatedIngressEditForm.id = Number(row.id)
+	dedicatedIngressEditForm.dedicated_inbound_id = Number(row.dedicated_inbound_id || 0)
+	dedicatedIngressEditForm.name = String(row.name || '')
+	dedicatedIngressEditForm.domain = String(row.domain || '')
+	dedicatedIngressEditForm.ingress_port = Number(row.ingress_port || 0)
+	dedicatedIngressEditForm.country_code = String(row.country_code || '')
+	dedicatedIngressEditForm.region = String(row.region || '')
+	dedicatedIngressEditForm.priority = Number(row.priority || 100)
+	dedicatedIngressEditForm.enabled = Boolean(row.enabled)
+	dedicatedIngressEditForm.notes = String(row.notes || '')
+	dedicatedIngressEditOpen.value = true
+}
+
+async function saveDedicatedIngressEdit() {
+	try {
+		await panel.updateDedicatedIngress(Number(dedicatedIngressEditForm.id), {
+			dedicated_inbound_id: Number(dedicatedIngressEditForm.dedicated_inbound_id),
+			name: dedicatedIngressEditForm.name,
+			domain: dedicatedIngressEditForm.domain,
+			ingress_port: Number(dedicatedIngressEditForm.ingress_port),
+			country_code: dedicatedIngressEditForm.country_code,
+			region: dedicatedIngressEditForm.region,
+			priority: Number(dedicatedIngressEditForm.priority),
+			enabled: dedicatedIngressEditForm.enabled,
+			notes: dedicatedIngressEditForm.notes
+		})
+		dedicatedIngressEditOpen.value = false
+		message.success('Ingress已更新')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function removeDedicatedInbound(id: number) {
+	Modal.confirm({
+		title: '删除Inbound',
+		content: '确认删除这个Inbound吗？',
+		okText: '删除',
+		okType: 'danger',
+		onOk: async () => {
+			try {
+				await panel.deleteDedicatedInbound(id)
+			} catch (err) {
+				panel.setError(err)
+			}
+		}
+	})
+}
+
+function removeDedicatedIngress(id: number) {
+	Modal.confirm({
+		title: '删除Ingress',
+		content: '确认删除这个Ingress吗？',
+		okText: '删除',
+		okType: 'danger',
+		onOk: async () => {
+			try {
+				await panel.deleteDedicatedIngress(id)
+			} catch (err) {
+				panel.setError(err)
+			}
+		}
+	})
 }
 
 function openDedicatedEdit(row: any) {
@@ -1097,18 +1491,23 @@ function openGroupSocksModal(orderID: number) {
 }
 
 async function submitGroupSocksUpdate() {
+	if (groupSocksSaving.value) return
 	if (!groupTargetOrderID.value) return
 	if (!groupSocksLines.value.trim()) {
 		message.warning('请粘贴 Socks5 列表')
 		return
 	}
 	try {
+		groupSocksSaving.value = true
 		await panel.updateOrderGroupSocks5(groupTargetOrderID.value, groupSocksLines.value)
 		groupSocksModalOpen.value = false
 		groupSocksLines.value = ''
 		message.success('组内 Socks5 已顺序更新')
 	} catch (err) {
 		panel.setError(err)
+		message.error(panel.error || '组内 Socks5 更新失败')
+	} finally {
+		groupSocksSaving.value = false
 	}
 }
 
@@ -1138,14 +1537,69 @@ function openGroupCredModal(orderID: number) {
 	groupCredModalOpen.value = true
 }
 
+function openGroupRenewModal(orderID: number) {
+	groupRenewHeadOrderID.value = orderID
+	groupRenewDays.value = Number(batchMoreDays.value || 30)
+	groupRenewChildOrderIDs.value = panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
+		.map((row) => Number(row.id))
+	groupRenewModalOpen.value = true
+}
+
+async function submitGroupSelectedRenew() {
+	if (groupRenewSaving.value) return
+	if (!groupRenewHeadOrderID.value) return
+	if (groupRenewChildOrderIDs.value.length === 0) {
+		message.warning('请至少选择 1 个子订单')
+		return
+	}
+	if (!Number(groupRenewDays.value)) {
+		message.warning('请输入续期天数')
+		return
+	}
+	try {
+		groupRenewSaving.value = true
+		await panel.renewOrderGroupSelected(
+			Number(groupRenewHeadOrderID.value),
+			groupRenewChildOrderIDs.value.map((v) => Number(v)),
+			Number(groupRenewDays.value)
+		)
+		groupRenewModalOpen.value = false
+		message.success(`已续期 ${groupRenewChildOrderIDs.value.length} 个子订单`)
+	} catch (err) {
+		panel.setError(err)
+		message.error(panel.error || '部分续期失败')
+	} finally {
+		groupRenewSaving.value = false
+	}
+}
+
 async function submitGroupCredentialUpdate() {
+	if (groupCredSaving.value) return
 	if (!groupTargetOrderID.value) return
 	if (!groupCredRegenerate.value && !groupCredLines.value.trim()) {
 		message.warning('请粘贴凭据列表或启用随机重置')
 		return
 	}
 	const regenerate = groupCredRegenerate.value
+	if (regenerate) {
+		Modal.confirm({
+			title: '确认随机重置组内凭据',
+			content: '将随机重置当前组全部子订单入站凭据，原凭据将立即失效，是否继续？',
+			okText: '确认重置',
+			okType: 'danger',
+			onOk: async () => {
+				await applyGroupCredentialUpdate(regenerate)
+			}
+		})
+		return
+	}
+	await applyGroupCredentialUpdate(regenerate)
+}
+
+async function applyGroupCredentialUpdate(regenerate: boolean) {
 	try {
+		groupCredSaving.value = true
 		await panel.updateOrderGroupCredentials(groupTargetOrderID.value, {
 			lines: groupCredLines.value,
 			regenerate
@@ -1156,6 +1610,9 @@ async function submitGroupCredentialUpdate() {
 		message.success(regenerate ? '组内凭据已随机重置' : '组内凭据已顺序更新')
 	} catch (err) {
 		panel.setError(err)
+		message.error(panel.error || '组内凭据更新失败')
+	} finally {
+		groupCredSaving.value = false
 	}
 }
 
@@ -1310,7 +1767,13 @@ async function saveForwardEdit() {
 }
 
 async function confirmImport() {
+	if (confirmingImport.value) return
   try {
+		if (!importPreviewValid.value) {
+			message.warning('预检结果已失效，请重新预检后再导入')
+			return
+		}
+		confirmingImport.value = true
     await panel.confirmImport({
       customer_id: Number(importForm.customer_id),
       order_name: importForm.order_name,
@@ -1320,11 +1783,16 @@ async function confirmImport() {
 		importForm.customer_id = 0
 		importForm.order_name = ''
 		setImportExpiryDays(15)
-    importForm.lines = ''
+		importForm.lines = ''
     panel.importPreview = []
+		importPreviewSource.value = ''
+		importPreviewFingerprint.value = ''
     message.success('导入成功')
   } catch (err) {
     panel.setError(err)
+		message.error(panel.error || '导入失败')
+  } finally {
+		confirmingImport.value = false
   }
 }
 
@@ -1670,8 +2138,12 @@ function downloadBlobFile(data: Blob, filename: string) {
                       </template>
                       <template v-else-if="column.key === 'action'">
                         <a-space :size="2">
-                          <a-button size="small" :icon="h(EditOutlined)" @click="openCustomerEdit(record)" />
-                          <a-button size="small" danger :icon="h(DeleteOutlined)" @click="deleteCustomer(record.id)" />
+                          <a-tooltip title="编辑客户">
+                            <a-button size="small" :icon="h(EditOutlined)" aria-label="编辑客户" @click="openCustomerEdit(record)" />
+                          </a-tooltip>
+                          <a-tooltip title="删除客户">
+                            <a-button size="small" danger :icon="h(DeleteOutlined)" aria-label="删除客户" @click="deleteCustomer(record.id)" />
+                          </a-tooltip>
                         </a-space>
                       </template>
                     </template>
@@ -1799,12 +2271,22 @@ function downloadBlobFile(data: Blob, filename: string) {
 			  </div>
 			  <div v-else-if="orderForm.mode === 'dedicated'" class="mt-2">
 				<a-space class="mb-2" wrap>
-				  <a-button size="small" @click="openDedicatedManager">管理专线入口</a-button>
-				  <span class="text-xs text-slate-500">每个订单只绑定 1 个入口，数量按 Socks5 行数自动计算</span>
+				  <a-button size="small" @click="openDedicatedManager">管理专线 Inbound/Ingress</a-button>
+				  <span class="text-xs text-slate-500">先选协议，再选入口；数量按 Socks5 行数自动计算</span>
 				</a-space>
-				<a-select v-model:value="orderForm.dedicated_entry_id" style="width:100%" placeholder="选择专线入口">
-				  <a-select-option v-for="row in enabledDedicatedEntries" :key="row.id" :value="row.id">
-					{{ row.name || row.domain }} / {{ row.domain }} / mixed {{ row.mixed_port }} / vmess {{ row.vmess_port }} / vless {{ row.vless_port }} / ss {{ row.shadowsocks_port }}
+				<a-select v-model:value="orderForm.dedicated_protocol" style="width:100%" placeholder="选择协议">
+				  <a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">
+					{{ opt.label }}
+				  </a-select-option>
+				</a-select>
+				<a-select v-model:value="orderForm.dedicated_inbound_id" class="mt-2" style="width:100%" placeholder="选择Inbound(协议+本机端口)">
+				  <a-select-option v-for="row in filteredDedicatedInboundsForCreate" :key="row.id" :value="row.id">
+					{{ row.name }} / {{ row.protocol }} / :{{ row.listen_port }}
+				  </a-select-option>
+				</a-select>
+				<a-select v-model:value="orderForm.dedicated_ingress_id" class="mt-2" style="width:100%" placeholder="选择Ingress(入口域名:端口)">
+				  <a-select-option v-for="row in filteredDedicatedIngressesForCreate" :key="row.id" :value="row.id">
+					{{ row.name || row.domain }} / {{ row.domain }}:{{ row.ingress_port }} / {{ (row.country_code || '--').toUpperCase() }} {{ row.region || '' }}
 				  </a-select-option>
 				</a-select>
 				<a-space class="mt-2" wrap>
@@ -1815,7 +2297,7 @@ function downloadBlobFile(data: Blob, filename: string) {
 				<a-alert class="mt-2" type="info" show-icon :message="`专线数量 = ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}，订单将自动拆分为子订单 1:1`" />
               </div>
               <div class="mt-3 flex justify-end">
-                <a-button type="primary" @click="createOrder">下单并同步Xray</a-button>
+                <a-button type="primary" :loading="creatingOrder" @click="createOrder">下单并同步Xray</a-button>
               </div>
             </a-card>
 
@@ -1828,8 +2310,9 @@ function downloadBlobFile(data: Blob, filename: string) {
                     <a-select-option :value="10">测活10%</a-select-option>
                     <a-select-option :value="5">测活5%</a-select-option>
                   </a-select>
-                  <a-input-number v-model:value="exportCount" :min="0" size="small" :placeholder="'导出条数(0=全部)'" />
-                  <a-input-number v-model:value="batchMoreDays" :min="1" :max="365" size="small" />
+				  <a-input-number v-model:value="exportCount" :min="0" size="small" :placeholder="'导出条数(0=全部)'" />
+				  <a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
+				  <a-input-number v-model:value="batchMoreDays" :min="1" :max="365" size="small" />
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchRenew">批量续期</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchResync">批量重同步</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchTest">批量测活</a-button>
@@ -1879,15 +2362,24 @@ function downloadBlobFile(data: Blob, filename: string) {
                   <template v-else-if="column.key === 'action'">
 					<a-space :size="4" wrap>
 					  <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
+					  <a-button size="small" @click="openOrderEdit(record)">编辑</a-button>
 					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
 					  <a-button size="small" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
-					  <a-button size="small" @click="streamTestOrder(record.id)">流式测活</a-button>
-					  <a-button v-if="!record.parent_order_id && record.quantity > 1" size="small" @click="splitOrderHead(record.id)">拆分</a-button>
-					  <a-button v-if="record.is_group_head" size="small" @click="openGroupSocksModal(record.id)">顺序改Socks5</a-button>
-					  <a-button v-if="record.is_group_head" size="small" @click="openGroupCredModal(record.id)">批量改凭据</a-button>
-					  <a-button size="small" @click="openOrderEdit(record)">编辑</a-button>
-					  <a-button size="small" @click="renewOrder(record.id)">续期</a-button>
-					  <a-button size="small" danger @click="deactivateOrder(record.id)">停用</a-button>
+					  <a-dropdown>
+						<a-button size="small">更多</a-button>
+						<template #overlay>
+						  <a-menu>
+							<a-menu-item @click="renewOrder(record.id)">续期</a-menu-item>
+							<a-menu-item @click="streamTestOrder(record.id)">流式测活</a-menu-item>
+							<a-menu-item v-if="!record.parent_order_id && record.quantity > 1" @click="splitOrderHead(record.id)">拆分为子订单</a-menu-item>
+							<a-menu-item v-if="record.is_group_head" @click="openGroupSocksModal(record.id)">组内顺序改 Socks5</a-menu-item>
+							<a-menu-item v-if="record.is_group_head" @click="openGroupCredModal(record.id)">组内批量改凭据</a-menu-item>
+							<a-menu-item v-if="record.is_group_head" @click="openGroupRenewModal(record.id)">组内部分续期</a-menu-item>
+							<a-menu-divider />
+							<a-menu-item danger @click="deactivateOrder(record.id)">停用订单</a-menu-item>
+						  </a-menu>
+						</template>
+					  </a-dropdown>
 					</a-space>
                   </template>
                 </template>
@@ -1924,7 +2416,7 @@ function downloadBlobFile(data: Blob, filename: string) {
                     />
                     <a-space>
                       <a-button @click="scanSingboxConfigs">扫描宿主机配置</a-button>
-                      <a-button type="primary" ghost :disabled="singboxSelectedFiles.length === 0" @click="previewSelectedSingboxFiles">预检已选文件</a-button>
+                      <a-button type="primary" ghost :loading="previewingSingboxImport" :disabled="singboxSelectedFiles.length === 0" @click="previewSelectedSingboxFiles">预检已选文件</a-button>
                     </a-space>
                     <a-checkbox :checked="allSingboxSelected" @change="(e:any)=>toggleSingboxSelectAll(Boolean(e.target?.checked))">全选可导入文件</a-checkbox>
                     <div class="max-h-52 overflow-auto rounded border border-slate-200 p-2">
@@ -1952,10 +2444,11 @@ function downloadBlobFile(data: Blob, filename: string) {
                     </a-space>
                     <a-textarea v-model:value="importForm.lines" :rows="14" placeholder="每行: ip:port:user:pass" />
                     <a-space>
-                      <a-button @click="previewImport">预检</a-button>
+                      <a-button :loading="previewingImport" @click="previewImport">预检</a-button>
                       <a-button danger ghost @click="previewCrossNodeMigration">跨节点预检</a-button>
-                      <a-button type="primary" @click="confirmImport">确认导入</a-button>
+                      <a-button type="primary" :loading="confirmingImport" :disabled="!importPreviewValid" @click="confirmImport">确认导入</a-button>
                     </a-space>
+                    <a-alert v-if="(panel.importPreview || []).length > 0 && !importPreviewValid" type="warning" show-icon message="预检结果已失效，请重新预检后导入" />
                   </a-space>
                 </a-card>
 
@@ -2186,7 +2679,130 @@ function downloadBlobFile(data: Blob, filename: string) {
       </a-row>
     </a-drawer>
 
-	<a-drawer v-model:open="dedicatedManagerOpen" title="专线入口管理" width="980" :destroy-on-close="false">
+	<a-drawer v-model:open="dedicatedManagerOpen" title="专线 Inbound / Ingress 管理" width="1180" :destroy-on-close="false">
+	  <a-row :gutter="12">
+		<a-col :xs="24" :lg="12">
+		  <a-card size="small" title="新增 Inbound（协议 + 本机监听端口）">
+			<a-space direction="vertical" style="width:100%">
+			  <a-input v-model:value="dedicatedInboundForm.name" placeholder="Inbound名称，如 us-mixed-a" />
+			  <a-select v-model:value="dedicatedInboundForm.protocol" style="width:100%" placeholder="协议">
+				<a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">{{ opt.value }}</a-select-option>
+			  </a-select>
+			  <a-input-number v-model:value="dedicatedInboundForm.listen_port" :min="1" :max="65535" style="width:100%" placeholder="本机监听端口" />
+			  <a-input-number v-model:value="dedicatedInboundForm.priority" :min="1" :max="999" style="width:100%" placeholder="优先级(越小越高)" />
+			  <a-input v-model:value="dedicatedInboundForm.notes" placeholder="备注" />
+			  <a-space>
+				<a-switch :checked="dedicatedInboundForm.enabled" @change="(v:boolean)=>dedicatedInboundForm.enabled=v" />
+				<span class="text-xs text-slate-500">启用</span>
+			  </a-space>
+			  <a-space>
+				<a-button @click="resetDedicatedInboundForm">重置</a-button>
+				<a-button type="primary" @click="createDedicatedInbound">新增 Inbound</a-button>
+			  </a-space>
+			</a-space>
+		  </a-card>
+		</a-col>
+		<a-col :xs="24" :lg="12">
+		  <a-card size="small" title="新增 Ingress（公网域名 + 入口端口）">
+			<a-space direction="vertical" style="width:100%">
+			  <a-select v-model:value="dedicatedIngressForm.dedicated_inbound_id" style="width:100%" placeholder="绑定 Inbound">
+				<a-select-option v-for="row in enabledDedicatedInbounds" :key="row.id" :value="row.id">
+				  {{ row.name }} / {{ row.protocol }} / :{{ row.listen_port }}
+				</a-select-option>
+			  </a-select>
+			  <a-input v-model:value="dedicatedIngressForm.name" placeholder="Ingress名称，如 us-east-01" />
+			  <a-input v-model:value="dedicatedIngressForm.domain" placeholder="入口域名或IP，如 line-us.example.com" />
+			  <a-input-number v-model:value="dedicatedIngressForm.ingress_port" :min="1" :max="65535" style="width:100%" placeholder="对外入口端口" />
+			  <a-space style="width:100%">
+				<a-input v-model:value="dedicatedIngressForm.country_code" placeholder="国家代码，如 US" />
+				<a-input v-model:value="dedicatedIngressForm.region" placeholder="区域，如 Virginia" />
+			  </a-space>
+			  <a-input-number v-model:value="dedicatedIngressForm.priority" :min="1" :max="999" style="width:100%" placeholder="优先级(越小越高)" />
+			  <a-input v-model:value="dedicatedIngressForm.notes" placeholder="备注" />
+			  <a-space>
+				<a-switch :checked="dedicatedIngressForm.enabled" @change="(v:boolean)=>dedicatedIngressForm.enabled=v" />
+				<span class="text-xs text-slate-500">启用</span>
+			  </a-space>
+			  <a-space>
+				<a-button @click="resetDedicatedIngressForm">重置</a-button>
+				<a-button type="primary" @click="createDedicatedIngress">新增 Ingress</a-button>
+			  </a-space>
+			</a-space>
+		  </a-card>
+		</a-col>
+	  </a-row>
+
+	  <a-row :gutter="12" class="mt-3">
+		<a-col :xs="24" :lg="12">
+		  <a-card size="small" title="Inbound 列表">
+			<a-table :data-source="panel.dedicatedInbounds" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 6 }">
+			  <a-table-column title="名称" key="name" width="160">
+				<template #default="{ record }">
+				  <span class="font-mono text-xs">{{ record.name || '-' }}</span>
+				</template>
+			  </a-table-column>
+			  <a-table-column title="协议" data-index="protocol" key="protocol" width="100" />
+			  <a-table-column title="监听" key="listen_port" width="100">
+				<template #default="{ record }">:{{ record.listen_port }}</template>
+			  </a-table-column>
+			  <a-table-column title="优先级" data-index="priority" key="priority" width="88" />
+			  <a-table-column title="启用" key="enabled" width="80">
+				<template #default="{ record }">
+				  <a-switch :checked="record.enabled" @change="(checked:boolean)=>panel.toggleDedicatedInbound(record.id, checked)" />
+				</template>
+			  </a-table-column>
+			  <a-table-column title="动作" key="action" width="140">
+				<template #default="{ record }">
+				  <a-space :size="4">
+					<a-button size="small" @click="openDedicatedInboundEdit(record)">编辑</a-button>
+					<a-button size="small" danger @click="removeDedicatedInbound(record.id)">删除</a-button>
+				  </a-space>
+				</template>
+			  </a-table-column>
+			</a-table>
+		  </a-card>
+		</a-col>
+		<a-col :xs="24" :lg="12">
+		  <a-card size="small" title="Ingress 列表">
+			<a-table :data-source="panel.dedicatedIngresses" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 6 }">
+			  <a-table-column title="入口" key="entry" width="230">
+				<template #default="{ record }">
+				  <div class="font-mono text-xs">{{ record.name || '-' }} / {{ record.domain }}:{{ record.ingress_port }}</div>
+				</template>
+			  </a-table-column>
+			  <a-table-column title="Inbound" key="inbound" width="180">
+				<template #default="{ record }">
+				  <span class="text-xs">
+					{{ record.dedicated_inbound?.name || `#${record.dedicated_inbound_id}` }}
+					/ {{ record.dedicated_inbound?.protocol || '-' }}
+					/ :{{ record.dedicated_inbound?.listen_port || '-' }}
+				  </span>
+				</template>
+			  </a-table-column>
+			  <a-table-column title="区域" key="region" width="140">
+				<template #default="{ record }">{{ (record.country_code || '--').toUpperCase() }} {{ record.region || '' }}</template>
+			  </a-table-column>
+			  <a-table-column title="优先级" data-index="priority" key="priority" width="88" />
+			  <a-table-column title="启用" key="enabled" width="80">
+				<template #default="{ record }">
+				  <a-switch :checked="record.enabled" @change="(checked:boolean)=>panel.toggleDedicatedIngress(record.id, checked)" />
+				</template>
+			  </a-table-column>
+			  <a-table-column title="动作" key="action" width="140">
+				<template #default="{ record }">
+				  <a-space :size="4">
+					<a-button size="small" @click="openDedicatedIngressEdit(record)">编辑</a-button>
+					<a-button size="small" danger @click="removeDedicatedIngress(record.id)">删除</a-button>
+				  </a-space>
+				</template>
+			  </a-table-column>
+			</a-table>
+		  </a-card>
+		</a-col>
+	  </a-row>
+
+	  <a-divider class="my-3" />
+	  <a-alert type="warning" show-icon message="兼容模式：老版 DedicatedEntry 仅用于历史数据映射，新建订单请优先使用 Inbound + Ingress" class="mb-2" />
 	  <a-row :gutter="12">
 		<a-col :xs="24" :lg="10">
 		  <a-space direction="vertical" style="width:100%">
@@ -2205,29 +2821,29 @@ function downloadBlobFile(data: Blob, filename: string) {
 			</a-space>
 			<a-space>
 			  <a-button @click="resetDedicatedForm">重置</a-button>
-			  <a-button type="primary" @click="createDedicatedEntry">新增入口</a-button>
+			  <a-button type="primary" @click="createDedicatedEntry">新增Legacy入口</a-button>
 			</a-space>
 		  </a-space>
 		</a-col>
 		<a-col :xs="24" :lg="14">
-		  <a-table :data-source="panel.dedicatedEntries" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 8 }">
-			<a-table-column title="入口" key="entry" width="240">
+		  <a-table :data-source="panel.dedicatedEntries" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 6 }">
+			<a-table-column title="入口" key="entry" width="220">
 			  <template #default="{ record }">
 				<div class="font-mono text-xs">{{ record.name || '-' }} / {{ record.domain }}</div>
 			  </template>
 			</a-table-column>
-			<a-table-column title="协议端口" key="ports" width="240">
+			<a-table-column title="协议端口" key="ports" width="220">
 			  <template #default="{ record }">
 				<div class="text-xs">M {{ record.mixed_port }} | VM {{ record.vmess_port }} | VL {{ record.vless_port }} | SS {{ record.shadowsocks_port }}</div>
 			  </template>
 			</a-table-column>
-			<a-table-column title="特性" key="features" width="160">
+			<a-table-column title="特性" key="features" width="120">
 			  <template #default="{ record }">
 				<span class="text-xs">{{ record.features }}</span>
 			  </template>
 			</a-table-column>
 			<a-table-column title="优先级" data-index="priority" key="priority" width="90" />
-			<a-table-column title="启用" key="enabled" width="90">
+			<a-table-column title="启用" key="enabled" width="80">
 			  <template #default="{ record }">
 				<a-switch :checked="record.enabled" @change="(checked:boolean)=>panel.toggleDedicatedEntry(record.id, checked)" />
 			  </template>
@@ -2261,6 +2877,7 @@ function downloadBlobFile(data: Blob, filename: string) {
           <div class="font-semibold">订单条目 ({{ panel.selectedOrder.items.length }})</div>
           <a-space>
             <a-input-number v-model:value="exportCount" :min="0" :max="panel.selectedOrder.items.length" size="small" />
+            <a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
             <a-button size="small" :loading="exportingOrderID===panel.selectedOrder.id" @click="exportOrder(panel.selectedOrder.id)">提取导出</a-button>
             <a-button size="small" @click="copyOrderLines(panel.selectedOrder)">复制发货内容</a-button>
           </a-space>
@@ -2307,11 +2924,17 @@ function downloadBlobFile(data: Blob, filename: string) {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="orderEditOpen" title="编辑订单" @ok="saveOrderEdit">
+    <a-modal v-model:open="orderEditOpen" title="编辑订单" :confirm-loading="savingOrderEdit" @ok="saveOrderEdit">
       <a-form layout="vertical">
         <a-form-item label="模式"><a-tag :color="modeColor(orderEditForm.mode)">{{ orderEditForm.mode }}</a-tag></a-form-item>
         <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" /></a-form-item>
         <a-form-item v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'" label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
+        <a-form-item v-if="orderEditForm.mode === 'manual'" label="手动IP绑定(可多选)">
+          <a-select v-model:value="orderEditForm.manual_ip_ids" mode="multiple" style="width:100%" placeholder="选择手动IP">
+            <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
+          </a-select>
+          <div class="mt-1 text-xs text-slate-500">若不调整数量，可留空保持原绑定；调整数量时建议明确选择。</div>
+        </a-form-item>
         <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="SOCKS5转发出口">
           <a-space class="mb-2" wrap>
             <a-button size="small" @click="openForwardManager">管理SOCKS5出口</a-button>
@@ -2325,11 +2948,21 @@ function downloadBlobFile(data: Blob, filename: string) {
         </a-form-item>
         <a-form-item v-else label="专线入口">
           <a-space class="mb-2" wrap>
-            <a-button size="small" @click="openDedicatedManager">管理专线入口</a-button>
+				<a-button size="small" @click="openDedicatedManager">管理专线 Inbound/Ingress</a-button>
           </a-space>
-          <a-select v-model:value="orderEditForm.dedicated_entry_id" style="width:100%" placeholder="选择专线入口">
-            <a-select-option v-for="row in enabledDedicatedEntries" :key="row.id" :value="row.id">
-              {{ row.name || row.domain }} / {{ row.domain }} / mixed {{ row.mixed_port }} / vmess {{ row.vmess_port }} / vless {{ row.vless_port }} / ss {{ row.shadowsocks_port }}
+          <a-select v-model:value="orderEditForm.dedicated_protocol" style="width:100%" placeholder="选择协议">
+            <a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </a-select-option>
+          </a-select>
+          <a-select v-model:value="orderEditForm.dedicated_inbound_id" class="mt-2" style="width:100%" placeholder="选择Inbound(协议+本机端口)">
+            <a-select-option v-for="row in filteredDedicatedInboundsForEdit" :key="row.id" :value="row.id">
+              {{ row.name }} / {{ row.protocol }} / :{{ row.listen_port }} <span v-if="!row.enabled">(停用)</span>
+            </a-select-option>
+          </a-select>
+          <a-select v-model:value="orderEditForm.dedicated_ingress_id" class="mt-2" style="width:100%" placeholder="选择Ingress(入口域名:端口)">
+            <a-select-option v-for="row in filteredDedicatedIngressesForEdit" :key="row.id" :value="row.id">
+              {{ row.name || row.domain }} / {{ row.domain }}:{{ row.ingress_port }} / {{ (row.country_code || '--').toUpperCase() }} {{ row.region || '' }} <span v-if="!row.enabled">(停用)</span>
             </a-select-option>
           </a-select>
           <a-textarea v-model:value="orderEditForm.dedicated_egress_lines" class="mt-2" :rows="4" placeholder="可选: 顺序更新上游，每行 ip:port:user:pass" />
@@ -2368,7 +3001,52 @@ function downloadBlobFile(data: Blob, filename: string) {
 	  </a-form>
 	</a-modal>
 
-	<a-modal v-model:open="groupSocksModalOpen" title="顺序更新组内 Socks5" @ok="submitGroupSocksUpdate">
+	<a-modal v-model:open="dedicatedInboundEditOpen" title="编辑 Inbound" @ok="saveDedicatedInboundEdit">
+	  <a-form layout="vertical">
+		<a-form-item label="名称"><a-input v-model:value="dedicatedInboundEditForm.name" /></a-form-item>
+		<a-form-item label="协议">
+		  <a-select v-model:value="dedicatedInboundEditForm.protocol" style="width:100%">
+			<a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">{{ opt.value }}</a-select-option>
+		  </a-select>
+		</a-form-item>
+		<a-form-item label="监听端口"><a-input-number v-model:value="dedicatedInboundEditForm.listen_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+		<a-form-item label="优先级"><a-input-number v-model:value="dedicatedInboundEditForm.priority" :min="1" :max="999" style="width:100%" /></a-form-item>
+		<a-form-item label="备注"><a-input v-model:value="dedicatedInboundEditForm.notes" /></a-form-item>
+		<a-form-item>
+		  <a-switch :checked="dedicatedInboundEditForm.enabled" @change="(v:boolean)=>dedicatedInboundEditForm.enabled=v" />
+		  <span class="ml-2 text-xs text-slate-500">启用</span>
+		</a-form-item>
+	  </a-form>
+	</a-modal>
+
+	<a-modal v-model:open="dedicatedIngressEditOpen" title="编辑 Ingress" @ok="saveDedicatedIngressEdit">
+	  <a-form layout="vertical">
+		<a-form-item label="绑定 Inbound">
+		  <a-select v-model:value="dedicatedIngressEditForm.dedicated_inbound_id" style="width:100%">
+			<a-select-option v-for="row in panel.dedicatedInbounds" :key="row.id" :value="row.id">
+			  {{ row.name }} / {{ row.protocol }} / :{{ row.listen_port }}
+			</a-select-option>
+		  </a-select>
+		</a-form-item>
+		<a-form-item label="名称"><a-input v-model:value="dedicatedIngressEditForm.name" /></a-form-item>
+		<a-form-item label="域名"><a-input v-model:value="dedicatedIngressEditForm.domain" /></a-form-item>
+		<a-form-item label="入口端口"><a-input-number v-model:value="dedicatedIngressEditForm.ingress_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
+		<a-form-item label="国家/区域">
+		  <a-space style="width:100%">
+			<a-input v-model:value="dedicatedIngressEditForm.country_code" placeholder="US" />
+			<a-input v-model:value="dedicatedIngressEditForm.region" placeholder="Virginia" />
+		  </a-space>
+		</a-form-item>
+		<a-form-item label="优先级"><a-input-number v-model:value="dedicatedIngressEditForm.priority" :min="1" :max="999" style="width:100%" /></a-form-item>
+		<a-form-item label="备注"><a-input v-model:value="dedicatedIngressEditForm.notes" /></a-form-item>
+		<a-form-item>
+		  <a-switch :checked="dedicatedIngressEditForm.enabled" @change="(v:boolean)=>dedicatedIngressEditForm.enabled=v" />
+		  <span class="ml-2 text-xs text-slate-500">启用</span>
+		</a-form-item>
+	  </a-form>
+	</a-modal>
+
+	<a-modal v-model:open="groupSocksModalOpen" title="顺序更新组内 Socks5" :confirm-loading="groupSocksSaving" @ok="submitGroupSocksUpdate">
 	  <a-alert type="info" show-icon message="每行格式: ip:port:user:pass；顺序必须与子订单顺序一致" class="mb-2" />
 	  <a-space class="mb-2">
 		<a-button size="small" @click="downloadGroupSocksTemplate">下载模板</a-button>
@@ -2380,7 +3058,7 @@ function downloadBlobFile(data: Blob, filename: string) {
 	  <a-textarea v-model:value="groupSocksLines" :rows="10" placeholder="按顺序粘贴 Socks5 列表" />
 	</a-modal>
 
-	<a-modal v-model:open="groupCredModalOpen" title="批量更新组内入站凭据" @ok="submitGroupCredentialUpdate">
+	<a-modal v-model:open="groupCredModalOpen" title="批量更新组内入站凭据" :confirm-loading="groupCredSaving" @ok="submitGroupCredentialUpdate">
 	  <a-alert type="info" show-icon message="每行格式: user:pass[:uuid]；不填 uuid 自动生成" class="mb-2" />
 	  <a-space class="mb-2">
 		<a-button size="small" @click="downloadGroupCredentialTemplate">下载模板</a-button>
@@ -2391,6 +3069,22 @@ function downloadBlobFile(data: Blob, filename: string) {
 	  </a-space>
 	  <a-checkbox v-model:checked="groupCredRegenerate" class="mb-2">忽略文本，随机重置全组凭据</a-checkbox>
 	  <a-textarea v-model:value="groupCredLines" :rows="8" :disabled="groupCredRegenerate" placeholder="按顺序粘贴凭据" />
+	</a-modal>
+
+	<a-modal v-model:open="groupRenewModalOpen" title="部分续期子订单" :confirm-loading="groupRenewSaving" @ok="submitGroupSelectedRenew">
+	  <a-space class="mb-2" align="center">
+		<span class="text-xs text-slate-600">续期天数</span>
+		<a-input-number v-model:value="groupRenewDays" :min="1" :max="365" />
+		<span class="text-xs text-slate-500">仅对选中子订单生效</span>
+	  </a-space>
+	  <a-checkbox-group v-model:value="groupRenewChildOrderIDs" style="width:100%">
+		<a-space direction="vertical" style="width:100%">
+		  <a-checkbox v-for="row in groupRenewCandidates" :key="row.id" :value="row.id">
+			#{{ row.id }} / {{ row.name }} / 到期 {{ formatTime(row.expires_at) }}
+		  </a-checkbox>
+		</a-space>
+	  </a-checkbox-group>
+	  <a-alert v-if="!groupRenewCandidates.length" class="mt-2" type="warning" show-icon message="该组暂无可选择的子订单" />
 	</a-modal>
 
     <a-modal v-model:open="forwardEditOpen" title="编辑转发出口" @ok="saveForwardEdit">
