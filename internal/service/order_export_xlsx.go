@@ -31,6 +31,7 @@ type xlsxExportRow struct {
 	CustomerCode string
 	CountryCode  string
 	CycleTag     string
+	DurationDays int
 	ExpiresAt    time.Time
 	Link         string
 	RawSocks5    string
@@ -61,7 +62,7 @@ func (s *OrderService) ExportOrderXLSX(orderID uint, opts ExportOrderOptions) ([
 	if err != nil {
 		return nil, "", err
 	}
-	filename := exportArtifactName(rows[0], protocol) + ".xlsx"
+	filename := exportArtifactName(rows, protocol) + ".xlsx"
 	return body, filename, nil
 }
 
@@ -78,7 +79,7 @@ func (s *OrderService) ExportOrderArtifact(orderID uint, opts ExportOrderOptions
 	if err != nil {
 		return nil, "", "", err
 	}
-	filename := exportArtifactName(rows[0], protocol) + ".xlsx"
+	filename := exportArtifactName(rows, protocol) + ".xlsx"
 	return body, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil
 }
 
@@ -101,7 +102,7 @@ func (s *OrderService) BatchExportArtifact(orderIDs []uint, opts XLSXExportOptio
 			if err != nil {
 				return nil, "", "", err
 			}
-			filename := exportArtifactName(one[0], one[0].Protocol) + ".xlsx"
+			filename := exportArtifactName(one, one[0].Protocol) + ".xlsx"
 			return body, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil
 		}
 	}
@@ -118,6 +119,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 	if err != nil {
 		return nil, err
 	}
+	linkSettings := s.loadExportLinkSettings()
 	itemIDs := make([]uint, 0)
 	for _, order := range orders {
 		for _, item := range order.Items {
@@ -145,7 +147,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if item.Status != model.OrderItemStatusActive {
 				continue
 			}
-			link := buildOrderItemLinkByProtocol(order, item, protocol)
+			link := buildOrderItemLinkByProtocol(order, item, protocol, linkSettings)
 			if strings.TrimSpace(link) == "" {
 				continue
 			}
@@ -169,6 +171,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 				CustomerCode: strings.TrimSpace(order.Customer.Code),
 				CountryCode:  country,
 				CycleTag:     cycleTag(order, now),
+				DurationDays: cycleDays(order, now),
 				ExpiresAt:    order.ExpiresAt,
 				Link:         link,
 				RawSocks5:    rawSocks,
@@ -256,7 +259,7 @@ func buildExportZip(groups map[string][]xlsxExportRow, includeRaw bool) ([]byte,
 			_ = zipWriter.Close()
 			return nil, err
 		}
-		name := exportArtifactName(rows[0], protocol) + ".xlsx"
+		name := exportArtifactName(rows, protocol) + ".xlsx"
 		file, err := zipWriter.Create(name)
 		if err != nil {
 			_ = zipWriter.Close()
@@ -273,15 +276,26 @@ func buildExportZip(groups map[string][]xlsxExportRow, includeRaw bool) ([]byte,
 	return buf.Bytes(), nil
 }
 
-func exportArtifactName(row xlsxExportRow, protocol string) string {
-	customer := strings.TrimSpace(row.CustomerCode)
+func exportArtifactName(rows []xlsxExportRow, protocol string) string {
+	if len(rows) == 0 {
+		return "export"
+	}
+	row := rows[0]
+	customer := strings.TrimSpace(row.Customer)
 	if customer == "" {
-		customer = strings.TrimSpace(row.Customer)
+		customer = strings.TrimSpace(row.CustomerCode)
 	}
 	if customer == "" {
 		customer = "customer"
 	}
-	name := fmt.Sprintf("%s-%s-%s-group-%d-%s", customer, row.CountryCode, protocol, row.GroupHeadID, row.CycleTag)
+	orderNo := fmt.Sprintf("OD%s%s", time.Now().Format("060102"), randomDigits(6))
+	protocolLabel := exportProtocolLabel(protocol)
+	countryPart := exportCountryStatLabel(rows)
+	days := row.DurationDays
+	if days <= 0 {
+		days = 30
+	}
+	name := fmt.Sprintf("%s-%s-[%s]-[%s]-%d天", customer, orderNo, protocolLabel, countryPart, days)
 	return sanitizeFilename(name)
 }
 
@@ -290,22 +304,113 @@ func sanitizeFilename(raw string) string {
 	if raw == "" {
 		return "export"
 	}
-	var b strings.Builder
-	for _, r := range raw {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			b.WriteRune(r)
-			continue
-		}
-		b.WriteRune('-')
-	}
-	out := strings.Trim(strings.ReplaceAll(b.String(), "--", "-"), "-")
+	replacer := strings.NewReplacer(
+		"/", "-",
+		"\\", "-",
+		":", "-",
+		"*", "",
+		"?", "",
+		"\"", "",
+		"<", "",
+		">", "",
+	)
+	out := strings.TrimSpace(replacer.Replace(raw))
 	if out == "" {
 		return "export"
 	}
 	return out
 }
 
+func randomDigits(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	const digits = "0123456789"
+	b := make([]byte, n)
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for i := 0; i < n; i++ {
+		b[i] = digits[r.Intn(len(digits))]
+	}
+	return string(b)
+}
+
+func exportProtocolLabel(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case model.DedicatedFeatureVmess:
+		return "Vmess"
+	case model.DedicatedFeatureVless:
+		return "Vless"
+	case model.DedicatedFeatureShadowsocks:
+		return "Shadowsocks"
+	default:
+		return "Socks5"
+	}
+}
+
+func exportCountryStatLabel(rows []xlsxExportRow) string {
+	if len(rows) == 0 {
+		return "0条未知"
+	}
+	counts := map[string]int{}
+	for _, row := range rows {
+		key := strings.ToLower(strings.TrimSpace(row.CountryCode))
+		if key == "" {
+			key = "xx"
+		}
+		counts[key]++
+	}
+	type pair struct {
+		Country string
+		Count   int
+	}
+	pairs := make([]pair, 0, len(counts))
+	for country, count := range counts {
+		pairs = append(pairs, pair{Country: country, Count: count})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Count == pairs[j].Count {
+			return pairs[i].Country < pairs[j].Country
+		}
+		return pairs[i].Count > pairs[j].Count
+	})
+	parts := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		parts = append(parts, fmt.Sprintf("%d条%s", p.Count, countryNameCN(p.Country)))
+	}
+	return strings.Join(parts, "|")
+}
+
+func countryNameCN(code string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	if code == "" || code == "xx" {
+		return "未知"
+	}
+	known := map[string]string{
+		"us": "美国",
+		"mx": "墨西哥",
+		"ca": "加拿大",
+		"jp": "日本",
+		"sg": "新加坡",
+		"kr": "韩国",
+		"gb": "英国",
+		"de": "德国",
+		"fr": "法国",
+		"nl": "荷兰",
+		"hk": "香港",
+		"tw": "台湾",
+	}
+	if name, ok := known[code]; ok {
+		return name
+	}
+	return strings.ToUpper(code)
+}
+
 func cycleTag(order model.Order, now time.Time) string {
+	days := cycleDays(order, now)
+	return fmt.Sprintf("D%d", days)
+}
+
+func cycleDays(order model.Order, now time.Time) int {
 	base := order.StartsAt
 	if base.IsZero() || base.After(order.ExpiresAt) {
 		base = now
@@ -314,7 +419,7 @@ func cycleTag(order model.Order, now time.Time) string {
 	if days <= 0 {
 		days = 1
 	}
-	return fmt.Sprintf("D%d", days)
+	return days
 }
 
 func groupHeadID(order model.Order) uint {
@@ -338,9 +443,49 @@ func exportOrderProtocol(order model.Order) string {
 	return protocol
 }
 
-func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, protocol string) string {
+type exportLinkSettings struct {
+	VlessSecurity string
+	VlessSNI      string
+	VlessType     string
+	VlessPath     string
+	VlessHost     string
+}
+
+func (s *OrderService) loadExportLinkSettings() exportLinkSettings {
+	out := exportLinkSettings{
+		VlessSecurity: "tls",
+		VlessType:     "tcp",
+	}
+	rows := []model.Setting{}
+	if err := s.db.Where("key in ?", []string{"dedicated_vless_security", "dedicated_vless_sni", "dedicated_vless_type", "dedicated_vless_path", "dedicated_vless_host"}).Find(&rows).Error; err != nil {
+		return out
+	}
+	for _, row := range rows {
+		v := strings.TrimSpace(row.Value)
+		switch strings.TrimSpace(row.Key) {
+		case "dedicated_vless_security":
+			if v != "" {
+				out.VlessSecurity = v
+			}
+		case "dedicated_vless_sni":
+			out.VlessSNI = v
+		case "dedicated_vless_type":
+			if v != "" {
+				out.VlessType = v
+			}
+		case "dedicated_vless_path":
+			out.VlessPath = v
+		case "dedicated_vless_host":
+			out.VlessHost = v
+		}
+	}
+	return out
+}
+
+func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, protocol string, cfg exportLinkSettings) string {
 	if order.Mode != model.OrderModeDedicated {
-		return fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password)
+		auth := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s@%s:%d", item.Username, item.Password, item.IP, item.Port)))
+		return fmt.Sprintf("socks://%s?method=auto", auth)
 	}
 	host := ""
 	port := order.Port
@@ -378,18 +523,44 @@ func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, proto
 		if port <= 0 {
 			return ""
 		}
-		return fmt.Sprintf("vless://%s@%s:%d?encryption=none&security=none&type=tcp#%s", uuid, host, port, url.QueryEscape(remark))
+		security := strings.TrimSpace(cfg.VlessSecurity)
+		if security == "" {
+			security = "tls"
+		}
+		vType := strings.TrimSpace(cfg.VlessType)
+		if vType == "" {
+			vType = "tcp"
+		}
+		params := url.Values{}
+		params.Set("encryption", "none")
+		params.Set("security", security)
+		params.Set("type", vType)
+		sni := strings.TrimSpace(cfg.VlessSNI)
+		if strings.EqualFold(security, "tls") && sni == "" {
+			sni = host
+		}
+		if sni != "" {
+			params.Set("sni", sni)
+		}
+		if strings.TrimSpace(cfg.VlessPath) != "" {
+			params.Set("path", strings.TrimSpace(cfg.VlessPath))
+		}
+		if strings.TrimSpace(cfg.VlessHost) != "" {
+			params.Set("host", strings.TrimSpace(cfg.VlessHost))
+		}
+		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", uuid, host, port, params.Encode(), url.QueryEscape(remark))
 	case model.DedicatedFeatureShadowsocks:
 		if port <= 0 {
 			return ""
 		}
-		auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", DedicatedShadowsocksMethod, item.Password)))
-		return fmt.Sprintf("ss://%s@%s:%d#%s", auth, host, port, url.QueryEscape(remark))
+		raw := fmt.Sprintf("%s:%s@%s:%d", DedicatedShadowsocksMethod, item.Password, host, port)
+		return fmt.Sprintf("ss://%s", base64.RawStdEncoding.EncodeToString([]byte(raw)))
 	default:
 		if port <= 0 {
 			return ""
 		}
-		return fmt.Sprintf("%s:%d:%s:%s", host, port, item.Username, item.Password)
+		auth := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s@%s:%d", item.Username, item.Password, host, port)))
+		return fmt.Sprintf("socks://%s?method=auto", auth)
 	}
 }
 
@@ -397,10 +568,15 @@ func buildSingleProtocolQRCodeImage(link string) ([]byte, error) {
 	if strings.TrimSpace(link) == "" {
 		return nil, nil
 	}
-	return qrcode.Encode(link, qrcode.Medium, 240)
+	return qrcode.Encode(link, qrcode.Medium, 256)
 }
 
 func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]byte, error) {
+	const qrRowHeight = 128.0
+	const qrColWidth = 23.0
+	const qrScale = 0.43
+	const qrOffset = 6
+
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
 	headers := []string{"链接", "图片", "到期时间"}
@@ -419,20 +595,24 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		if includeRaw {
 			_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", r), row.RawSocks5)
 		}
-		_ = f.SetRowHeight(sheet, r, 176)
+		_ = f.SetRowHeight(sheet, r, qrRowHeight)
 		if len(row.QRCodeData) > 0 {
 			_ = f.AddPictureFromBytes(sheet, fmt.Sprintf("B%d", r), &excelize.Picture{
 				Extension: ".png",
 				File:      row.QRCodeData,
 				Format: &excelize.GraphicOptions{
-					ScaleX: 0.60,
-					ScaleY: 0.60,
+					OffsetX:         qrOffset,
+					OffsetY:         qrOffset,
+					ScaleX:          qrScale,
+					ScaleY:          qrScale,
+					LockAspectRatio: true,
+					Positioning:     "oneCell",
 				},
 			})
 		}
 	}
 	_ = f.SetColWidth(sheet, "A", "A", 64)
-	_ = f.SetColWidth(sheet, "B", "B", 30)
+	_ = f.SetColWidth(sheet, "B", "B", qrColWidth)
 	_ = f.SetColWidth(sheet, "C", "C", 22)
 	if includeRaw {
 		_ = f.SetColWidth(sheet, "D", "D", 40)
@@ -446,6 +626,30 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		_ = f.SetCellStyle(sheet, "A2", fmt.Sprintf("%s%d", endCol, len(rows)+1), wrapStyle)
 	}
 	_ = f.SetCellValue(sheet, "F1", strings.ToUpper(protocol))
+	meta := "二维码参数表"
+	if _, err := f.NewSheet(meta); err == nil {
+		_ = f.SetCellValue(meta, "A1", "客户端")
+		_ = f.SetCellValue(meta, "B1", "行高(pt)")
+		_ = f.SetCellValue(meta, "C1", "列宽")
+		_ = f.SetCellValue(meta, "D1", "缩放")
+		_ = f.SetCellValue(meta, "E1", "备注")
+		_ = f.SetCellValue(meta, "A2", "Excel")
+		_ = f.SetCellValue(meta, "B2", 124)
+		_ = f.SetCellValue(meta, "C2", 22.5)
+		_ = f.SetCellValue(meta, "D2", 0.42)
+		_ = f.SetCellValue(meta, "E2", "二维码清晰且不拉伸")
+		_ = f.SetCellValue(meta, "A3", "WPS")
+		_ = f.SetCellValue(meta, "B3", 128)
+		_ = f.SetCellValue(meta, "C3", 23)
+		_ = f.SetCellValue(meta, "D3", 0.43)
+		_ = f.SetCellValue(meta, "E3", "边界稳定，避免覆盖文本")
+		_ = f.SetCellValue(meta, "A4", "当前采用")
+		_ = f.SetCellValue(meta, "B4", qrRowHeight)
+		_ = f.SetCellValue(meta, "C4", qrColWidth)
+		_ = f.SetCellValue(meta, "D4", qrScale)
+		_ = f.SetCellValue(meta, "E4", "兼容 Excel/WPS")
+		_ = f.SetColWidth(meta, "A", "E", 22)
+	}
 	body, err := f.WriteToBuffer()
 	if err != nil {
 		return nil, err

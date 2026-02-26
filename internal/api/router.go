@@ -126,6 +126,9 @@ func (a *API) Router() *gin.Engine {
 	secure.GET("/orders/:id", a.getOrder)
 	secure.POST("/orders", a.createOrder)
 	secure.PUT("/orders/:id", a.updateOrder)
+	secure.DELETE("/orders/:id", a.deleteOrder)
+	secure.POST("/orders/:id/credentials/reset", a.resetOrderCredentials)
+	secure.POST("/orders/dedicated/egress/probe-stream", a.probeDedicatedEgressStream)
 	secure.POST("/orders/:id/split", a.splitOrder)
 	secure.GET("/orders/:id/group/template/socks5.xlsx", a.downloadOrderGroupSocks5Template)
 	secure.GET("/orders/:id/group/template/credentials.xlsx", a.downloadOrderGroupCredentialsTemplate)
@@ -1033,6 +1036,10 @@ func (a *API) createOrder(c *gin.Context) {
 		}
 		input.ExpiresAt = t
 	}
+	if strings.EqualFold(strings.TrimSpace(req.Mode), model.OrderModeForward) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "forward mode is deprecated, use auto/manual for residential orders"})
+		return
+	}
 	warnings := []string{}
 	if strings.EqualFold(strings.TrimSpace(req.Mode), model.OrderModeForward) {
 		warnRows, warnErr := a.orders.ForwardOutboundReuseWarnings(req.CustomerID, 0, req.ForwardOutboundIDs)
@@ -1048,6 +1055,61 @@ func (a *API) createOrder(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"order": order, "warnings": warnings})
+}
+
+func (a *API) deleteOrder(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.orders.DeleteOrder(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) resetOrderCredentials(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.orders.RefreshResidentialCredentials(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) probeDedicatedEgressStream(c *gin.Context) {
+	var req struct {
+		Lines string `json:"lines"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Status(http.StatusOK)
+
+	if err := a.orders.ProbeDedicatedEgressStream(req.Lines, func(event service.DedicatedEgressProbeEvent) error {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if _, err := c.Writer.Write(append(payload, '\n')); err != nil {
+			return err
+		}
+		c.Writer.Flush()
+		return nil
+	}); err != nil {
+		errPayload, _ := json.Marshal(service.DedicatedEgressProbeEvent{Type: "error", Error: err.Error()})
+		_, _ = c.Writer.Write(append(errPayload, '\n'))
+		c.Writer.Flush()
+	}
 }
 
 func (a *API) updateOrder(c *gin.Context) {
@@ -1261,6 +1323,7 @@ func (a *API) renewOrderGroupSelected(c *gin.Context) {
 	var req struct {
 		ChildOrderIDs []uint `json:"child_order_ids"`
 		MoreDays      int    `json:"more_days"`
+		ExpiresAt     string `json:"expires_at"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1270,7 +1333,16 @@ func (a *API) renewOrderGroupSelected(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "child_order_ids is empty"})
 		return
 	}
-	if err := a.orders.RenewOrderGroupSelected(c.Request.Context(), id, req.ChildOrderIDs, req.MoreDays); err != nil {
+	var expiresAt time.Time
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
+		}
+		expiresAt = t
+	}
+	if err := a.orders.RenewOrderGroupSelected(c.Request.Context(), id, req.ChildOrderIDs, req.MoreDays, expiresAt); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1295,13 +1367,23 @@ func (a *API) renewOrder(c *gin.Context) {
 		return
 	}
 	var req struct {
-		MoreDays int `json:"more_days"`
+		MoreDays  int    `json:"more_days"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := a.orders.RenewOrder(c.Request.Context(), id, req.MoreDays); err != nil {
+	var expiresAt time.Time
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
+		}
+		expiresAt = t
+	}
+	if err := a.orders.RenewOrderWithExpiresAt(c.Request.Context(), id, req.MoreDays, expiresAt); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1330,8 +1412,9 @@ func (a *API) batchDeactivateOrders(c *gin.Context) {
 
 func (a *API) batchRenewOrders(c *gin.Context) {
 	var req struct {
-		OrderIDs []uint `json:"order_ids"`
-		MoreDays int    `json:"more_days"`
+		OrderIDs  []uint `json:"order_ids"`
+		MoreDays  int    `json:"more_days"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1341,10 +1424,19 @@ func (a *API) batchRenewOrders(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is empty"})
 		return
 	}
-	if req.MoreDays <= 0 {
+	var expiresAt time.Time
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
+		}
+		expiresAt = t
+	}
+	if expiresAt.IsZero() && req.MoreDays <= 0 {
 		req.MoreDays = 30
 	}
-	results := a.orders.BatchRenew(c.Request.Context(), req.OrderIDs, req.MoreDays)
+	results := a.orders.BatchRenewWithExpiresAt(c.Request.Context(), req.OrderIDs, req.MoreDays, expiresAt)
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
@@ -1772,11 +1864,17 @@ func (a *API) logMiddleware() gin.HandlerFunc {
 func sanitizeSettingsUpdate(in map[string]string) map[string]string {
 	out := map[string]string{}
 	allowed := map[string]struct{}{
-		"default_inbound_port": {},
-		"bark_enabled":         {},
-		"bark_base_url":        {},
-		"bark_device_key":      {},
-		"bark_group":           {},
+		"default_inbound_port":     {},
+		"bark_enabled":             {},
+		"bark_base_url":            {},
+		"bark_device_key":          {},
+		"bark_group":               {},
+		"dedicated_vless_security": {},
+		"dedicated_vless_sni":      {},
+		"dedicated_vless_type":     {},
+		"dedicated_vless_path":     {},
+		"dedicated_vless_host":     {},
+		"residential_name_prefix":  {},
 	}
 	for k, v := range in {
 		k = strings.TrimSpace(k)

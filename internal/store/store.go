@@ -25,13 +25,19 @@ func (s *Store) DB() *gorm.DB {
 
 func (s *Store) EnsureDefaultSettings(defaultPort int, barkBase string) error {
 	defaults := map[string]string{
-		"default_inbound_port":   strconv.Itoa(defaultPort),
-		"default_inbound_listen": "0.0.0.0",
-		"bark_enabled":           "false",
-		"bark_base_url":          barkBase,
-		"bark_device_key":        "",
-		"bark_group":             "xraytool",
-		"xray_api_server":        "127.0.0.1:10085",
+		"default_inbound_port":     strconv.Itoa(defaultPort),
+		"default_inbound_listen":   "0.0.0.0",
+		"bark_enabled":             "false",
+		"bark_base_url":            barkBase,
+		"bark_device_key":          "",
+		"bark_group":               "xraytool",
+		"xray_api_server":          "127.0.0.1:10085",
+		"dedicated_vless_security": "tls",
+		"dedicated_vless_sni":      "",
+		"dedicated_vless_type":     "tcp",
+		"dedicated_vless_path":     "",
+		"dedicated_vless_host":     "",
+		"residential_name_prefix":  "家宽-Socks5",
 	}
 	now := time.Now()
 	for k, v := range defaults {

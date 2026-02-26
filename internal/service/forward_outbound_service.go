@@ -412,59 +412,85 @@ func normalizeCountryPrefix(country string) string {
 }
 
 func probeSocksOutbound(address string, port int, username, password string) (string, string, error) {
+	exitIP, country, _, err := probeSocksOutboundGeo(address, port, username, password)
+	return exitIP, country, err
+}
+
+func probeSocksOutboundGeo(address string, port int, username, password string) (string, string, string, error) {
 	socksAddr := fmt.Sprintf("%s:%d", strings.TrimSpace(address), port)
 	dialer, err := proxy.SOCKS5("tcp", socksAddr, &proxy.Auth{User: strings.TrimSpace(username), Password: strings.TrimSpace(password)}, proxy.Direct)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	httpTransport := &http.Transport{Dial: dialer.Dial}
 	client := &http.Client{Timeout: 8 * time.Second, Transport: httpTransport}
 	resp, err := client.Get("https://api.ipify.org")
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("ip probe status %d", resp.StatusCode)
+		return "", "", "", fmt.Errorf("ip probe status %d", resp.StatusCode)
 	}
 	body := make([]byte, 128)
 	n, _ := resp.Body.Read(body)
 	exitIP := strings.TrimSpace(string(body[:n]))
 	if exitIP == "" {
-		return "", "", errors.New("empty exit ip")
+		return "", "", "", errors.New("empty exit ip")
 	}
-	country, _ := lookupCountryCode(exitIP)
-	return exitIP, country, nil
+	country, region, _ := lookupCountryRegion(exitIP)
+	return exitIP, country, region, nil
 }
 
 func lookupCountryCode(ip string) (string, error) {
+	country, _, err := lookupCountryRegion(ip)
+	return country, err
+}
+
+func lookupCountryRegion(ip string) (string, string, error) {
 	url := fmt.Sprintf("https://ipapi.co/%s/country/", strings.TrimSpace(ip))
 	client := &http.Client{Timeout: 6 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("country lookup status %d", resp.StatusCode)
+		return "", "", fmt.Errorf("country lookup status %d", resp.StatusCode)
 	}
 	buf := make([]byte, 64)
 	n, _ := resp.Body.Read(buf)
 	code := strings.ToLower(strings.TrimSpace(string(buf[:n])))
 	if len(code) == 2 {
-		return code, nil
+		region := ""
+		geoURL := fmt.Sprintf("https://ipapi.co/%s/json/", strings.TrimSpace(ip))
+		if geoResp, geoErr := client.Get(geoURL); geoErr == nil {
+			defer geoResp.Body.Close()
+			if geoResp.StatusCode < 300 {
+				data := make([]byte, 4096)
+				m, _ := geoResp.Body.Read(data)
+				var payload struct {
+					Region string `json:"region"`
+				}
+				if jsonErr := json.Unmarshal(data[:m], &payload); jsonErr == nil {
+					region = strings.TrimSpace(payload.Region)
+				}
+			}
+		}
+		return code, region, nil
 	}
 
 	var payload struct {
 		Country string `json:"country_code"`
+		Region  string `json:"region"`
 	}
 	if err := json.Unmarshal(buf[:n], &payload); err == nil {
 		v := strings.ToLower(strings.TrimSpace(payload.Country))
 		if len(v) == 2 {
-			return v, nil
+			return v, strings.TrimSpace(payload.Region), nil
 		}
 	}
-	return "", errors.New("country code unavailable")
+	return "", "", errors.New("country code unavailable")
 }
 
 func sortForwardRowsByRouteUser(rows []model.SocksOutbound) {

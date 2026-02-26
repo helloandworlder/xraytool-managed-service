@@ -381,8 +381,11 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 	if in.Mode == "" {
 		in.Mode = model.OrderModeAuto
 	}
-	if in.Mode != model.OrderModeAuto && in.Mode != model.OrderModeManual && in.Mode != model.OrderModeForward && in.Mode != model.OrderModeDedicated {
-		return nil, errors.New("mode must be auto/manual/forward/dedicated")
+	if in.Mode != model.OrderModeAuto && in.Mode != model.OrderModeManual && in.Mode != model.OrderModeDedicated {
+		return nil, errors.New("mode must be auto/manual/dedicated")
+	}
+	if in.Mode == model.OrderModeForward {
+		return nil, errors.New("forward mode is deprecated, use auto/manual for residential orders")
 	}
 
 	now := time.Now()
@@ -398,13 +401,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		return s.createDedicatedOrder(ctx, in, now, expiresAt)
 	}
 
-	if in.Mode == model.OrderModeForward {
-		in.ForwardOutboundIDs = uniqueUintIDs(in.ForwardOutboundIDs)
-		if len(in.ForwardOutboundIDs) == 0 {
-			return nil, errors.New("forward_outbound_ids is required for forward mode")
-		}
-		in.Quantity = len(in.ForwardOutboundIDs)
-	} else if in.Quantity <= 0 {
+	if in.Quantity <= 0 {
 		return nil, errors.New("quantity must be > 0")
 	}
 
@@ -450,7 +447,8 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		ExpiresAt:  expiresAt,
 	}
 	if strings.TrimSpace(order.Name) == "" {
-		order.Name = fmt.Sprintf("Order-%d-%s", in.CustomerID, now.Format("20060102150405"))
+		prefix := s.residentialNamePrefix()
+		order.Name = fmt.Sprintf("%s-%d-%s", prefix, in.CustomerID, now.Format("20060102150405"))
 	}
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
@@ -636,6 +634,13 @@ func (s *OrderService) BatchDeactivate(ctx context.Context, orderIDs []uint, sta
 }
 
 func (s *OrderService) RenewOrder(ctx context.Context, orderID uint, moreDays int) error {
+	return s.RenewOrderWithExpiresAt(ctx, orderID, moreDays, time.Time{})
+}
+
+func (s *OrderService) RenewOrderWithExpiresAt(ctx context.Context, orderID uint, moreDays int, expiresAt time.Time) error {
+	if !expiresAt.IsZero() && !expiresAt.After(time.Now()) {
+		return errors.New("expires_at must be in the future")
+	}
 	if moreDays <= 0 {
 		moreDays = 30
 	}
@@ -644,13 +649,16 @@ func (s *OrderService) RenewOrder(ctx context.Context, orderID uint, moreDays in
 		return err
 	}
 	if order.IsGroupHead {
-		return s.renewOrderGroup(ctx, order, moreDays)
+		return s.renewOrderGroup(ctx, order, moreDays, expiresAt)
 	}
-	base := order.ExpiresAt
-	if base.Before(time.Now()) {
-		base = time.Now()
+	newExpires := expiresAt
+	if newExpires.IsZero() {
+		base := order.ExpiresAt
+		if base.Before(time.Now()) {
+			base = time.Now()
+		}
+		newExpires = base.Add(time.Duration(moreDays) * 24 * time.Hour)
 	}
-	newExpires := base.Add(time.Duration(moreDays) * 24 * time.Hour)
 	if err := s.db.Model(&model.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
 		"status":              model.OrderStatusActive,
 		"expires_at":          newExpires,
@@ -667,9 +675,13 @@ func (s *OrderService) RenewOrder(ctx context.Context, orderID uint, moreDays in
 }
 
 func (s *OrderService) BatchRenew(ctx context.Context, orderIDs []uint, moreDays int) []BatchActionResult {
+	return s.BatchRenewWithExpiresAt(ctx, orderIDs, moreDays, time.Time{})
+}
+
+func (s *OrderService) BatchRenewWithExpiresAt(ctx context.Context, orderIDs []uint, moreDays int, expiresAt time.Time) []BatchActionResult {
 	out := make([]BatchActionResult, 0, len(orderIDs))
 	for _, id := range orderIDs {
-		err := s.RenewOrder(ctx, id, moreDays)
+		err := s.RenewOrderWithExpiresAt(ctx, id, moreDays, expiresAt)
 		entry := BatchActionResult{ID: id, Success: err == nil}
 		if err != nil {
 			entry.Error = err.Error()
@@ -1243,6 +1255,18 @@ func (s *OrderService) defaultPort() (int, error) {
 		return 23457, nil
 	}
 	return p, nil
+}
+
+func (s *OrderService) residentialNamePrefix() string {
+	var row model.Setting
+	if err := s.db.First(&row, "key = ?", "residential_name_prefix").Error; err != nil {
+		return "家宽-Socks5"
+	}
+	v := strings.TrimSpace(row.Value)
+	if v == "" {
+		return "家宽-Socks5"
+	}
+	return v
 }
 
 func (s *OrderService) ensurePortReadyForManaged(port int) error {

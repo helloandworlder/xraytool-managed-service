@@ -435,15 +435,18 @@ func (s *OrderService) deactivateOrderGroup(ctx context.Context, head model.Orde
 	return s.rebuildManagedRuntime(ctx)
 }
 
-func (s *OrderService) renewOrderGroup(ctx context.Context, head model.Order, moreDays int) error {
-	if moreDays <= 0 {
-		moreDays = 30
+func (s *OrderService) renewOrderGroup(ctx context.Context, head model.Order, moreDays int, expiresAt time.Time) error {
+	newExpires := expiresAt
+	if newExpires.IsZero() {
+		if moreDays <= 0 {
+			moreDays = 30
+		}
+		base := head.ExpiresAt
+		if base.Before(time.Now()) {
+			base = time.Now()
+		}
+		newExpires = base.Add(time.Duration(moreDays) * 24 * time.Hour)
 	}
-	base := head.ExpiresAt
-	if base.Before(time.Now()) {
-		base = time.Now()
-	}
-	newExpires := base.Add(time.Duration(moreDays) * 24 * time.Hour)
 	now := time.Now()
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.Order{}).Where("id = ? or parent_order_id = ?", head.ID, head.ID).Updates(map[string]interface{}{
@@ -465,7 +468,7 @@ func (s *OrderService) renewOrderGroup(ctx context.Context, head model.Order, mo
 	return s.rebuildManagedRuntime(ctx)
 }
 
-func (s *OrderService) RenewOrderGroupSelected(ctx context.Context, headOrderID uint, childOrderIDs []uint, moreDays int) error {
+func (s *OrderService) RenewOrderGroupSelected(ctx context.Context, headOrderID uint, childOrderIDs []uint, moreDays int, expiresAt time.Time) error {
 	if headOrderID == 0 {
 		return errors.New("order_id is required")
 	}
@@ -473,7 +476,7 @@ func (s *OrderService) RenewOrderGroupSelected(ctx context.Context, headOrderID 
 	if len(ids) == 0 {
 		return errors.New("child_order_ids is empty")
 	}
-	if moreDays <= 0 {
+	if expiresAt.IsZero() && moreDays <= 0 {
 		moreDays = 30
 	}
 
@@ -483,6 +486,9 @@ func (s *OrderService) RenewOrderGroupSelected(ctx context.Context, headOrderID 
 	}
 	if !head.IsGroupHead {
 		return errors.New("only group head order supports selected renew")
+	}
+	if !expiresAt.IsZero() && !expiresAt.After(time.Now()) {
+		return errors.New("expires_at must be in the future")
 	}
 
 	now := time.Now()
@@ -499,11 +505,14 @@ func (s *OrderService) RenewOrderGroupSelected(ctx context.Context, headOrderID 
 		}
 
 		for _, child := range children {
-			base := child.ExpiresAt
-			if base.Before(now) {
-				base = now
+			newExpires := expiresAt
+			if newExpires.IsZero() {
+				base := child.ExpiresAt
+				if base.Before(now) {
+					base = now
+				}
+				newExpires = base.Add(time.Duration(moreDays) * 24 * time.Hour)
 			}
-			newExpires := base.Add(time.Duration(moreDays) * 24 * time.Hour)
 			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(map[string]interface{}{
 				"status":              model.OrderStatusActive,
 				"expires_at":          newExpires,

@@ -416,10 +416,11 @@ export const usePanelStore = defineStore('panel', {
 			})
 			await this.loadOrders()
 		},
-		async renewOrderGroupSelected(orderID: number, childOrderIDs: number[], moreDays: number) {
+		async renewOrderGroupSelected(orderID: number, childOrderIDs: number[], moreDays: number, expiresAt = '') {
 			await http.post(`/api/orders/${orderID}/group/renew-selected`, {
 				child_order_ids: childOrderIDs,
-				more_days: moreDays
+				more_days: moreDays,
+				expires_at: expiresAt
 			})
 			await this.loadOrders()
 			this.setNotice('组内选中子订单续期完成')
@@ -435,10 +436,20 @@ export const usePanelStore = defineStore('panel', {
       await this.loadOrders()
       this.setNotice('订单已停用')
     },
-    async renewOrder(orderID: number, moreDays: number) {
-      await http.post(`/api/orders/${orderID}/renew`, { more_days: moreDays })
+    async renewOrder(orderID: number, moreDays: number, expiresAt = '') {
+      await http.post(`/api/orders/${orderID}/renew`, { more_days: moreDays, expires_at: expiresAt })
       await this.loadOrders()
       this.setNotice('订单续期完成')
+    },
+    async deleteOrder(orderID: number) {
+      await http.delete(`/api/orders/${orderID}`)
+      await this.loadOrders()
+      this.setNotice('订单已删除')
+    },
+    async resetOrderCredentials(orderID: number) {
+      await http.post(`/api/orders/${orderID}/credentials/reset`, {})
+      await this.loadOrders()
+      this.setNotice('家宽凭据已刷新')
     },
     async testOrder(orderID: number, samplePercent = 100) {
       const res = await http.post(`/api/orders/${orderID}/test`, { sample_percent: samplePercent })
@@ -485,10 +496,11 @@ export const usePanelStore = defineStore('panel', {
         }
       }
     },
-    async batchRenew(orderIDs: number[], moreDays: number) {
+    async batchRenew(orderIDs: number[], moreDays: number, expiresAt = '') {
       const res = await http.post('/api/orders/batch/renew', {
         order_ids: orderIDs,
-        more_days: moreDays
+        more_days: moreDays,
+        expires_at: expiresAt
       })
       await this.loadOrders()
       return (res.data.results || []) as BatchResult[]

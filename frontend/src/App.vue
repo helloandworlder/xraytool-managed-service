@@ -192,6 +192,7 @@ const groupCredRegenerate = ref(false)
 const groupRenewModalOpen = ref(false)
 const groupRenewHeadOrderID = ref<number>(0)
 const groupRenewDays = ref<number>(30)
+const groupRenewExpiresAt = ref('')
 const groupRenewChildOrderIDs = ref<number[]>([])
 const creatingOrder = ref(false)
 const savingOrderEdit = ref(false)
@@ -203,6 +204,9 @@ const groupCredSaving = ref(false)
 const groupRenewSaving = ref(false)
 const importPreviewFingerprint = ref('')
 const importPreviewSource = ref<'lines' | 'singbox' | ''>('')
+const dedicatedProbeRunning = ref(false)
+const dedicatedProbeRows = ref<Array<{ index: number; raw: string; available: boolean; exit_ip: string; country_code: string; region: string; error?: string }>>([])
+const dedicatedProbeMeta = reactive({ total: 0, success: 0, failed: 0 })
 
 const siderCollapsed = ref(false)
 const probeResult = ref('')
@@ -212,6 +216,7 @@ const batchTestResult = ref<Array<{ id: number; success: boolean; result?: Recor
 const orderDetailOpen = ref(false)
 const orderDetailLoading = ref(false)
 const batchMoreDays = ref(30)
+const batchRenewExpiresAt = ref('')
 const createForwardReuseHints = ref<string[]>([])
 const editForwardReuseHints = ref<string[]>([])
 
@@ -220,6 +225,7 @@ const menuItems = [
   { key: 'customers', icon: () => h(TeamOutlined), label: '客户' },
   { key: 'ips', icon: () => h(DatabaseOutlined), label: 'IP池' },
   { key: 'orders', icon: () => h(UnorderedListOutlined), label: '订单' },
+  { key: 'delivery', icon: () => h(ApiOutlined), label: '发货' },
   { key: 'import', icon: () => h(UploadOutlined), label: '批量导入' },
   { key: 'settings', icon: () => h(SettingOutlined), label: '设置' }
 ]
@@ -242,7 +248,49 @@ const forwardStats = computed(() => {
 	return { total, enabled, ok, autoUser }
 })
 
-const orderRows = computed(() => panel.orders.map((o) => ({ ...o, key: o.id })))
+function isResidentialMode(mode: string): boolean {
+	const v = String(mode || '').toLowerCase()
+	return v === 'auto' || v === 'manual' || v === 'import'
+}
+
+const orderRows = computed(() => {
+	const rows = panel.orders.map((o) => ({ ...o, key: o.id, children: [] as any[] }))
+	const map = new Map<number, any>()
+	const roots: any[] = []
+	for (const row of rows) {
+		map.set(Number(row.id), row)
+	}
+	for (const row of rows) {
+		const parentID = Number((row as any).parent_order_id || 0)
+		if (parentID > 0 && map.has(parentID)) {
+			map.get(parentID)?.children?.push(row)
+			continue
+		}
+		roots.push(row)
+	}
+	for (const row of rows) {
+		if (Array.isArray(row.children) && row.children.length > 0) {
+			row.children.sort((a: any, b: any) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0) || Number(a.id) - Number(b.id))
+		}
+	}
+	return roots
+})
+
+const deliveryCustomerID = ref<number>(0)
+const deliveryMode = ref<'all' | 'home' | 'dedicated'>('all')
+const deliveryRows = computed(() =>
+	panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === 0)
+		.filter((row) => {
+			if (deliveryCustomerID.value > 0 && Number(row.customer_id) !== Number(deliveryCustomerID.value)) return false
+			if (deliveryMode.value === 'home') return isResidentialMode(String(row.mode || ''))
+			if (deliveryMode.value === 'dedicated') return String(row.mode || '') === 'dedicated'
+			return true
+		})
+		.map((row) => ({ ...row, key: row.id }))
+)
+
+const isForwardDeprecatedOrderEdit = computed(() => orderEditOpen.value && String(orderEditForm.mode || '') === 'forward')
 const rowSelection = computed(() => ({
   selectedRowKeys: panel.orderSelection,
   onChange: (keys: Array<string | number>) => {
@@ -435,46 +483,15 @@ watch(
 
 watch(
 	() => [orderForm.mode, Number(orderForm.customer_id), orderForm.forward_outbound_ids.slice().sort((a, b) => a - b).join(',')],
-	async ([mode, customerID]) => {
-		if (mode !== 'forward') {
-			createForwardReuseHints.value = []
-			return
-		}
-		if (!customerID || orderForm.forward_outbound_ids.length === 0) {
-			createForwardReuseHints.value = []
-			return
-		}
-		try {
-			createForwardReuseHints.value = await panel.previewForwardReuseWarnings({
-				customer_id: Number(customerID),
-				forward_outbound_ids: orderForm.forward_outbound_ids.map((v) => Number(v))
-			})
-		} catch (err) {
-			panel.setError(err)
-		}
+	async () => {
+		createForwardReuseHints.value = []
 	}
 )
 
 watch(
 	() => [orderEditOpen.value, orderEditForm.mode, Number(orderEditForm.customer_id), Number(orderEditForm.id), orderEditForm.forward_outbound_ids.slice().sort((a, b) => a - b).join(',')],
-	async ([open, mode, customerID, orderID]) => {
-		if (!open || mode !== 'forward') {
-			editForwardReuseHints.value = []
-			return
-		}
-		if (!customerID || orderEditForm.forward_outbound_ids.length === 0) {
-			editForwardReuseHints.value = []
-			return
-		}
-		try {
-			editForwardReuseHints.value = await panel.previewForwardReuseWarnings({
-				customer_id: Number(customerID),
-				exclude_order_id: Number(orderID || 0),
-				forward_outbound_ids: orderEditForm.forward_outbound_ids.map((v) => Number(v))
-			})
-		} catch (err) {
-			panel.setError(err)
-		}
+	async () => {
+		editForwardReuseHints.value = []
 	}
 )
 
@@ -574,14 +591,25 @@ function statusColor(status: string) {
 
 function modeColor(mode: string) {
   if (mode === 'import') return 'blue'
-  if (mode === 'manual') return 'purple'
-  if (mode === 'forward') return 'cyan'
+  if (mode === 'manual') return 'geekblue'
+  if (mode === 'auto') return 'cyan'
   if (mode === 'dedicated') return 'magenta'
   return 'default'
 }
 
+function modeLabel(mode: string) {
+	if (String(mode || '') === 'dedicated') return '专线'
+	if (isResidentialMode(String(mode || ''))) return '家宽'
+	if (String(mode || '') === 'forward') return '家宽(废弃旧模式)'
+	return String(mode || '-')
+}
+
 function forwardSummary(order: any) {
-	if (order.mode !== 'forward') return '-'
+	if (order.mode !== 'forward' && order.mode !== 'auto' && order.mode !== 'manual' && order.mode !== 'import') return '-'
+	if (order.mode === 'auto' || order.mode === 'manual' || order.mode === 'import') {
+		const count = Number(order.quantity || (order.items || []).length || 0)
+		return `家宽 / Socks5 / ${count} 条`
+	}
 	const rows = (order.items || []).filter((item: any) => String(item.outbound_type || '') === 'socks5')
 	if (rows.length === 0) return '0 条'
 	const names = rows.map((item: any) => `${item.forward_address || '-'}:${item.forward_port || '-'}`)
@@ -740,16 +768,12 @@ async function probePort() {
 
 async function createOrder() {
 	if (creatingOrder.value) return
-  try {
+	try {
 		if (!Number(orderForm.customer_id || 0)) {
 			message.warning('请选择客户')
 			return
 		}
 		creatingOrder.value = true
-    if (orderForm.mode === 'forward' && orderForm.forward_outbound_ids.length === 0) {
-      message.warning('请至少选择 1 个 SOCKS5 出口')
-      return
-    }
 		if (orderForm.mode === 'dedicated') {
 			if (!orderForm.dedicated_protocol) {
 				message.warning('请选择协议')
@@ -775,26 +799,20 @@ async function createOrder() {
       expires_at: orderForm.expires_at ? new Date(orderForm.expires_at).toISOString() : '',
       mode: orderForm.mode,
       port: Number(orderForm.port),
-      manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v))
-    }
-    if (orderForm.mode === 'forward') {
-      payload.forward_outbound_ids = orderForm.forward_outbound_ids.map((v) => Number(v))
-		} else if (orderForm.mode === 'dedicated') {
+		manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v))
+		}
+		if (orderForm.mode === 'dedicated') {
 			payload.dedicated_entry_id = Number(orderForm.dedicated_entry_id)
 			payload.dedicated_inbound_id = Number(orderForm.dedicated_inbound_id)
 			payload.dedicated_ingress_id = Number(orderForm.dedicated_ingress_id)
 			payload.dedicated_protocol = String(orderForm.dedicated_protocol || 'mixed')
 			payload.dedicated_egress_lines = String(orderForm.dedicated_egress_lines || '')
-    } else {
-      payload.quantity = Number(orderForm.quantity)
-    }
-    const result = await panel.createOrder(payload)
-    orderForm.name = ''
-    orderForm.expires_at = ''
-		if (orderForm.mode === 'forward') {
-			orderForm.forward_outbound_ids = []
-			createForwardReuseHints.value = []
+		} else {
+			payload.quantity = Number(orderForm.quantity)
 		}
+		const result = await panel.createOrder(payload)
+		orderForm.name = ''
+		orderForm.expires_at = ''
 		if (orderForm.mode === 'dedicated') {
 			orderForm.dedicated_entry_id = 0
 			orderForm.dedicated_inbound_id = 0
@@ -849,8 +867,8 @@ async function saveOrderEdit() {
 	if (savingOrderEdit.value) return
 	try {
 		savingOrderEdit.value = true
-		if (orderEditForm.mode === 'forward' && orderEditForm.forward_outbound_ids.length === 0) {
-			message.warning('请至少选择 1 个 SOCKS5 出口')
+		if (orderEditForm.mode === 'forward') {
+			message.warning('forward 模式已废弃，历史订单仅支持只读查看')
 			return
 		}
 		if (orderEditForm.mode === 'dedicated' && !orderEditForm.dedicated_inbound_id) {
@@ -873,9 +891,7 @@ async function saveOrderEdit() {
 		if (orderEditForm.mode === 'manual') {
 			payload.manual_ip_ids = orderEditForm.manual_ip_ids.map((v) => Number(v))
 		}
-		if (orderEditForm.mode === 'forward') {
-			payload.forward_outbound_ids = orderEditForm.forward_outbound_ids.map((v) => Number(v))
-		} else if (orderEditForm.mode === 'dedicated') {
+		if (orderEditForm.mode === 'dedicated') {
 			payload.dedicated_entry_id = Number(orderEditForm.dedicated_entry_id)
 			payload.dedicated_inbound_id = Number(orderEditForm.dedicated_inbound_id)
 			payload.dedicated_ingress_id = Number(orderEditForm.dedicated_ingress_id)
@@ -906,9 +922,10 @@ async function saveOrderEdit() {
 
 async function renewOrder(orderID: number, moreDays?: number) {
   const days = moreDays || Number(batchMoreDays.value)
-  if (!days) return
+  const expiresAt = String(batchRenewExpiresAt.value || '').trim()
+  if (!days && !expiresAt) return
   try {
-    await panel.renewOrder(orderID, days)
+    await panel.renewOrder(orderID, days, expiresAt ? new Date(expiresAt).toISOString() : '')
     message.success('续期成功')
   } catch (err) {
     panel.setError(err)
@@ -933,10 +950,46 @@ async function deactivateOrder(orderID: number) {
 	})
 }
 
+async function resetOrderCredentials(orderID: number) {
+	Modal.confirm({
+		title: '刷新家宽凭据',
+		content: `确认刷新订单 #${orderID} 的家宽凭据吗？`,
+		okText: '刷新',
+		onOk: async () => {
+			try {
+				await panel.resetOrderCredentials(orderID)
+				message.success('家宽凭据已刷新')
+			} catch (err) {
+				panel.setError(err)
+				message.error(panel.error || '刷新凭据失败')
+			}
+		}
+	})
+}
+
+async function removeOrder(orderID: number) {
+	Modal.confirm({
+		title: '删除订单',
+		content: `确认删除订单 #${orderID} 吗？组头订单会连同子订单一起删除。`,
+		okText: '删除',
+		okType: 'danger',
+		onOk: async () => {
+			try {
+				await panel.deleteOrder(orderID)
+				message.success('订单已删除')
+			} catch (err) {
+				panel.setError(err)
+				message.error(panel.error || '删除订单失败')
+			}
+		}
+	})
+}
+
 async function doBatchRenew() {
   if (panel.orderSelection.length === 0) return
   try {
-    const results = await panel.batchRenew(panel.orderSelection, Number(batchMoreDays.value))
+    const expiresAt = String(batchRenewExpiresAt.value || '').trim()
+    const results = await panel.batchRenew(panel.orderSelection, Number(batchMoreDays.value), expiresAt ? new Date(expiresAt).toISOString() : '')
     const ok = results.filter((r) => r.success).length
     const fail = results.length - ok
     message.success(`批量续期完成，成功 ${ok}，失败 ${fail}`)
@@ -1530,6 +1583,78 @@ function downloadDedicatedCreateSample() {
 	downloadTextFile('1.1.1.1:1080:user001:pass001', `dedicated-socks5-sample-${Date.now()}.txt`)
 }
 
+async function probeDedicatedCreateLines() {
+	const lines = String(orderForm.dedicated_egress_lines || '').trim()
+	if (!lines) {
+		message.warning('请先粘贴 Socks5 出口列表')
+		return
+	}
+	if (dedicatedProbeRunning.value) return
+	dedicatedProbeRunning.value = true
+	dedicatedProbeRows.value = []
+	dedicatedProbeMeta.total = 0
+	dedicatedProbeMeta.success = 0
+	dedicatedProbeMeta.failed = 0
+	try {
+		const token = localStorage.getItem('xtool_token') || ''
+		const resp = await fetch('/api/orders/dedicated/egress/probe-stream', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${token}`
+			},
+			body: JSON.stringify({ lines })
+		})
+		if (!resp.ok || !resp.body) {
+			throw new Error(`探测失败: ${resp.status}`)
+		}
+		const reader = resp.body.getReader()
+		const decoder = new TextDecoder()
+		let buffer = ''
+		while (true) {
+			const { done, value } = await reader.read()
+			if (done) break
+			buffer += decoder.decode(value, { stream: true })
+			const chunks = buffer.split('\n')
+			buffer = chunks.pop() || ''
+			for (const chunk of chunks) {
+				const text = chunk.trim()
+				if (!text) continue
+				const event = JSON.parse(text)
+				if (event.type === 'start') {
+					dedicatedProbeMeta.total = Number(event.total || 0)
+					continue
+				}
+				if (event.type === 'result') {
+					dedicatedProbeRows.value.push({
+						index: Number(event.index || 0),
+						raw: String(event.raw || ''),
+						available: Boolean(event.available),
+						exit_ip: String(event.exit_ip || ''),
+						country_code: String(event.country_code || ''),
+						region: String(event.region || ''),
+						error: String(event.error || '') || undefined
+					})
+					if (event.available) dedicatedProbeMeta.success += 1
+					else dedicatedProbeMeta.failed += 1
+					continue
+				}
+				if (event.type === 'done') {
+					dedicatedProbeMeta.total = Number(event.total || dedicatedProbeMeta.total)
+					dedicatedProbeMeta.success = Number(event.success || dedicatedProbeMeta.success)
+					dedicatedProbeMeta.failed = Number(event.failed || dedicatedProbeMeta.failed)
+				}
+			}
+		}
+		message.success('专线出口探测完成')
+	} catch (err) {
+		panel.setError(err)
+		message.error(panel.error || '专线出口探测失败')
+	} finally {
+		dedicatedProbeRunning.value = false
+	}
+}
+
 function openGroupCredModal(orderID: number) {
 	groupTargetOrderID.value = orderID
 	groupCredLines.value = ''
@@ -1540,6 +1665,7 @@ function openGroupCredModal(orderID: number) {
 function openGroupRenewModal(orderID: number) {
 	groupRenewHeadOrderID.value = orderID
 	groupRenewDays.value = Number(batchMoreDays.value || 30)
+	groupRenewExpiresAt.value = String(batchRenewExpiresAt.value || '')
 	groupRenewChildOrderIDs.value = panel.orders
 		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
 		.map((row) => Number(row.id))
@@ -1553,16 +1679,18 @@ async function submitGroupSelectedRenew() {
 		message.warning('请至少选择 1 个子订单')
 		return
 	}
-	if (!Number(groupRenewDays.value)) {
+	if (!Number(groupRenewDays.value) && !String(groupRenewExpiresAt.value || '').trim()) {
 		message.warning('请输入续期天数')
 		return
 	}
 	try {
 		groupRenewSaving.value = true
+		const expiresAt = String(groupRenewExpiresAt.value || '').trim()
 		await panel.renewOrderGroupSelected(
 			Number(groupRenewHeadOrderID.value),
 			groupRenewChildOrderIDs.value.map((v) => Number(v)),
-			Number(groupRenewDays.value)
+			Number(groupRenewDays.value),
+			expiresAt ? new Date(expiresAt).toISOString() : ''
 		)
 		groupRenewModalOpen.value = false
 		message.success(`已续期 ${groupRenewChildOrderIDs.value.length} 个子订单`)
@@ -1803,7 +1931,13 @@ async function saveSettings() {
 			bark_enabled: panel.settings.bark_enabled === 'true' ? 'true' : 'false',
 			bark_base_url: panel.settings.bark_base_url || '',
 			bark_device_key: panel.settings.bark_device_key || '',
-			bark_group: panel.settings.bark_group || 'xraytool'
+			bark_group: panel.settings.bark_group || 'xraytool',
+			dedicated_vless_security: panel.settings.dedicated_vless_security || 'tls',
+			dedicated_vless_sni: panel.settings.dedicated_vless_sni || '',
+			dedicated_vless_type: panel.settings.dedicated_vless_type || 'tcp',
+			dedicated_vless_path: panel.settings.dedicated_vless_path || '',
+			dedicated_vless_host: panel.settings.dedicated_vless_host || '',
+			residential_name_prefix: panel.settings.residential_name_prefix || '家宽-Socks5'
 		})
 		message.success('设置已保存')
 	} catch (err) {
@@ -2205,15 +2339,13 @@ function downloadBlobFile(data: Blob, filename: string) {
                 </a-select></a-col>
                 <a-col :xs="24" :md="8"><a-input v-model:value="orderForm.name" placeholder="订单名(可空)" /></a-col>
                 <a-col :xs="24" :md="8"><a-select v-model:value="orderForm.mode" style="width: 100%">
-                  <a-select-option value="auto">自动分配</a-select-option>
-                  <a-select-option value="manual">手动分配</a-select-option>
-                  <a-select-option value="forward">转发分流</a-select-option>
+				  <a-select-option value="auto">家宽-自动</a-select-option>
+				  <a-select-option value="manual">家宽-手动</a-select-option>
 				  <a-select-option value="dedicated">专线分发</a-select-option>
                 </a-select></a-col>
               </a-row>
               <a-row :gutter="8" class="mt-2">
-                <a-col v-if="orderForm.mode !== 'forward' && orderForm.mode !== 'dedicated'" :xs="24" :md="8"><a-input-number v-model:value="orderForm.quantity" :min="1" style="width: 100%" placeholder="数量" /></a-col>
-                <a-col v-else-if="orderForm.mode === 'forward'" :xs="24" :md="8"><a-input :value="`规则数: ${orderForm.forward_outbound_ids.length}`" disabled /></a-col>
+				<a-col v-if="orderForm.mode !== 'dedicated'" :xs="24" :md="8"><a-input-number v-model:value="orderForm.quantity" :min="1" style="width: 100%" placeholder="数量" /></a-col>
 				<a-col v-else :xs="24" :md="8"><a-input :value="`专线数: ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}`" disabled /></a-col>
                 <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.duration_day" :min="1" style="width: 100%" placeholder="有效天数" /></a-col>
                 <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.port" :min="1" :max="65535" :disabled="orderForm.mode === 'dedicated'" style="width: 100%" placeholder="端口" /></a-col>
@@ -2237,42 +2369,9 @@ function downloadBlobFile(data: Blob, filename: string) {
                   <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
                 </a-select>
               </div>
-              <div v-else-if="orderForm.mode === 'forward'" class="mt-2">
-                <a-space class="mb-2" wrap>
-                  <a-button size="small" @click="openForwardManager">管理SOCKS5出口</a-button>
-                  <a-button size="small" @click="probeAllForwardOutbounds">批量探测出口</a-button>
-                  <span class="text-xs text-slate-500">订单内直接选择出口，无需单独创建数量</span>
-                </a-space>
-                <a-select
-                  v-model:value="orderForm.forward_outbound_ids"
-                  mode="multiple"
-                  style="width:100%"
-                  :max-tag-count="6"
-                  placeholder="选择SOCKS5出口(可多选)"
-                >
-                  <a-select-option v-for="row in enabledForwardOutbounds" :key="row.id" :value="row.id">
-                    {{ row.address }}:{{ row.port }} / {{ row.route_user || '未设置账号' }} / {{ (row.country_code || '--').toUpperCase() }}
-                  </a-select-option>
-                </a-select>
-                <a-alert
-                  class="mt-2"
-                  type="info"
-                  show-icon
-                  :message="`SOCKS5出口数 = 转发规则数，当前可用出口: ${enabledForwardOutbounds.length}`"
-                />
-                <a-alert
-                  v-if="createForwardReuseHints.length"
-                  class="mt-2"
-                  type="warning"
-                  show-icon
-                  :message="`复用提醒（不阻断）: ${createForwardReuseHints.length} 条`"
-                  :description="createForwardReuseHints.join('；')"
-                />
-			  </div>
-			  <div v-else-if="orderForm.mode === 'dedicated'" class="mt-2">
+			  <div v-if="orderForm.mode === 'dedicated'" class="mt-2">
 				<a-space class="mb-2" wrap>
-				  <a-button size="small" @click="openDedicatedManager">管理专线 Inbound/Ingress</a-button>
-				  <span class="text-xs text-slate-500">先选协议，再选入口；数量按 Socks5 行数自动计算</span>
+				  <span class="text-xs text-slate-500">专线 Inbound/Ingress 请到 设置-专线 管理；先选协议再选入口</span>
 				</a-space>
 				<a-select v-model:value="orderForm.dedicated_protocol" style="width:100%" placeholder="选择协议">
 				  <a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">
@@ -2291,10 +2390,19 @@ function downloadBlobFile(data: Blob, filename: string) {
 				</a-select>
 				<a-space class="mt-2" wrap>
 				  <a-button size="small" @click="downloadDedicatedCreateSample">下载示例</a-button>
+				  <a-button size="small" :loading="dedicatedProbeRunning" @click="probeDedicatedCreateLines">探测出口可用性</a-button>
 				  <span class="text-xs text-slate-500">示例格式: ip:port:user:pass，可直接复制多行</span>
 				</a-space>
 				<a-textarea v-model:value="orderForm.dedicated_egress_lines" class="mt-2" :rows="6" placeholder="每行: ip:port:user:pass（按顺序创建子订单）" />
 				<a-alert class="mt-2" type="info" show-icon :message="`专线数量 = ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}，订单将自动拆分为子订单 1:1`" />
+				<a-alert v-if="dedicatedProbeMeta.total > 0" class="mt-2" type="info" show-icon :message="`探测进度 ${dedicatedProbeMeta.success + dedicatedProbeMeta.failed}/${dedicatedProbeMeta.total}，可用 ${dedicatedProbeMeta.success}，失败 ${dedicatedProbeMeta.failed}`" />
+				<div v-if="dedicatedProbeRows.length" class="mt-2 max-h-40 overflow-auto rounded border border-slate-200 p-2">
+				  <div v-for="row in dedicatedProbeRows" :key="`${row.index}-${row.raw}`" class="text-xs leading-6">
+					<span class="font-mono">#{{ row.index }} {{ row.raw }}</span>
+					<span v-if="row.available" class="ml-2 text-emerald-600">可用 / {{ row.exit_ip }} / {{ (row.country_code || '--').toUpperCase() }} {{ row.region || '' }}</span>
+					<span v-else class="ml-2 text-rose-600">失败 / {{ row.error || 'unknown' }}</span>
+				  </div>
+				</div>
               </div>
               <div class="mt-3 flex justify-end">
                 <a-button type="primary" :loading="creatingOrder" @click="createOrder">下单并同步Xray</a-button>
@@ -2313,6 +2421,10 @@ function downloadBlobFile(data: Blob, filename: string) {
 				  <a-input-number v-model:value="exportCount" :min="0" size="small" :placeholder="'导出条数(0=全部)'" />
 				  <a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
 				  <a-input-number v-model:value="batchMoreDays" :min="1" :max="365" size="small" />
+				  <a-button size="small" @click="batchMoreDays = 30">30天</a-button>
+				  <a-button size="small" @click="batchMoreDays = 60">60天</a-button>
+				  <a-button size="small" @click="batchMoreDays = 90">90天</a-button>
+				  <a-date-picker v-model:value="batchRenewExpiresAt" size="small" show-time value-format="YYYY-MM-DDTHH:mm:ss" placeholder="续期到期时间(可选)" />
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchRenew">批量续期</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchResync">批量重同步</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchTest">批量测活</a-button>
@@ -2348,10 +2460,10 @@ function downloadBlobFile(data: Blob, filename: string) {
                     <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
                   </template>
                   <template v-else-if="column.dataIndex === 'mode'">
-                    <a-tag :color="modeColor(record.mode)">{{ record.mode }}</a-tag>
+                    <a-tag :color="modeColor(record.mode)">{{ modeLabel(record.mode) }}</a-tag>
                   </template>
                   <template v-else-if="column.key === 'forward_summary'">
-					<span class="text-xs" :class="(record.mode === 'forward' || record.mode === 'dedicated') ? 'font-mono text-slate-700' : 'text-slate-400'">
+					<span class="text-xs" :class="record.mode === 'dedicated' ? 'font-mono text-slate-700' : 'text-slate-500'">
 						{{ record.mode === 'dedicated' ? dedicatedSummary(record) : forwardSummary(record) }}
 					</span>
 				  </template>
@@ -2371,11 +2483,13 @@ function downloadBlobFile(data: Blob, filename: string) {
 						  <a-menu>
 							<a-menu-item @click="renewOrder(record.id)">续期</a-menu-item>
 							<a-menu-item @click="streamTestOrder(record.id)">流式测活</a-menu-item>
+							<a-menu-item v-if="isResidentialMode(record.mode)" @click="resetOrderCredentials(record.id)">刷新家宽凭据</a-menu-item>
 							<a-menu-item v-if="!record.parent_order_id && record.quantity > 1" @click="splitOrderHead(record.id)">拆分为子订单</a-menu-item>
 							<a-menu-item v-if="record.is_group_head" @click="openGroupSocksModal(record.id)">组内顺序改 Socks5</a-menu-item>
 							<a-menu-item v-if="record.is_group_head" @click="openGroupCredModal(record.id)">组内批量改凭据</a-menu-item>
 							<a-menu-item v-if="record.is_group_head" @click="openGroupRenewModal(record.id)">组内部分续期</a-menu-item>
 							<a-menu-divider />
+							<a-menu-item danger @click="removeOrder(record.id)">删除订单</a-menu-item>
 							<a-menu-item danger @click="deactivateOrder(record.id)">停用订单</a-menu-item>
 						  </a-menu>
 						</template>
@@ -2402,6 +2516,51 @@ function downloadBlobFile(data: Blob, filename: string) {
               </a-alert>
             </a-card>
           </template>
+
+		  <template v-else-if="panel.activeTab === 'delivery'">
+			<a-card :bordered="false" title="发货控制台">
+			  <template #extra>
+				<a-space>
+				  <a-select v-model:value="deliveryCustomerID" style="width:180px" placeholder="客户筛选">
+					<a-select-option :value="0">全部客户</a-select-option>
+					<a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}</a-select-option>
+				  </a-select>
+				  <a-select v-model:value="deliveryMode" style="width:140px">
+					<a-select-option value="all">全部类型</a-select-option>
+					<a-select-option value="home">家宽</a-select-option>
+					<a-select-option value="dedicated">专线</a-select-option>
+				  </a-select>
+				</a-space>
+			  </template>
+			  <a-alert class="mb-3" type="info" show-icon message="订单管理与发货已分离：本页用于导出、复制发货内容、刷新家宽凭据。" />
+			  <a-table :data-source="deliveryRows" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 12 }">
+				<a-table-column title="订单" key="name" width="230">
+				  <template #default="{ record }">#{{ record.id }} / {{ record.name || '-' }}</template>
+				</a-table-column>
+				<a-table-column title="客户" key="customer" width="160">
+				  <template #default="{ record }">{{ record.customer?.name || record.customer_id }}</template>
+				</a-table-column>
+				<a-table-column title="类型" key="mode" width="120">
+				  <template #default="{ record }">
+					<a-tag :color="record.mode === 'dedicated' ? 'magenta' : 'cyan'">{{ record.mode === 'dedicated' ? '专线' : '家宽' }}</a-tag>
+				  </template>
+				</a-table-column>
+				<a-table-column title="到期" key="expires" width="180">
+				  <template #default="{ record }">{{ formatTime(record.expires_at) }}</template>
+				</a-table-column>
+				<a-table-column title="动作" key="action" width="360">
+				  <template #default="{ record }">
+					<a-space :size="4" wrap>
+					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
+					  <a-button size="small" @click="copyOrderLines(record)">复制发货</a-button>
+					  <a-button v-if="isResidentialMode(record.mode)" size="small" @click="resetOrderCredentials(record.id)">刷新凭据</a-button>
+					  <a-button size="small" danger @click="removeOrder(record.id)">删除</a-button>
+					</a-space>
+				  </template>
+				</a-table-column>
+			  </a-table>
+			</a-card>
+		  </template>
 
           <template v-else-if="panel.activeTab === 'import'">
             <a-row :gutter="12">
@@ -2485,7 +2644,7 @@ function downloadBlobFile(data: Blob, filename: string) {
                   </a-table>
                 </a-card>
 
-				<a-alert class="mt-3" type="info" show-icon message="SOCKS5 转发出口已并入 订单页（创建订单 -> 转发分流）" />
+				<a-alert class="mt-3" type="info" show-icon message="转发出口仅保留历史兼容能力，家宽订单请使用 auto/manual。" />
               </a-col>
               <a-col :xs="24" :lg="14">
                 <a-card :bordered="false" title="导入预检结果">
@@ -2577,6 +2736,27 @@ function downloadBlobFile(data: Blob, filename: string) {
                 </a-space>
               </div>
             </a-card>
+
+			<a-card :bordered="false" title="设置-专线" class="max-w-4xl mb-3">
+			  <a-row :gutter="12">
+				<a-col :xs="24" :md="12"><a-form-item label="VLESS Security"><a-input v-model:value="panel.settings.dedicated_vless_security" placeholder="tls / none" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="VLESS SNI"><a-input v-model:value="panel.settings.dedicated_vless_sni" placeholder="如 edge.example.com" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="VLESS Type"><a-input v-model:value="panel.settings.dedicated_vless_type" placeholder="tcp/ws/grpc" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="VLESS Host"><a-input v-model:value="panel.settings.dedicated_vless_host" placeholder="可选 Host" /></a-form-item></a-col>
+				<a-col :xs="24"><a-form-item label="VLESS Path"><a-input v-model:value="panel.settings.dedicated_vless_path" placeholder="可选 /path" /></a-form-item></a-col>
+			  </a-row>
+			  <a-space>
+				<a-button @click="openDedicatedManager">管理 Inbound / Ingress</a-button>
+				<span class="text-xs text-slate-500">专线入口管理已迁移到设置中心</span>
+			  </a-space>
+			</a-card>
+
+			<a-card :bordered="false" title="设置-家宽" class="max-w-4xl mb-3">
+			  <a-row :gutter="12">
+				<a-col :xs="24" :md="12"><a-form-item label="家宽订单名称前缀"><a-input v-model:value="panel.settings.residential_name_prefix" placeholder="家宽-Socks5" /></a-form-item></a-col>
+			  </a-row>
+			  <a-alert type="info" show-icon message="forward 模式已废弃，家宽订单统一使用 家宽-自动 / 家宽-手动。" />
+			</a-card>
 
             <a-card :bordered="false" title="数据库备份恢复" class="max-w-4xl">
               <template #extra>
@@ -2868,7 +3048,7 @@ function downloadBlobFile(data: Blob, filename: string) {
           <a-descriptions-item label="订单ID">#{{ panel.selectedOrder.id }}</a-descriptions-item>
           <a-descriptions-item label="客户">{{ panel.selectedOrder.customer?.name || panel.selectedOrder.customer_id }}</a-descriptions-item>
           <a-descriptions-item label="状态"><a-tag :color="statusColor(panel.selectedOrder.status)">{{ panel.selectedOrder.status }}</a-tag></a-descriptions-item>
-          <a-descriptions-item label="模式"><a-tag :color="modeColor(panel.selectedOrder.mode)">{{ panel.selectedOrder.mode }}</a-tag></a-descriptions-item>
+          <a-descriptions-item label="模式"><a-tag :color="modeColor(panel.selectedOrder.mode)">{{ modeLabel(panel.selectedOrder.mode) }}</a-tag></a-descriptions-item>
           <a-descriptions-item label="开始">{{ formatTime(panel.selectedOrder.starts_at) }}</a-descriptions-item>
           <a-descriptions-item label="到期">{{ formatTime(panel.selectedOrder.expires_at) }}</a-descriptions-item>
         </a-descriptions>
@@ -2924,10 +3104,10 @@ function downloadBlobFile(data: Blob, filename: string) {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="orderEditOpen" title="编辑订单" :confirm-loading="savingOrderEdit" @ok="saveOrderEdit">
+    <a-modal v-model:open="orderEditOpen" title="编辑订单" :confirm-loading="savingOrderEdit" :ok-button-props="isForwardDeprecatedOrderEdit ? { disabled: true } : undefined" @ok="saveOrderEdit">
       <a-form layout="vertical">
-        <a-form-item label="模式"><a-tag :color="modeColor(orderEditForm.mode)">{{ orderEditForm.mode }}</a-tag></a-form-item>
-        <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" /></a-form-item>
+        <a-form-item label="模式"><a-tag :color="modeColor(orderEditForm.mode)">{{ modeLabel(orderEditForm.mode) }}</a-tag></a-form-item>
+        <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" :disabled="isForwardDeprecatedOrderEdit" /></a-form-item>
         <a-form-item v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'" label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
         <a-form-item v-if="orderEditForm.mode === 'manual'" label="手动IP绑定(可多选)">
           <a-select v-model:value="orderEditForm.manual_ip_ids" mode="multiple" style="width:100%" placeholder="选择手动IP">
@@ -2935,20 +3115,13 @@ function downloadBlobFile(data: Blob, filename: string) {
           </a-select>
           <div class="mt-1 text-xs text-slate-500">若不调整数量，可留空保持原绑定；调整数量时建议明确选择。</div>
         </a-form-item>
-        <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="SOCKS5转发出口">
-          <a-space class="mb-2" wrap>
-            <a-button size="small" @click="openForwardManager">管理SOCKS5出口</a-button>
-            <a-button size="small" @click="probeAllForwardOutbounds">批量探测出口</a-button>
-          </a-space>
-          <a-select v-model:value="orderEditForm.forward_outbound_ids" mode="multiple" style="width:100%" placeholder="选择SOCKS5出口">
-            <a-select-option v-for="row in enabledForwardOutbounds" :key="row.id" :value="row.id">
-              {{ row.address }}:{{ row.port }} / {{ row.route_user || '未设置账号' }} / {{ (row.country_code || '--').toUpperCase() }}
-            </a-select-option>
-          </a-select>
+        <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="废弃模式（只读）">
+          <a-alert type="warning" show-icon message="forward 模式已废弃：历史订单可查看，但不支持编辑。" />
+          <a-input class="mt-2" :value="`历史出口数量: ${orderEditForm.forward_outbound_ids.length}`" disabled />
         </a-form-item>
         <a-form-item v-else label="专线入口">
           <a-space class="mb-2" wrap>
-				<a-button size="small" @click="openDedicatedManager">管理专线 Inbound/Ingress</a-button>
+				<span class="text-xs text-slate-500">专线 Inbound/Ingress 请到 设置-专线 管理</span>
           </a-space>
           <a-select v-model:value="orderEditForm.dedicated_protocol" style="width:100%" placeholder="选择协议">
             <a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">
@@ -2969,15 +3142,15 @@ function downloadBlobFile(data: Blob, filename: string) {
           <a-textarea v-model:value="orderEditForm.dedicated_credential_lines" class="mt-2" :rows="3" placeholder="可选: 顺序更新入站凭据，每行 user:pass[:uuid]" />
           <a-checkbox v-model:checked="orderEditForm.regenerate_dedicated_credentials" class="mt-2">随机重置组内凭据</a-checkbox>
         </a-form-item>
-        <a-form-item label="端口"><a-input-number v-model:value="orderEditForm.port" :min="1" :max="65535" :disabled="orderEditForm.mode === 'dedicated'" style="width:100%" /></a-form-item>
-        <a-form-item label="到期时间"><a-date-picker v-model:value="orderEditForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" /></a-form-item>
+        <a-form-item label="端口"><a-input-number v-model:value="orderEditForm.port" :min="1" :max="65535" :disabled="orderEditForm.mode === 'dedicated' || isForwardDeprecatedOrderEdit" style="width:100%" /></a-form-item>
+        <a-form-item label="到期时间"><a-date-picker v-model:value="orderEditForm.expires_at" :disabled="isForwardDeprecatedOrderEdit" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" /></a-form-item>
         <a-space class="mb-2">
-          <a-button size="small" @click="setQuickExpiry(7, 'edit')">7天</a-button>
-          <a-button size="small" @click="setQuickExpiry(30, 'edit')">30天</a-button>
-          <a-button size="small" @click="setQuickExpiry(90, 'edit')">90天</a-button>
+          <a-button size="small" :disabled="isForwardDeprecatedOrderEdit" @click="setQuickExpiry(7, 'edit')">7天</a-button>
+          <a-button size="small" :disabled="isForwardDeprecatedOrderEdit" @click="setQuickExpiry(30, 'edit')">30天</a-button>
+          <a-button size="small" :disabled="isForwardDeprecatedOrderEdit" @click="setQuickExpiry(90, 'edit')">90天</a-button>
         </a-space>
         <a-alert v-if="panel.allocationPreview" type="info" show-icon :message="`可分配IP: ${panel.allocationPreview.available} / 池总量: ${panel.allocationPreview.pool_size} / 已占用: ${panel.allocationPreview.used_by_customer}`" />
-        <a-alert v-if="orderEditForm.mode === 'forward' && editForwardReuseHints.length" class="mt-2" type="warning" show-icon :message="`复用提醒（不阻断）: ${editForwardReuseHints.length} 条`" :description="editForwardReuseHints.join('；')" />
+        <a-alert v-if="orderEditForm.mode === 'forward'" class="mt-2" type="info" show-icon message="该模式已冻结，仅用于历史兼容。" />
       </a-form>
     </a-modal>
 
@@ -3076,6 +3249,15 @@ function downloadBlobFile(data: Blob, filename: string) {
 		<span class="text-xs text-slate-600">续期天数</span>
 		<a-input-number v-model:value="groupRenewDays" :min="1" :max="365" />
 		<span class="text-xs text-slate-500">仅对选中子订单生效</span>
+	  </a-space>
+	  <a-space class="mb-2" align="center">
+		<span class="text-xs text-slate-600">或指定到期时间</span>
+		<a-date-picker v-model:value="groupRenewExpiresAt" show-time value-format="YYYY-MM-DDTHH:mm:ss" />
+	  </a-space>
+	  <a-space class="mb-2">
+		<a-button size="small" @click="groupRenewDays = 30">30天</a-button>
+		<a-button size="small" @click="groupRenewDays = 60">60天</a-button>
+		<a-button size="small" @click="groupRenewDays = 90">90天</a-button>
 	  </a-space>
 	  <a-checkbox-group v-model:value="groupRenewChildOrderIDs" style="width:100%">
 		<a-space direction="vertical" style="width:100%">
