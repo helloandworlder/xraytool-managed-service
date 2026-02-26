@@ -455,6 +455,11 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		if err := tx.Create(order).Error; err != nil {
 			return err
 		}
+		orderNo := buildOrderNo(order.CreatedAt, order.ID)
+		if err := tx.Model(&model.Order{}).Where("id = ?", order.ID).Updates(map[string]interface{}{"order_no": orderNo, "updated_at": now}).Error; err != nil {
+			return err
+		}
+		order.OrderNo = orderNo
 		for i, ip := range selectedIPs {
 			item := model.OrderItem{
 				OrderID:      order.ID,
@@ -720,7 +725,7 @@ func (s *OrderService) BatchTest(orderIDs []uint) []BatchTestResult {
 func (s *OrderService) BatchExport(orderIDs []uint) (string, error) {
 	parts := make([]string, 0, len(orderIDs)*2)
 	for _, id := range orderIDs {
-		lines, _, err := s.ExportOrderLinesWithMeta(id, ExportOrderOptions{Shuffle: true})
+		lines, _, err := s.ExportOrderLinesWithMeta(id, ExportOrderOptions{Shuffle: false})
 		if err != nil {
 			return "", err
 		}
@@ -731,23 +736,43 @@ func (s *OrderService) BatchExport(orderIDs []uint) (string, error) {
 }
 
 func (s *OrderService) ExportOrderLines(orderID uint) (string, error) {
-	lines, _, err := s.ExportOrderLinesWithMeta(orderID, ExportOrderOptions{Shuffle: true})
+	lines, _, err := s.ExportOrderLinesWithMeta(orderID, ExportOrderOptions{Shuffle: false})
 	return lines, err
 }
 
 func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOptions) (string, string, error) {
 	var order model.Order
-	if err := s.db.Preload("Customer").First(&order, orderID).Error; err != nil {
+	if err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").First(&order, orderID).Error; err != nil {
 		return "", "", err
 	}
-	var items []model.OrderItem
-	if err := s.db.Where("order_id = ? and status = ?", orderID, model.OrderItemStatusActive).Order("id asc").Find(&items).Error; err != nil {
-		return "", "", err
+
+	ordersForExport := []model.Order{order}
+	if order.IsGroupHead {
+		children := []model.Order{}
+		if err := s.db.Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Where("parent_order_id = ?", order.ID).Order("sequence_no asc, id asc").Find(&children).Error; err != nil {
+			return "", "", err
+		}
+		if len(children) > 0 {
+			ordersForExport = children
+		}
+	}
+
+	itemsByOrder := map[uint][]model.OrderItem{}
+	items := make([]model.OrderItem, 0)
+	for _, oneOrder := range ordersForExport {
+		orderItems := []model.OrderItem{}
+		if err := s.db.Where("order_id = ? and status = ?", oneOrder.ID, model.OrderItemStatusActive).Order("id asc").Find(&orderItems).Error; err != nil {
+			return "", "", err
+		}
+		itemsByOrder[oneOrder.ID] = orderItems
+		items = append(items, orderItems...)
 	}
 	if len(items) == 0 {
 		return "", "", errors.New("no active items")
 	}
-	if opts.Shuffle {
+
+	canShuffle := opts.Shuffle && !strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated)
+	if canShuffle {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		r.Shuffle(len(items), func(i, j int) {
 			items[i], items[j] = items[j], items[i]
@@ -759,7 +784,41 @@ func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOp
 		}
 		items = items[:opts.Count]
 	}
-	lines := make([]string, 0, len(items))
+
+	lines := make([]string, 0, len(items)+4)
+	if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+		linkCfg := s.loadExportLinkSettings()
+		itemIDs := make([]uint, 0, len(items))
+		for _, item := range items {
+			itemIDs = append(itemIDs, item.ID)
+		}
+		egressByItem := map[uint]model.DedicatedEgress{}
+		if len(itemIDs) > 0 {
+			egressRows := []model.DedicatedEgress{}
+			if err := s.db.Where("order_item_id in ?", itemIDs).Find(&egressRows).Error; err == nil {
+				for _, row := range egressRows {
+					egressByItem[row.OrderItemID] = row
+				}
+			}
+		}
+		for _, oneOrder := range ordersForExport {
+			for _, item := range itemsByOrder[oneOrder.ID] {
+				egress := egressByItem[item.ID]
+				tag := dedicatedLinkTag(egress.CountryCode, egress.ExitIP)
+				domainLine := dedicatedDomainCredentialLine(oneOrder, item)
+				socksLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureMixed, linkCfg, tag)
+				vlessLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureVless, linkCfg, tag)
+				vmessLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureVmess, linkCfg, tag)
+				ssLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureShadowsocks, linkCfg, tag)
+				parts := []string{domainLine, socksLink, vlessLink, vmessLink, ssLink}
+				lines = append(lines, strings.Join(parts, "; ")+";")
+			}
+		}
+		if opts.Count > 0 && opts.Count < len(lines) {
+			lines = lines[:opts.Count]
+		}
+		return strings.Join(lines, "\n"), s.exportFilename(order, items), nil
+	}
 	for _, item := range items {
 		lines = append(lines, fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password))
 	}
@@ -771,6 +830,13 @@ func (s *OrderService) TestOrder(orderID uint) (map[uint]string, error) {
 }
 
 func (s *OrderService) TestOrderSampled(orderID uint, samplePercent int) (map[uint]string, error) {
+	order := model.Order{}
+	if err := s.db.Select("id", "mode").First(&order, orderID).Error; err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+		return nil, errors.New("dedicated order does not support test")
+	}
 	var items []model.OrderItem
 	if err := s.db.Where("order_id = ? and status = ?", orderID, model.OrderItemStatusActive).Find(&items).Error; err != nil {
 		return nil, err
@@ -804,6 +870,13 @@ func (s *OrderService) TestOrderSampled(orderID uint, samplePercent int) (map[ui
 }
 
 func (s *OrderService) TestOrderStream(orderID uint, samplePercent int, emit func(TestOrderStreamEvent) error) error {
+	order := model.Order{}
+	if err := s.db.Select("id", "mode").First(&order, orderID).Error; err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+		return errors.New("dedicated order does not support stream test")
+	}
 	var items []model.OrderItem
 	if err := s.db.Where("order_id = ? and status = ?", orderID, model.OrderItemStatusActive).Find(&items).Error; err != nil {
 		return err
@@ -958,6 +1031,11 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 		if err := tx.Create(order).Error; err != nil {
 			return err
 		}
+		orderNo := buildOrderNo(order.CreatedAt, order.ID)
+		if err := tx.Model(&model.Order{}).Where("id = ?", order.ID).Updates(map[string]interface{}{"order_no": orderNo, "updated_at": time.Now()}).Error; err != nil {
+			return err
+		}
+		order.OrderNo = orderNo
 		for _, row := range validRows {
 			managed := false
 			item := model.OrderItem{
@@ -1173,6 +1251,13 @@ func normalizeSamplePercent(p int) int {
 	return p
 }
 
+func buildOrderNo(ts time.Time, id uint) string {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	return fmt.Sprintf("OD%s%06d", ts.Format("060102"), id)
+}
+
 func (s *OrderService) exportFilename(order model.Order, items []model.OrderItem) string {
 	customer := sanitizeFilenamePart(order.Customer.Code)
 	if customer == "" {
@@ -1185,13 +1270,16 @@ func (s *OrderService) exportFilename(order model.Order, items []model.OrderItem
 	if len(items) > 0 {
 		ipMask = maskIPv4(items[0].IP)
 	}
-	date := time.Now().Format("20060102")
+	orderNo := strings.TrimSpace(order.OrderNo)
+	if orderNo == "" {
+		orderNo = buildOrderNo(order.CreatedAt, order.ID)
+	}
 	orderName := sanitizeFilenamePart(order.Name)
 	if orderName == "" {
-		orderName = fmt.Sprintf("order-%d", order.ID)
+		orderName = orderNo
 	}
 	count := fmt.Sprintf("%d条", len(items))
-	return fmt.Sprintf("%s-%s-%s-%s-%s.txt", customer, ipMask, date, orderName, count)
+	return fmt.Sprintf("%s-%s-%s-%s-%s.txt", customer, orderNo, ipMask, orderName, count)
 }
 
 func maskIPv4(ip string) string {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -133,9 +134,13 @@ func (a *API) Router() *gin.Engine {
 	secure.GET("/orders/:id/group/template/socks5.xlsx", a.downloadOrderGroupSocks5Template)
 	secure.GET("/orders/:id/group/template/credentials.xlsx", a.downloadOrderGroupCredentialsTemplate)
 	secure.POST("/orders/:id/group/update-socks5", a.updateOrderGroupSocks5)
+	secure.POST("/orders/:id/group/update-socks5-selected", a.updateOrderGroupSocks5Selected)
 	secure.POST("/orders/:id/group/update-socks5/xlsx", a.updateOrderGroupSocks5ByXLSX)
 	secure.POST("/orders/:id/group/update-credentials", a.updateOrderGroupCredentials)
+	secure.POST("/orders/:id/group/update-credentials-selected", a.updateOrderGroupCredentialsSelected)
 	secure.POST("/orders/:id/group/update-credentials/xlsx", a.updateOrderGroupCredentialsByXLSX)
+	secure.POST("/orders/:id/group/update-egress-geo", a.updateOrderGroupEgressGeo)
+	secure.POST("/orders/:id/group/update-egress-geo/mapping", a.updateOrderGroupEgressGeoByMapping)
 	secure.POST("/orders/:id/group/renew-selected", a.renewOrderGroupSelected)
 	secure.POST("/orders/:id/deactivate", a.deactivateOrder)
 	secure.POST("/orders/:id/renew", a.renewOrder)
@@ -1202,7 +1207,7 @@ func (a *API) downloadOrderGroupSocks5Template(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	setAttachmentFilename(c, filename)
 	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body)
 }
 
@@ -1216,7 +1221,7 @@ func (a *API) downloadOrderGroupCredentialsTemplate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	setAttachmentFilename(c, filename)
 	c.Data(http.StatusOK, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", body)
 }
 
@@ -1233,6 +1238,30 @@ func (a *API) updateOrderGroupSocks5(c *gin.Context) {
 		return
 	}
 	if err := a.orders.UpdateGroupSocks5(c.Request.Context(), id, req.Lines); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupSocks5Selected(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Lines         string `json:"lines"`
+		ChildOrderIDs []uint `json:"child_order_ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.ChildOrderIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "child_order_ids is empty"})
+		return
+	}
+	if err := a.orders.UpdateGroupSocks5Selected(c.Request.Context(), id, req.ChildOrderIDs, req.Lines); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1281,6 +1310,73 @@ func (a *API) updateOrderGroupCredentials(c *gin.Context) {
 		return
 	}
 	if err := a.orders.UpdateGroupCredentials(c.Request.Context(), id, req.Lines, req.Regenerate); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupCredentialsSelected(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Lines         string `json:"lines"`
+		Regenerate    bool   `json:"regenerate"`
+		ChildOrderIDs []uint `json:"child_order_ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.ChildOrderIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "child_order_ids is empty"})
+		return
+	}
+	if err := a.orders.UpdateGroupCredentialsSelected(c.Request.Context(), id, req.ChildOrderIDs, req.Lines, req.Regenerate); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupEgressGeo(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		ChildOrderIDs []uint `json:"child_order_ids"`
+		CountryCode   string `json:"country_code"`
+		Region        string `json:"region"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.orders.UpdateGroupEgressGeo(c.Request.Context(), id, req.ChildOrderIDs, req.CountryCode, req.Region); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) updateOrderGroupEgressGeoByMapping(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	var req struct {
+		Lines              string `json:"lines"`
+		DefaultCountryCode string `json:"default_country_code"`
+		DefaultRegion      string `json:"default_region"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := a.orders.UpdateGroupEgressGeoByMapping(c.Request.Context(), id, req.Lines, req.DefaultCountryCode, req.DefaultRegion); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1492,14 +1588,14 @@ func (a *API) batchExportOrders(c *gin.Context) {
 	}
 	if format == "xlsx" {
 		data, filename, contentType, err := a.orders.BatchExportArtifact(req.OrderIDs, service.XLSXExportOptions{
-			Shuffle:          true,
+			Shuffle:          false,
 			IncludeRawSocks5: req.IncludeRawSocks5,
 		})
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+		setAttachmentFilename(c, filename)
 		c.Data(http.StatusOK, contentType, data)
 		return
 	}
@@ -1508,7 +1604,7 @@ func (a *API) batchExportOrders(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Disposition", "attachment; filename=batch-orders-export.txt")
+	setAttachmentFilename(c, "batch-orders-export.txt")
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
 }
 
@@ -1518,7 +1614,7 @@ func (a *API) exportOrder(c *gin.Context) {
 		return
 	}
 	count, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("count", "0")))
-	shuffle := strings.ToLower(strings.TrimSpace(c.DefaultQuery("shuffle", "true"))) != "false"
+	shuffle := strings.ToLower(strings.TrimSpace(c.DefaultQuery("shuffle", "false"))) == "true"
 	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "txt")))
 	includeRawSocks5 := strings.ToLower(strings.TrimSpace(c.DefaultQuery("include_raw_socks5", "false"))) == "true"
 	if format == "xlsx" {
@@ -1527,7 +1623,7 @@ func (a *API) exportOrder(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+		setAttachmentFilename(c, filename)
 		c.Data(http.StatusOK, contentType, data)
 		return
 	}
@@ -1536,7 +1632,7 @@ func (a *API) exportOrder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	setAttachmentFilename(c, filename)
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
 }
 
@@ -1776,7 +1872,7 @@ func (a *API) exportBackup(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", downloadName))
+	setAttachmentFilename(c, downloadName)
 	c.File(path)
 	go func() {
 		time.Sleep(10 * time.Second)
@@ -1791,7 +1887,7 @@ func (a *API) downloadBackup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
+	setAttachmentFilename(c, filepath.Base(path))
 	c.File(path)
 }
 
@@ -1827,6 +1923,42 @@ func (a *API) restoreBackup(c *gin.Context) {
 		time.Sleep(700 * time.Millisecond)
 		os.Exit(0)
 	}()
+}
+
+func setAttachmentFilename(c *gin.Context, filename string) {
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "download"
+	}
+	fallback := asciiFilenameFallback(name)
+	encoded := url.QueryEscape(name)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", fallback, encoded))
+}
+
+func asciiFilenameFallback(name string) string {
+	b := strings.Builder{}
+	b.Grow(len(name))
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		switch r {
+		case '.', '-', '_', '(', ')', '[', ']', ' ':
+			b.WriteRune(r)
+		default:
+			if r < 128 {
+				b.WriteRune('-')
+				continue
+			}
+			b.WriteRune('_')
+		}
+	}
+	out := strings.TrimSpace(strings.ReplaceAll(b.String(), "\"", ""))
+	if out == "" {
+		return "download"
+	}
+	return out
 }
 
 func (a *API) authMiddleware() gin.HandlerFunc {

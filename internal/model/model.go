@@ -145,6 +145,7 @@ type DedicatedIngress struct {
 
 type Order struct {
 	ID                 uint      `gorm:"primaryKey" json:"id"`
+	OrderNo            string    `gorm:"size:32;index" json:"order_no"`
 	CustomerID         uint      `gorm:"index;not null" json:"customer_id"`
 	GroupID            uint      `gorm:"index" json:"group_id"`
 	ParentOrderID      *uint     `gorm:"index" json:"parent_order_id,omitempty"`
@@ -212,6 +213,7 @@ type DedicatedEgress struct {
 	Password     string     `gorm:"size:128;not null" json:"password"`
 	ExitIP       string     `gorm:"size:64" json:"exit_ip,omitempty"`
 	CountryCode  string     `gorm:"size:8;index" json:"country_code,omitempty"`
+	Region       string     `gorm:"size:64;index" json:"region,omitempty"`
 	ProbeStatus  string     `gorm:"size:32" json:"probe_status,omitempty"`
 	ProbeError   string     `gorm:"size:255" json:"probe_error,omitempty"`
 	LastProbedAt *time.Time `json:"last_probed_at,omitempty"`

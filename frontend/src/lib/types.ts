@@ -79,6 +79,7 @@ export interface DedicatedIngress {
 
 export interface Order {
   id: number
+  order_no?: string
   customer_id: number
   group_id?: number
   parent_order_id?: number

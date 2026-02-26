@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"xraytool/internal/model"
 
@@ -45,6 +46,12 @@ func Open(path string) (*gorm.DB, error) {
 	if err := migrateOrderItemUsernameIndex(database); err != nil {
 		return nil, err
 	}
+	if err := migrateOrderNoIndex(database); err != nil {
+		return nil, err
+	}
+	if err := migrateOrderNo(database); err != nil {
+		return nil, err
+	}
 	if err := migrateDedicatedEntryToInboundIngress(database); err != nil {
 		return nil, err
 	}
@@ -61,6 +68,39 @@ func migrateOrderItemUsernameIndex(database *gorm.DB) error {
 		}
 	}
 	return database.Exec("CREATE INDEX IF NOT EXISTS idx_order_items_auth ON order_items(username)").Error
+}
+
+func migrateOrderNo(database *gorm.DB) error {
+	type orderNoRow struct {
+		ID        uint
+		OrderNo   string
+		CreatedAt time.Time
+	}
+	rows := []orderNoRow{}
+	if err := database.Model(&model.Order{}).Select("id", "order_no", "created_at").Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if strings.TrimSpace(row.OrderNo) != "" {
+			continue
+		}
+		ts := row.CreatedAt
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		orderNo := fmt.Sprintf("OD%s%06d", ts.Format("060102"), row.ID)
+		if err := database.Model(&model.Order{}).Where("id = ?", row.ID).Update("order_no", orderNo).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateOrderNoIndex(database *gorm.DB) error {
+	if err := database.Exec("DROP INDEX IF EXISTS idx_orders_order_no").Error; err != nil {
+		return err
+	}
+	return database.Exec("CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no)").Error
 }
 
 func migrateDedicatedEntryToInboundIngress(database *gorm.DB) error {

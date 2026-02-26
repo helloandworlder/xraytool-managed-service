@@ -396,6 +396,13 @@ export const usePanelStore = defineStore('panel', {
 			await http.post(`/api/orders/${orderID}/group/update-socks5`, { lines })
 			await this.loadOrders()
 		},
+		async updateOrderGroupSocks5Selected(orderID: number, childOrderIDs: number[], lines: string) {
+			await http.post(`/api/orders/${orderID}/group/update-socks5-selected`, {
+				child_order_ids: childOrderIDs,
+				lines
+			})
+			await this.loadOrders()
+		},
 		async updateOrderGroupSocks5XLSX(orderID: number, file: File) {
 			const form = new FormData()
 			form.append('file', file)
@@ -406,6 +413,30 @@ export const usePanelStore = defineStore('panel', {
 		},
 		async updateOrderGroupCredentials(orderID: number, payload: { lines?: string; regenerate?: boolean }) {
 			await http.post(`/api/orders/${orderID}/group/update-credentials`, payload)
+			await this.loadOrders()
+		},
+		async updateOrderGroupCredentialsSelected(orderID: number, childOrderIDs: number[], payload: { lines?: string; regenerate?: boolean }) {
+			await http.post(`/api/orders/${orderID}/group/update-credentials-selected`, {
+				child_order_ids: childOrderIDs,
+				lines: payload.lines,
+				regenerate: payload.regenerate
+			})
+			await this.loadOrders()
+		},
+		async updateOrderGroupEgressGeo(orderID: number, childOrderIDs: number[], countryCode: string, region = '') {
+			await http.post(`/api/orders/${orderID}/group/update-egress-geo`, {
+				child_order_ids: childOrderIDs,
+				country_code: countryCode,
+				region: region
+			})
+			await this.loadOrders()
+		},
+		async updateOrderGroupEgressGeoByMapping(orderID: number, lines: string, defaultCountryCode = '', defaultRegion = '') {
+			await http.post(`/api/orders/${orderID}/group/update-egress-geo/mapping`, {
+				lines,
+				default_country_code: defaultCountryCode,
+				default_region: defaultRegion
+			})
 			await this.loadOrders()
 		},
 		async updateOrderGroupCredentialsXLSX(orderID: number, file: File) {
@@ -526,10 +557,10 @@ export const usePanelStore = defineStore('panel', {
       })
       return (res.data.results || []) as Array<{ id: number; success: boolean; result?: Record<string, string>; error?: string }>
     },
-    async batchExport(orderIDs: number[], includeRawSocks5 = false) {
+    async batchExport(orderIDs: number[], format: 'txt' | 'xlsx' = 'xlsx', includeRawSocks5 = false) {
       const res = await http.post('/api/orders/batch/export', {
 			order_ids: orderIDs,
-			format: 'xlsx',
+			format,
 			include_raw_socks5: includeRawSocks5
       }, {
 			responseType: 'blob'

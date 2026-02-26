@@ -73,11 +73,14 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 		if err := tx.Create(head).Error; err != nil {
 			return err
 		}
+		head.OrderNo = buildOrderNo(head.CreatedAt, head.ID)
+		headUpdates := map[string]interface{}{"order_no": head.OrderNo, "updated_at": now}
 		if strings.TrimSpace(in.Name) == "" {
 			head.Name = fmt.Sprintf("%s-%d", baseName, head.ID)
-			if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(map[string]interface{}{"name": head.Name, "updated_at": now}).Error; err != nil {
-				return err
-			}
+			headUpdates["name"] = head.Name
+		}
+		if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(headUpdates).Error; err != nil {
+			return err
 		}
 		if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(map[string]interface{}{
 			"group_id":   head.ID,
@@ -108,6 +111,10 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 				ExpiresAt:          expiresAt,
 			}
 			if err := tx.Create(&child).Error; err != nil {
+				return err
+			}
+			child.OrderNo = buildOrderNo(child.CreatedAt, child.ID)
+			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(map[string]interface{}{"order_no": child.OrderNo, "updated_at": now}).Error; err != nil {
 				return err
 			}
 			item := model.OrderItem{
@@ -628,6 +635,10 @@ func (s *OrderService) SplitOrder(ctx context.Context, orderID uint) ([]model.Or
 			if err := tx.Create(&child).Error; err != nil {
 				return err
 			}
+			child.OrderNo = buildOrderNo(child.CreatedAt, child.ID)
+			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(map[string]interface{}{"order_no": child.OrderNo, "updated_at": now}).Error; err != nil {
+				return err
+			}
 			newItem := item
 			newItem.ID = 0
 			newItem.OrderID = child.ID
@@ -724,6 +735,225 @@ func (s *OrderService) UpdateGroupCredentials(ctx context.Context, orderID uint,
 		return err
 	}
 	return s.rebuildManagedRuntime(ctx)
+}
+
+func (s *OrderService) UpdateGroupSocks5Selected(ctx context.Context, orderID uint, childOrderIDs []uint, lines string) error {
+	ids := uniqueUintIDs(childOrderIDs)
+	if len(ids) == 0 {
+		return errors.New("child_order_ids is empty")
+	}
+	head := model.Order{}
+	if err := s.db.First(&head, orderID).Error; err != nil {
+		return err
+	}
+	if !head.IsGroupHead {
+		return errors.New("only group head order can batch update socks5")
+	}
+	now := time.Now()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		children, err := s.loadGroupChildrenByIDsTx(tx, head.ID, ids)
+		if err != nil {
+			return err
+		}
+		return s.updateGroupSocks5Tx(tx, head, children, lines, now)
+	}); err != nil {
+		return err
+	}
+	return s.rebuildManagedRuntime(ctx)
+}
+
+func (s *OrderService) UpdateGroupCredentialsSelected(ctx context.Context, orderID uint, childOrderIDs []uint, lines string, regenerate bool) error {
+	ids := uniqueUintIDs(childOrderIDs)
+	if len(ids) == 0 {
+		return errors.New("child_order_ids is empty")
+	}
+	head := model.Order{}
+	if err := s.db.First(&head, orderID).Error; err != nil {
+		return err
+	}
+	if !head.IsGroupHead {
+		return errors.New("only group head order can batch update credentials")
+	}
+	now := time.Now()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		children, err := s.loadGroupChildrenByIDsTx(tx, head.ID, ids)
+		if err != nil {
+			return err
+		}
+		return s.updateGroupCredentialsTx(tx, head, children, lines, regenerate, now)
+	}); err != nil {
+		return err
+	}
+	return s.rebuildManagedRuntime(ctx)
+}
+
+func (s *OrderService) UpdateGroupEgressGeo(ctx context.Context, orderID uint, childOrderIDs []uint, countryCode string, region string) error {
+	head := model.Order{}
+	if err := s.db.First(&head, orderID).Error; err != nil {
+		return err
+	}
+	if !head.IsGroupHead {
+		return errors.New("only group head order can batch update egress geo")
+	}
+	countryCode = strings.ToLower(strings.TrimSpace(countryCode))
+	if countryCode == "" {
+		return errors.New("country_code is required")
+	}
+	region = strings.TrimSpace(region)
+	ids := uniqueUintIDs(childOrderIDs)
+	now := time.Now()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		children := []model.Order{}
+		var err error
+		if len(ids) > 0 {
+			children, err = s.loadGroupChildrenByIDsTx(tx, head.ID, ids)
+		} else {
+			children, err = s.loadGroupChildrenTx(tx, head.ID)
+		}
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if len(child.Items) == 0 {
+				continue
+			}
+			item := child.Items[0]
+			egress := model.DedicatedEgress{}
+			err := tx.Where("order_item_id = ?", item.ID).First(&egress).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				egress = model.DedicatedEgress{
+					OrderID:     child.ID,
+					OrderItemID: item.ID,
+					Address:     item.ForwardAddress,
+					Port:        item.ForwardPort,
+					Username:    item.ForwardUsername,
+					Password:    item.ForwardPassword,
+					CreatedAt:   now,
+				}
+			}
+			egress.CountryCode = countryCode
+			egress.Region = region
+			egress.UpdatedAt = now
+			if err := tx.Save(&egress).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	_ = ctx
+	return nil
+}
+
+func (s *OrderService) UpdateGroupEgressGeoByMapping(ctx context.Context, orderID uint, lines string, defaultCountryCode string, defaultRegion string) error {
+	head := model.Order{}
+	if err := s.db.First(&head, orderID).Error; err != nil {
+		return err
+	}
+	if !head.IsGroupHead {
+		return errors.New("only group head order can batch update egress geo")
+	}
+	geoRows, err := parseDedicatedEgressGeoLines(lines, defaultCountryCode, defaultRegion)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		children, err := s.loadGroupChildrenTx(tx, head.ID)
+		if err != nil {
+			return err
+		}
+		if len(children) == 0 {
+			return errors.New("group has no child orders")
+		}
+		type childRef struct {
+			Child model.Order
+			Index int
+		}
+		candidates := map[string][]childRef{}
+		for idx, child := range children {
+			if len(child.Items) == 0 {
+				continue
+			}
+			item := child.Items[0]
+			key := buildEgressMatchKey(item.ForwardAddress, item.ForwardPort, item.ForwardUsername, item.ForwardPassword)
+			candidates[key] = append(candidates[key], childRef{Child: child, Index: idx})
+		}
+		used := map[uint]struct{}{}
+		for _, row := range geoRows {
+			key := buildEgressMatchKey(row.Address, row.Port, row.Username, row.Password)
+			refs := candidates[key]
+			picked := model.Order{}
+			pickedOK := false
+			for len(refs) > 0 {
+				candidate := refs[0]
+				refs = refs[1:]
+				if _, ok := used[candidate.Child.ID]; ok {
+					continue
+				}
+				picked = candidate.Child
+				pickedOK = true
+				break
+			}
+			candidates[key] = refs
+			if !pickedOK {
+				return fmt.Errorf("mapping line not matched in group: %s:%d:%s", row.Address, row.Port, row.Username)
+			}
+			used[picked.ID] = struct{}{}
+			item := picked.Items[0]
+			egress := model.DedicatedEgress{}
+			err := tx.Where("order_item_id = ?", item.ID).First(&egress).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				egress = model.DedicatedEgress{
+					OrderID:     picked.ID,
+					OrderItemID: item.ID,
+					Address:     item.ForwardAddress,
+					Port:        item.ForwardPort,
+					Username:    item.ForwardUsername,
+					Password:    item.ForwardPassword,
+					CreatedAt:   now,
+				}
+			}
+			egress.CountryCode = strings.ToLower(strings.TrimSpace(row.CountryCode))
+			egress.Region = strings.TrimSpace(row.Region)
+			egress.UpdatedAt = now
+			if err := tx.Save(&egress).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	_ = ctx
+	return nil
+}
+
+func buildEgressMatchKey(address string, port int, username string, password string) string {
+	return fmt.Sprintf("%s:%d:%s:%s", strings.TrimSpace(address), port, strings.TrimSpace(username), strings.TrimSpace(password))
+}
+
+func (s *OrderService) loadGroupChildrenByIDsTx(tx *gorm.DB, headID uint, childIDs []uint) ([]model.Order, error) {
+	ids := uniqueUintIDs(childIDs)
+	if len(ids) == 0 {
+		return nil, errors.New("child_order_ids is empty")
+	}
+	rows := []model.Order{}
+	err := tx.Preload("Items").Where("parent_order_id = ? and id in ?", headID, ids).Order("sequence_no asc, id asc").Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) != len(ids) {
+		return nil, fmt.Errorf("matched child orders %d not equal request %d", len(rows), len(ids))
+	}
+	return rows, nil
 }
 
 func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, children []model.Order, lines string, now time.Time) error {
@@ -858,17 +1088,19 @@ func fillDedicatedEgressProbe(row *model.DedicatedEgress) {
 		return
 	}
 	now := time.Now()
-	exitIP, country, err := probeSocksOutbound(row.Address, row.Port, row.Username, row.Password)
+	exitIP, country, region, err := probeSocksOutboundGeo(row.Address, row.Port, row.Username, row.Password)
 	row.LastProbedAt = &now
 	if err != nil {
 		row.ProbeStatus = "failed"
 		row.ProbeError = err.Error()
 		row.ExitIP = ""
 		row.CountryCode = ""
+		row.Region = ""
 		return
 	}
 	row.ProbeStatus = "ok"
 	row.ProbeError = ""
 	row.ExitIP = strings.TrimSpace(exitIP)
 	row.CountryCode = strings.ToLower(strings.TrimSpace(country))
+	row.Region = strings.TrimSpace(region)
 }

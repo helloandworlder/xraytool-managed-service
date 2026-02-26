@@ -26,14 +26,18 @@ type XLSXExportOptions struct {
 
 type xlsxExportRow struct {
 	Protocol     string
+	Mode         string
+	OrderNo      string
 	GroupHeadID  uint
 	Customer     string
 	CustomerCode string
 	CountryCode  string
+	ExitIP       string
 	CycleTag     string
 	DurationDays int
 	ExpiresAt    time.Time
 	Link         string
+	DomainLine   string
 	RawSocks5    string
 	QRCodeData   []byte
 }
@@ -120,6 +124,27 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 		return nil, err
 	}
 	linkSettings := s.loadExportLinkSettings()
+	headOrderNoByID := map[uint]string{}
+	headIDs := make([]uint, 0)
+	for _, order := range orders {
+		headID := groupHeadID(order)
+		if headID > 0 {
+			headIDs = append(headIDs, headID)
+		}
+	}
+	headIDs = uniqueUintIDs(headIDs)
+	if len(headIDs) > 0 {
+		type orderNoRow struct {
+			ID      uint
+			OrderNo string
+		}
+		headRows := []orderNoRow{}
+		if err := s.db.Model(&model.Order{}).Select("id", "order_no").Where("id in ?", headIDs).Find(&headRows).Error; err == nil {
+			for _, row := range headRows {
+				headOrderNoByID[row.ID] = strings.TrimSpace(row.OrderNo)
+			}
+		}
+	}
 	itemIDs := make([]uint, 0)
 	for _, order := range orders {
 		for _, item := range order.Items {
@@ -147,7 +172,9 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if item.Status != model.OrderItemStatusActive {
 				continue
 			}
-			link := buildOrderItemLinkByProtocol(order, item, protocol, linkSettings)
+			egress := egressByItem[item.ID]
+			tag := dedicatedLinkTag(egress.CountryCode, egress.ExitIP)
+			link := buildOrderItemLinkByProtocol(order, item, protocol, linkSettings, tag)
 			if strings.TrimSpace(link) == "" {
 				continue
 			}
@@ -155,10 +182,25 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if err != nil {
 				return nil, err
 			}
-			egress := egressByItem[item.ID]
 			country := strings.ToLower(strings.TrimSpace(egress.CountryCode))
 			if country == "" {
 				country = "xx"
+			}
+			orderNo := strings.TrimSpace(order.OrderNo)
+			headID := groupHeadID(order)
+			if v := strings.TrimSpace(headOrderNoByID[headID]); v != "" {
+				orderNo = v
+			}
+			if orderNo == "" {
+				orderNo = buildOrderNo(order.CreatedAt, order.ID)
+			}
+			domainLine := ""
+			if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+				domainLine = dedicatedDomainCredentialLine(order, item)
+			}
+			linkValue := link
+			if domainLine != "" && strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+				linkValue = domainLine + "\n" + link
 			}
 			rawSocks := fmt.Sprintf("%s:%d:%s:%s", item.ForwardAddress, item.ForwardPort, item.ForwardUsername, item.ForwardPassword)
 			if strings.TrimSpace(item.ForwardAddress) == "" || item.ForwardPort <= 0 {
@@ -166,14 +208,18 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			}
 			result = append(result, xlsxExportRow{
 				Protocol:     protocol,
+				Mode:         strings.TrimSpace(order.Mode),
+				OrderNo:      orderNo,
 				GroupHeadID:  groupHeadID(order),
 				Customer:     strings.TrimSpace(order.Customer.Name),
 				CustomerCode: strings.TrimSpace(order.Customer.Code),
 				CountryCode:  country,
+				ExitIP:       strings.TrimSpace(egress.ExitIP),
 				CycleTag:     cycleTag(order, now),
 				DurationDays: cycleDays(order, now),
 				ExpiresAt:    order.ExpiresAt,
-				Link:         link,
+				Link:         linkValue,
+				DomainLine:   domainLine,
 				RawSocks5:    rawSocks,
 				QRCodeData:   qr,
 			})
@@ -182,7 +228,14 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 	if len(result) == 0 {
 		return nil, errors.New("no active items")
 	}
-	if opts.Shuffle {
+	hasDedicatedRows := false
+	for _, row := range result {
+		if strings.EqualFold(strings.TrimSpace(row.Mode), model.OrderModeDedicated) {
+			hasDedicatedRows = true
+			break
+		}
+	}
+	if opts.Shuffle && !hasDedicatedRows {
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		r.Shuffle(len(result), func(i, j int) {
 			result[i], result[j] = result[j], result[i]
@@ -236,7 +289,6 @@ func (s *OrderService) expandOrdersForExport(orderIDs []uint) ([]model.Order, er
 		seen[order.ID] = struct{}{}
 		result = append(result, order)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
 
@@ -288,7 +340,10 @@ func exportArtifactName(rows []xlsxExportRow, protocol string) string {
 	if customer == "" {
 		customer = "customer"
 	}
-	orderNo := fmt.Sprintf("OD%s%s", time.Now().Format("060102"), randomDigits(6))
+	orderNo := strings.TrimSpace(row.OrderNo)
+	if orderNo == "" {
+		orderNo = buildOrderNo(time.Now(), row.GroupHeadID)
+	}
 	protocolLabel := exportProtocolLabel(protocol)
 	countryPart := exportCountryStatLabel(rows)
 	days := row.DurationDays
@@ -319,19 +374,6 @@ func sanitizeFilename(raw string) string {
 		return "export"
 	}
 	return out
-}
-
-func randomDigits(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	const digits = "0123456789"
-	b := make([]byte, n)
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i := 0; i < n; i++ {
-		b[i] = digits[r.Intn(len(digits))]
-	}
-	return string(b)
 }
 
 func exportProtocolLabel(protocol string) string {
@@ -482,7 +524,40 @@ func (s *OrderService) loadExportLinkSettings() exportLinkSettings {
 	return out
 }
 
-func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, protocol string, cfg exportLinkSettings) string {
+func dedicatedLinkTag(countryCode string, exitIP string) string {
+	country := countryNameCN(countryCode)
+	if strings.TrimSpace(country) == "" {
+		country = "未知"
+	}
+	exit := strings.TrimSpace(exitIP)
+	if exit == "" {
+		exit = "unknown"
+	}
+	return fmt.Sprintf("%s-%s", country, exit)
+}
+
+func dedicatedDomainCredentialLine(order model.Order, item model.OrderItem) string {
+	host := ""
+	port := order.Port
+	if order.DedicatedIngress != nil {
+		host = strings.TrimSpace(order.DedicatedIngress.Domain)
+		if order.DedicatedIngress.IngressPort > 0 {
+			port = order.DedicatedIngress.IngressPort
+		}
+	}
+	if host == "" && order.DedicatedEntry != nil {
+		host = strings.TrimSpace(order.DedicatedEntry.Domain)
+	}
+	if host == "" {
+		host = strings.TrimSpace(item.IP)
+	}
+	if port <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d:%s:%s", host, port, strings.TrimSpace(item.Username), strings.TrimSpace(item.Password))
+}
+
+func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, protocol string, cfg exportLinkSettings, tag string) string {
 	if order.Mode != model.OrderModeDedicated {
 		auth := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s@%s:%d", item.Username, item.Password, item.IP, item.Port)))
 		return fmt.Sprintf("socks://%s?method=auto", auth)
@@ -501,7 +576,10 @@ func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, proto
 	if host == "" {
 		host = strings.TrimSpace(item.IP)
 	}
-	remark := strings.TrimSpace(order.Name)
+	remark := strings.TrimSpace(tag)
+	if remark == "" {
+		remark = strings.TrimSpace(order.Name)
+	}
 	if remark == "" {
 		remark = fmt.Sprintf("order-%d", order.ID)
 	}
@@ -554,13 +632,13 @@ func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, proto
 			return ""
 		}
 		raw := fmt.Sprintf("%s:%s@%s:%d", DedicatedShadowsocksMethod, item.Password, host, port)
-		return fmt.Sprintf("ss://%s", base64.RawStdEncoding.EncodeToString([]byte(raw)))
+		return fmt.Sprintf("ss://%s#%s", base64.RawStdEncoding.EncodeToString([]byte(raw)), url.QueryEscape(remark))
 	default:
 		if port <= 0 {
 			return ""
 		}
 		auth := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s@%s:%d", item.Username, item.Password, host, port)))
-		return fmt.Sprintf("socks://%s?method=auto", auth)
+		return fmt.Sprintf("socks://%s?method=auto#%s", auth, url.QueryEscape(remark))
 	}
 }
 
@@ -568,36 +646,62 @@ func buildSingleProtocolQRCodeImage(link string) ([]byte, error) {
 	if strings.TrimSpace(link) == "" {
 		return nil, nil
 	}
-	return qrcode.Encode(link, qrcode.Medium, 256)
+	return qrcode.Encode(link, qrcode.Medium, 420)
 }
 
 func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]byte, error) {
-	const qrRowHeight = 128.0
-	const qrColWidth = 23.0
-	const qrScale = 0.43
-	const qrOffset = 6
+	_ = protocol
+	const qrRowHeight = 190.0
+	const qrColWidth = 34.0
+	const qrScale = 0.82
+	const qrOffset = 4
 
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
-	headers := []string{"链接", "图片", "到期时间"}
+	isDedicated := strings.EqualFold(strings.TrimSpace(rows[0].Mode), model.OrderModeDedicated)
+	headers := []string{"专线链接", "二维码", "到期日", "订单号"}
+	if !isDedicated {
+		headers = []string{"链接", "二维码", "到期日", "订单号"}
+	}
 	if includeRaw {
-		headers = append(headers, "原始Socks5")
+		if isDedicated {
+			headers = append([]string{"出口Socks5[IP:Port:User:Pass](可选)"}, headers...)
+		} else {
+			headers = append([]string{"原始Socks5"}, headers...)
+		}
 	}
 	for i, title := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		_ = f.SetCellValue(sheet, cell, title)
 	}
 	wrapStyle, _ := f.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{WrapText: true, Vertical: "top"}})
+	linkCol := "A"
+	qrCol := "B"
+	expiresCol := "C"
+	orderNoCol := "D"
+	rawCol := ""
+	if includeRaw {
+		rawCol = "A"
+		linkCol = "B"
+		qrCol = "C"
+		expiresCol = "D"
+		orderNoCol = "E"
+	}
 	for idx, row := range rows {
 		r := idx + 2
-		_ = f.SetCellValue(sheet, fmt.Sprintf("A%d", r), row.Link)
-		_ = f.SetCellValue(sheet, fmt.Sprintf("C%d", r), row.ExpiresAt.Format("2006-01-02 15:04:05"))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", linkCol, r), row.Link)
+		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", expiresCol, r), row.ExpiresAt.Format("2006-01-02 15:04:05"))
+		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", orderNoCol, r), row.OrderNo)
 		if includeRaw {
-			_ = f.SetCellValue(sheet, fmt.Sprintf("D%d", r), row.RawSocks5)
+			rawValue := row.RawSocks5
+			if isDedicated {
+				rawValue = row.RawSocks5
+			}
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), rawValue)
 		}
 		_ = f.SetRowHeight(sheet, r, qrRowHeight)
 		if len(row.QRCodeData) > 0 {
-			_ = f.AddPictureFromBytes(sheet, fmt.Sprintf("B%d", r), &excelize.Picture{
+			_ = f.AddPictureFromBytes(sheet, fmt.Sprintf("%s%d", qrCol, r), &excelize.Picture{
 				Extension: ".png",
 				File:      row.QRCodeData,
 				Format: &excelize.GraphicOptions{
@@ -611,44 +715,20 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 			})
 		}
 	}
-	_ = f.SetColWidth(sheet, "A", "A", 64)
-	_ = f.SetColWidth(sheet, "B", "B", qrColWidth)
-	_ = f.SetColWidth(sheet, "C", "C", 22)
 	if includeRaw {
-		_ = f.SetColWidth(sheet, "D", "D", 40)
+		_ = f.SetColWidth(sheet, "A", "A", 44)
 	}
-	endCol := "C"
+	_ = f.SetColWidth(sheet, linkCol, linkCol, 72)
+	_ = f.SetColWidth(sheet, qrCol, qrCol, qrColWidth)
+	_ = f.SetColWidth(sheet, expiresCol, expiresCol, 22)
+	_ = f.SetColWidth(sheet, orderNoCol, orderNoCol, 18)
 	if includeRaw {
-		endCol = "D"
+		_ = f.SetColWidth(sheet, rawCol, rawCol, 44)
 	}
+	endCol := orderNoCol
 	_ = f.SetCellStyle(sheet, "A1", endCol+"1", wrapStyle)
 	if len(rows) > 0 {
 		_ = f.SetCellStyle(sheet, "A2", fmt.Sprintf("%s%d", endCol, len(rows)+1), wrapStyle)
-	}
-	_ = f.SetCellValue(sheet, "F1", strings.ToUpper(protocol))
-	meta := "二维码参数表"
-	if _, err := f.NewSheet(meta); err == nil {
-		_ = f.SetCellValue(meta, "A1", "客户端")
-		_ = f.SetCellValue(meta, "B1", "行高(pt)")
-		_ = f.SetCellValue(meta, "C1", "列宽")
-		_ = f.SetCellValue(meta, "D1", "缩放")
-		_ = f.SetCellValue(meta, "E1", "备注")
-		_ = f.SetCellValue(meta, "A2", "Excel")
-		_ = f.SetCellValue(meta, "B2", 124)
-		_ = f.SetCellValue(meta, "C2", 22.5)
-		_ = f.SetCellValue(meta, "D2", 0.42)
-		_ = f.SetCellValue(meta, "E2", "二维码清晰且不拉伸")
-		_ = f.SetCellValue(meta, "A3", "WPS")
-		_ = f.SetCellValue(meta, "B3", 128)
-		_ = f.SetCellValue(meta, "C3", 23)
-		_ = f.SetCellValue(meta, "D3", 0.43)
-		_ = f.SetCellValue(meta, "E3", "边界稳定，避免覆盖文本")
-		_ = f.SetCellValue(meta, "A4", "当前采用")
-		_ = f.SetCellValue(meta, "B4", qrRowHeight)
-		_ = f.SetCellValue(meta, "C4", qrColWidth)
-		_ = f.SetCellValue(meta, "D4", qrScale)
-		_ = f.SetCellValue(meta, "E4", "兼容 Excel/WPS")
-		_ = f.SetColWidth(meta, "A", "E", 22)
 	}
 	body, err := f.WriteToBuffer()
 	if err != nil {

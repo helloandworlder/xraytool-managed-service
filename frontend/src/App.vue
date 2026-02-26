@@ -182,13 +182,22 @@ const streamMeta = reactive({ total: 0, sampled: 0, sample_percent: 100, success
 const streamRows = ref<Array<{ item_id: number; status: string; detail: string }>>([])
 const exportingOrderID = ref<number | null>(null)
 const exportCount = ref<number>(0)
+const exportFormat = ref<'txt' | 'xlsx'>('xlsx')
 const exportIncludeRawSocks5 = ref(false)
 const groupSocksModalOpen = ref(false)
 const groupCredModalOpen = ref(false)
+const groupGeoModalOpen = ref(false)
+const groupEditorOpen = ref(false)
+const groupEditorHeadOrderID = ref<number>(0)
+const groupEditorChildOrderIDs = ref<number[]>([])
 const groupTargetOrderID = ref<number>(0)
+const groupBatchChildOrderIDs = ref<number[]>([])
 const groupSocksLines = ref('')
 const groupCredLines = ref('')
 const groupCredRegenerate = ref(false)
+const groupGeoCountryCode = ref('')
+const groupGeoRegion = ref('')
+const groupGeoMappingLines = ref('')
 const groupRenewModalOpen = ref(false)
 const groupRenewHeadOrderID = ref<number>(0)
 const groupRenewDays = ref<number>(30)
@@ -215,6 +224,14 @@ const testResult = ref<Record<string, string> | null>(null)
 const batchTestResult = ref<Array<{ id: number; success: boolean; result?: Record<string, string>; error?: string }> | null>(null)
 const orderDetailOpen = ref(false)
 const orderDetailLoading = ref(false)
+const orderSearchKeyword = ref('')
+const orderModeFilter = ref<'all' | 'home' | 'dedicated'>('all')
+const orderStatusFilter = ref<'all' | 'active' | 'expired' | 'disabled'>('all')
+const deliverySearchKeyword = ref('')
+const orderPagination = reactive({ current: 1, pageSize: 12 })
+const deliveryPagination = reactive({ current: 1, pageSize: 12 })
+const orderEditCurrentInboundLines = ref('')
+const orderEditCurrentEgressLines = ref('')
 const batchMoreDays = ref(30)
 const batchRenewExpiresAt = ref('')
 const createForwardReuseHints = ref<string[]>([])
@@ -276,6 +293,63 @@ const orderRows = computed(() => {
 	return roots
 })
 
+function matchesOrderModeFilter(mode: string, filterValue: 'all' | 'home' | 'dedicated'): boolean {
+	if (filterValue === 'all') return true
+	if (filterValue === 'home') return isResidentialMode(mode)
+	return String(mode || '') === 'dedicated'
+}
+
+function orderSearchContent(order: any): string {
+	const parts: string[] = []
+	parts.push(String(order.id || ''))
+	parts.push(String(order.order_no || ''))
+	parts.push(String(order.name || ''))
+	parts.push(String(order.mode || ''))
+	parts.push(String(order.status || ''))
+	parts.push(String(order.customer?.name || ''))
+	parts.push(String(order.customer?.code || ''))
+	parts.push(String(order.dedicated_ingress?.domain || ''))
+	parts.push(String(order.dedicated_inbound?.protocol || ''))
+	parts.push(String(order.dedicated_protocol || ''))
+	for (const item of order.items || []) {
+		parts.push(String(item.ip || ''))
+		parts.push(String(item.port || ''))
+		parts.push(String(item.username || ''))
+		parts.push(String(item.forward_address || ''))
+		parts.push(String(item.forward_port || ''))
+	}
+	return parts.join(' ').toLowerCase()
+}
+
+function matchesOrderFilters(order: any): boolean {
+	if (!matchesOrderModeFilter(String(order.mode || ''), orderModeFilter.value)) return false
+	if (orderStatusFilter.value !== 'all' && String(order.status || '') !== orderStatusFilter.value) return false
+	const keyword = String(orderSearchKeyword.value || '').trim().toLowerCase()
+	if (!keyword) return true
+	return orderSearchContent(order).includes(keyword)
+}
+
+const filteredOrderRows = computed(() => {
+	const rows: any[] = []
+	for (const root of orderRows.value) {
+		const children = Array.isArray(root.children) ? root.children : []
+		const rootMatched = matchesOrderFilters(root)
+		if (children.length === 0) {
+			if (rootMatched) rows.push(root)
+			continue
+		}
+		if (rootMatched) {
+			rows.push(root)
+			continue
+		}
+		const childMatched = children.filter((child: any) => matchesOrderFilters(child))
+		if (childMatched.length > 0) {
+			rows.push({ ...root, children: childMatched })
+		}
+	}
+	return rows
+})
+
 const deliveryCustomerID = ref<number>(0)
 const deliveryMode = ref<'all' | 'home' | 'dedicated'>('all')
 const deliveryRows = computed(() =>
@@ -286,6 +360,11 @@ const deliveryRows = computed(() =>
 			if (deliveryMode.value === 'home') return isResidentialMode(String(row.mode || ''))
 			if (deliveryMode.value === 'dedicated') return String(row.mode || '') === 'dedicated'
 			return true
+		})
+		.filter((row) => {
+			const keyword = String(deliverySearchKeyword.value || '').trim().toLowerCase()
+			if (!keyword) return true
+			return orderSearchContent(row).includes(keyword)
 		})
 		.map((row) => ({ ...row, key: row.id }))
 )
@@ -345,6 +424,18 @@ const groupRenewCandidates = computed(() =>
 		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0))
 )
 
+const groupBatchCandidates = computed(() =>
+	panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(groupTargetOrderID.value || 0))
+		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0))
+)
+
+const groupEditorCandidates = computed(() =>
+	panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(groupEditorHeadOrderID.value || 0))
+		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0))
+)
+
 const importPreviewValid = computed(() => {
 	if ((panel.importPreview || []).length === 0) return false
 	return importPreviewFingerprint.value !== '' && importPreviewFingerprint.value === currentImportPreviewFingerprint()
@@ -358,11 +449,12 @@ const allSingboxSelected = computed(
 )
 
 const ordersColumns = [
+	{ title: '模式', dataIndex: 'mode', width: 110 },
 	{ title: 'ID', dataIndex: 'id', width: 80 },
+	{ title: '订单号', key: 'order_no', width: 170 },
 	{ title: '客户', key: 'customer', width: 180 },
 	{ title: '订单', key: 'order_name', width: 220 },
 	{ title: '状态', dataIndex: 'status', width: 110 },
-	{ title: '模式', dataIndex: 'mode', width: 110 },
 	{ title: '数量', dataIndex: 'quantity', width: 90 },
 	{ title: '线路信息', key: 'forward_summary', width: 280 },
 	{ title: '端口', dataIndex: 'port', width: 100 },
@@ -550,6 +642,20 @@ watch(
 		if (importPreviewFingerprint.value && importPreviewSource.value === 'singbox') {
 			importPreviewFingerprint.value = ''
 		}
+	}
+)
+
+watch(
+	() => [orderSearchKeyword.value, orderModeFilter.value, orderStatusFilter.value],
+	() => {
+		orderPagination.current = 1
+	}
+)
+
+watch(
+	() => [deliverySearchKeyword.value, deliveryMode.value, deliveryCustomerID.value],
+	() => {
+		deliveryPagination.current = 1
 	}
 )
 
@@ -842,6 +948,9 @@ function setQuickExpiry(days: number, target: 'create' | 'edit') {
 }
 
 function openOrderEdit(row: Order) {
+	if (groupEditorOpen.value) {
+		groupEditorOpen.value = false
+	}
 	orderEditForm.id = row.id
 	orderEditForm.customer_id = row.customer_id
 	orderEditForm.mode = row.mode
@@ -858,9 +967,49 @@ function openOrderEdit(row: Order) {
 	orderEditForm.dedicated_egress_lines = ''
 	orderEditForm.dedicated_credential_lines = ''
 	orderEditForm.regenerate_dedicated_credentials = false
+	orderEditCurrentInboundLines.value = (row.items || [])
+		.map((item) => {
+			if (String(row.mode || '') === 'dedicated') {
+				const host = String(row.dedicated_ingress?.domain || row.dedicated_entry?.domain || item.ip)
+				const port = dedicatedCopyPort(row)
+				return `${host}:${port}:${item.username}:${item.password}`
+			}
+			return `${item.ip}:${item.port}:${item.username}:${item.password}`
+		})
+		.join('\n')
+	orderEditCurrentEgressLines.value = (row.items || [])
+		.filter((item) => String(item.forward_address || '').trim() !== '' && Number(item.forward_port || 0) > 0)
+		.map((item) => `${item.forward_address}:${item.forward_port}:${item.forward_username || ''}:${item.forward_password || ''}`)
+		.join('\n')
 	editForwardReuseHints.value = []
 	orderEditOpen.value = true
 	void panel.loadAllocationPreview(row.customer_id, row.id)
+}
+
+async function copyOrderEditInboundLines() {
+	if (!String(orderEditCurrentInboundLines.value || '').trim()) {
+		message.warning('暂无可复制的当前入站凭据')
+		return
+	}
+	await navigator.clipboard.writeText(orderEditCurrentInboundLines.value)
+	message.success('当前入站凭据已复制')
+}
+
+async function copyOrderEditEgressLines() {
+	if (!String(orderEditCurrentEgressLines.value || '').trim()) {
+		message.warning('暂无可复制的当前出口Socks5')
+		return
+	}
+	await navigator.clipboard.writeText(orderEditCurrentEgressLines.value)
+	message.success('当前出口Socks5已复制')
+}
+
+function openOrderEditSmart(row: Order) {
+	if ((row as any).is_group_head) {
+		openGroupEditor(Number(row.id))
+		return
+	}
+	openOrderEdit(row)
 }
 
 async function saveOrderEdit() {
@@ -1013,8 +1162,17 @@ async function doBatchResync() {
 
 async function doBatchTest() {
 	if (panel.orderSelection.length === 0) return
+	const dedicatedSelected = panel.orders.filter((row) => panel.orderSelection.includes(Number(row.id)) && String(row.mode || '') === 'dedicated')
+	if (dedicatedSelected.length > 0) {
+		message.warning('已自动跳过专线订单测活')
+	}
+	const targetIDs = panel.orderSelection.filter((id) => {
+		const row = panel.orders.find((item) => Number(item.id) === Number(id))
+		return String(row?.mode || '') !== 'dedicated'
+	})
+	if (targetIDs.length === 0) return
 	try {
-		batchTestResult.value = await panel.batchTest(panel.orderSelection)
+		batchTestResult.value = await panel.batchTest(targetIDs)
 		const ok = batchTestResult.value.filter((r) => r.success).length
 		const fail = batchTestResult.value.length - ok
 		message.success(`批量测活完成，成功 ${ok}，失败 ${fail}`)
@@ -1026,10 +1184,9 @@ async function doBatchTest() {
 async function doBatchExport() {
 	if (panel.orderSelection.length === 0) return
 	try {
-		const res = await panel.batchExport(panel.orderSelection, exportIncludeRawSocks5.value)
+		const res = await panel.batchExport(panel.orderSelection, exportFormat.value, exportIncludeRawSocks5.value)
 		const header = String(res.headers?.['content-disposition'] || '')
-		const match = header.match(/filename="?([^";]+)"?/i)
-		const filename = match?.[1] || `orders-batch-${Date.now()}.zip`
+		const filename = parseContentDispositionFilename(header, `orders-batch-${Date.now()}.${exportFormat.value === 'txt' ? 'txt' : 'zip'}`)
 		downloadBlobFile(res.data, filename)
 	} catch (err) {
 		panel.setError(err)
@@ -1064,14 +1221,14 @@ async function exportOrder(orderID: number) {
 		if (Number(exportCount.value) > 0) {
 			params.set('count', String(Number(exportCount.value)))
 		}
-		params.set('format', 'xlsx')
+		params.set('format', exportFormat.value)
 		params.set('include_raw_socks5', exportIncludeRawSocks5.value ? 'true' : 'false')
-		params.set('shuffle', 'true')
+		params.set('shuffle', 'false')
 		const query = params.toString()
 		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'blob' })
 		const header = String(res.headers['content-disposition'] || '')
-		const match = header.match(/filename="?([^";]+)"?/i)
-		const filename = match?.[1] || `order-${orderID}-export.xlsx`
+		const ext = exportFormat.value === 'txt' ? 'txt' : 'xlsx'
+		const filename = parseContentDispositionFilename(header, `order-${orderID}-export.${ext}`)
 		downloadBlobFile(res.data, filename)
 	} catch (err) {
 		panel.setError(err)
@@ -1081,6 +1238,11 @@ async function exportOrder(orderID: number) {
 }
 
 async function testOrder(orderID: number) {
+	const order = panel.orders.find((row) => Number(row.id) === Number(orderID))
+	if (order && String(order.mode || '') === 'dedicated') {
+		message.warning('专线暂不支持测活')
+		return
+	}
   try {
     testingOrderID.value = orderID
     testResult.value = await panel.testOrder(orderID, Number(testSamplePercent.value))
@@ -1093,6 +1255,11 @@ async function testOrder(orderID: number) {
 }
 
 async function streamTestOrder(orderID: number) {
+	const order = panel.orders.find((row) => Number(row.id) === Number(orderID))
+	if (order && String(order.mode || '') === 'dedicated') {
+		message.warning('专线暂不支持流式测活')
+		return
+	}
 	streamTestOrderID.value = orderID
 	streamRows.value = []
 	streamMeta.total = 0
@@ -1539,8 +1706,71 @@ async function splitOrderHead(orderID: number) {
 
 function openGroupSocksModal(orderID: number) {
 	groupTargetOrderID.value = orderID
+	groupBatchChildOrderIDs.value = panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
+		.map((row) => Number(row.id))
 	groupSocksLines.value = ''
 	groupSocksModalOpen.value = true
+}
+
+function openGroupEditor(orderID: number) {
+	groupEditorHeadOrderID.value = orderID
+	groupEditorChildOrderIDs.value = panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
+		.map((row) => Number(row.id))
+	groupEditorOpen.value = true
+}
+
+function openGroupSocksModalFromEditor() {
+	groupTargetOrderID.value = Number(groupEditorHeadOrderID.value || 0)
+	groupBatchChildOrderIDs.value = groupEditorChildOrderIDs.value.map((v) => Number(v))
+	groupSocksLines.value = ''
+	groupSocksModalOpen.value = true
+}
+
+function openGroupCredModalFromEditor() {
+	groupTargetOrderID.value = Number(groupEditorHeadOrderID.value || 0)
+	groupBatchChildOrderIDs.value = groupEditorChildOrderIDs.value.map((v) => Number(v))
+	groupCredLines.value = ''
+	groupCredRegenerate.value = false
+	groupCredModalOpen.value = true
+}
+
+function openGroupRenewModalFromEditor() {
+	groupRenewHeadOrderID.value = Number(groupEditorHeadOrderID.value || 0)
+	groupRenewDays.value = Number(batchMoreDays.value || 30)
+	groupRenewExpiresAt.value = String(batchRenewExpiresAt.value || '')
+	groupRenewChildOrderIDs.value = groupEditorChildOrderIDs.value.map((v) => Number(v))
+	groupRenewModalOpen.value = true
+}
+
+function openGroupGeoModal(orderID: number) {
+	groupTargetOrderID.value = orderID
+	groupBatchChildOrderIDs.value = panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
+		.map((row) => Number(row.id))
+	groupGeoCountryCode.value = ''
+	groupGeoRegion.value = ''
+	groupGeoMappingLines.value = ''
+	groupGeoModalOpen.value = true
+}
+
+function openGroupGeoModalFromEditor() {
+	groupTargetOrderID.value = Number(groupEditorHeadOrderID.value || 0)
+	groupBatchChildOrderIDs.value = groupEditorChildOrderIDs.value.map((v) => Number(v))
+	groupGeoCountryCode.value = ''
+	groupGeoRegion.value = ''
+	groupGeoMappingLines.value = ''
+	groupGeoModalOpen.value = true
+}
+
+function openGroupHeadOrderEditFromEditor() {
+	const head = panel.orders.find((row) => Number(row.id) === Number(groupEditorHeadOrderID.value || 0))
+	if (!head) {
+		message.warning('组头订单不存在')
+		return
+	}
+	openOrderEdit(head)
 }
 
 async function submitGroupSocksUpdate() {
@@ -1550,12 +1780,16 @@ async function submitGroupSocksUpdate() {
 		message.warning('请粘贴 Socks5 列表')
 		return
 	}
+	if (groupBatchChildOrderIDs.value.length === 0) {
+		message.warning('请至少选择 1 个子订单')
+		return
+	}
 	try {
 		groupSocksSaving.value = true
-		await panel.updateOrderGroupSocks5(groupTargetOrderID.value, groupSocksLines.value)
+		await panel.updateOrderGroupSocks5Selected(groupTargetOrderID.value, groupBatchChildOrderIDs.value.map((v) => Number(v)), groupSocksLines.value)
 		groupSocksModalOpen.value = false
 		groupSocksLines.value = ''
-		message.success('组内 Socks5 已顺序更新')
+		message.success(`已更新 ${groupBatchChildOrderIDs.value.length} 个子订单的 Socks5`) 
 	} catch (err) {
 		panel.setError(err)
 		message.error(panel.error || '组内 Socks5 更新失败')
@@ -1572,8 +1806,7 @@ async function downloadGroupSocksTemplate() {
 	try {
 		const res = await panel.downloadOrderGroupSocks5Template(groupTargetOrderID.value)
 		const header = String(res.headers?.['content-disposition'] || '')
-		const match = header.match(/filename="?([^";]+)"?/i)
-		downloadBlobFile(res.data, match?.[1] || `group-${groupTargetOrderID.value}-socks5-template.xlsx`)
+		downloadBlobFile(res.data, parseContentDispositionFilename(header, `group-${groupTargetOrderID.value}-socks5-template.xlsx`))
 	} catch (err) {
 		panel.setError(err)
 	}
@@ -1657,6 +1890,9 @@ async function probeDedicatedCreateLines() {
 
 function openGroupCredModal(orderID: number) {
 	groupTargetOrderID.value = orderID
+	groupBatchChildOrderIDs.value = panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
+		.map((row) => Number(row.id))
 	groupCredLines.value = ''
 	groupCredRegenerate.value = false
 	groupCredModalOpen.value = true
@@ -1709,6 +1945,10 @@ async function submitGroupCredentialUpdate() {
 		message.warning('请粘贴凭据列表或启用随机重置')
 		return
 	}
+	if (groupBatchChildOrderIDs.value.length === 0) {
+		message.warning('请至少选择 1 个子订单')
+		return
+	}
 	const regenerate = groupCredRegenerate.value
 	if (regenerate) {
 		Modal.confirm({
@@ -1728,19 +1968,55 @@ async function submitGroupCredentialUpdate() {
 async function applyGroupCredentialUpdate(regenerate: boolean) {
 	try {
 		groupCredSaving.value = true
-		await panel.updateOrderGroupCredentials(groupTargetOrderID.value, {
+		await panel.updateOrderGroupCredentialsSelected(groupTargetOrderID.value, groupBatchChildOrderIDs.value.map((v) => Number(v)), {
 			lines: groupCredLines.value,
 			regenerate
 		})
 		groupCredModalOpen.value = false
 		groupCredLines.value = ''
 		groupCredRegenerate.value = false
-		message.success(regenerate ? '组内凭据已随机重置' : '组内凭据已顺序更新')
+		message.success(regenerate ? `已随机重置 ${groupBatchChildOrderIDs.value.length} 个子订单凭据` : `已顺序更新 ${groupBatchChildOrderIDs.value.length} 个子订单凭据`)
 	} catch (err) {
 		panel.setError(err)
 		message.error(panel.error || '组内凭据更新失败')
 	} finally {
 		groupCredSaving.value = false
+	}
+}
+
+async function submitGroupGeoUpdate() {
+	if (!groupTargetOrderID.value) return
+	if (groupBatchChildOrderIDs.value.length === 0) {
+		message.warning('请至少选择 1 个子订单')
+		return
+	}
+	try {
+		if (String(groupGeoMappingLines.value || '').trim()) {
+			await panel.updateOrderGroupEgressGeoByMapping(
+				groupTargetOrderID.value,
+				groupGeoMappingLines.value,
+				String(groupGeoCountryCode.value || '').trim(),
+				String(groupGeoRegion.value || '').trim()
+			)
+			groupGeoModalOpen.value = false
+			message.success('已按映射批量写入国家地区')
+			return
+		}
+		if (!String(groupGeoCountryCode.value || '').trim()) {
+			message.warning('请输入国家代码或提供映射行')
+			return
+		}
+		await panel.updateOrderGroupEgressGeo(
+			groupTargetOrderID.value,
+			groupBatchChildOrderIDs.value.map((v) => Number(v)),
+			String(groupGeoCountryCode.value || '').trim(),
+			String(groupGeoRegion.value || '').trim()
+		)
+		groupGeoModalOpen.value = false
+		message.success(`已更新 ${groupBatchChildOrderIDs.value.length} 个子订单国家地区`)
+	} catch (err) {
+		panel.setError(err)
+		message.error(panel.error || '批量写入国家地区失败')
 	}
 }
 
@@ -1752,8 +2028,7 @@ async function downloadGroupCredentialTemplate() {
 	try {
 		const res = await panel.downloadOrderGroupCredentialsTemplate(groupTargetOrderID.value)
 		const header = String(res.headers?.['content-disposition'] || '')
-		const match = header.match(/filename="?([^";]+)"?/i)
-		downloadBlobFile(res.data, match?.[1] || `group-${groupTargetOrderID.value}-credentials-template.xlsx`)
+		downloadBlobFile(res.data, parseContentDispositionFilename(header, `group-${groupTargetOrderID.value}-credentials-template.xlsx`))
 	} catch (err) {
 		panel.setError(err)
 	}
@@ -2012,8 +2287,7 @@ async function exportBackupDirect() {
 	try {
 		const res = await http.get('/api/db/backup/export', { responseType: 'blob' })
 		const header = String(res.headers['content-disposition'] || '')
-		const match = header.match(/filename="?([^";]+)"?/i)
-		const name = match?.[1] || `xraytool-backup-${Date.now()}.db`
+		const name = parseContentDispositionFilename(header, `xraytool-backup-${Date.now()}.db`)
 		const url = URL.createObjectURL(res.data)
 		const a = document.createElement('a')
 		a.href = url
@@ -2030,8 +2304,7 @@ async function downloadBackup(name: string) {
 	try {
 		const res = await panel.downloadBackup(name)
 		const header = String(res.headers['content-disposition'] || '')
-		const match = header.match(/filename="?([^";]+)"?/i)
-		const saveName = match?.[1] || name
+		const saveName = parseContentDispositionFilename(header, name)
 		const url = URL.createObjectURL(res.data)
 		const a = document.createElement('a')
 		a.href = url
@@ -2078,6 +2351,21 @@ function restoreBackup(name: string) {
 function downloadTextFile(text: string, filename: string) {
 	const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
 	downloadBlobFile(blob, filename)
+}
+
+function parseContentDispositionFilename(header: string, fallback: string): string {
+	const raw = String(header || '')
+	const encodedMatch = raw.match(/filename\*=UTF-8''([^;]+)/i)
+	if (encodedMatch?.[1]) {
+		try {
+			return decodeURIComponent(String(encodedMatch[1]).replace(/\+/g, '%20'))
+		} catch {
+			// ignore decode errors and fallback to filename
+		}
+	}
+	const filenameMatch = raw.match(/filename="?([^";]+)"?/i)
+	if (filenameMatch?.[1]) return filenameMatch[1]
+	return fallback
 }
 
 function downloadBlobFile(data: Blob, filename: string) {
@@ -2412,6 +2700,22 @@ function downloadBlobFile(data: Blob, filename: string) {
             <a-card :bordered="false" title="订单列表">
               <template #extra>
                 <a-space>
+				  <a-input v-model:value="orderSearchKeyword" size="small" style="width: 220px" placeholder="搜索: 订单号/客户/域名/IP/账号" allow-clear />
+				  <a-select v-model:value="orderModeFilter" size="small" style="width: 120px">
+					<a-select-option value="all">全部模式</a-select-option>
+					<a-select-option value="home">家宽</a-select-option>
+					<a-select-option value="dedicated">专线</a-select-option>
+				  </a-select>
+				  <a-select v-model:value="orderStatusFilter" size="small" style="width: 120px">
+					<a-select-option value="all">全部状态</a-select-option>
+					<a-select-option value="active">active</a-select-option>
+					<a-select-option value="expired">expired</a-select-option>
+					<a-select-option value="disabled">disabled</a-select-option>
+				  </a-select>
+				  <a-select v-model:value="exportFormat" size="small" style="width: 110px">
+					<a-select-option value="xlsx">导出XLSX</a-select-option>
+					<a-select-option value="txt">导出TXT</a-select-option>
+				  </a-select>
                   <span class="text-xs text-slate-500">已选 {{ panel.orderSelection.length }} 个</span>
                   <a-select v-model:value="testSamplePercent" size="small" style="width: 110px">
                     <a-select-option :value="100">测活100%</a-select-option>
@@ -2435,23 +2739,27 @@ function downloadBlobFile(data: Blob, filename: string) {
 
               <a-table
                 :columns="ordersColumns"
-                :data-source="orderRows"
+				:data-source="filteredOrderRows"
                 :row-selection="rowSelection"
                 :scroll="{ x: 1300 }"
-                :pagination="{ pageSize: 12 }"
+				:pagination="{ current: orderPagination.current, pageSize: orderPagination.pageSize, showSizeChanger: false, onChange: (page:number, pageSize:number) => { orderPagination.current = Number(page || 1); orderPagination.pageSize = Number(pageSize || 12) } }"
                 size="small"
               >
-                <template #bodyCell="{ column, record }">
+				<template #bodyCell="{ column, record }">
+				  <template v-if="column.key === 'order_no'">
+					<span class="font-mono text-xs">{{ record.order_no || '-' }}</span>
+				  </template>
 				  <template v-if="column.key === 'customer'">
 					{{ record.customer?.name || record.customer_id }}
 				  </template>
 				  <template v-else-if="column.key === 'order_name'">
-					<div class="text-xs">
-					  <div class="font-medium text-slate-700">{{ record.name || '-' }}</div>
-					  <div class="text-slate-500">
-						<span v-if="record.is_group_head">组头单</span>
-						<span v-else-if="record.parent_order_id">子单 #{{ record.sequence_no || '-' }}</span>
-						<span v-else>普通单</span>
+					  <div class="text-xs">
+						<div class="font-medium text-slate-700">{{ record.name || '-' }}</div>
+						<div class="text-slate-500">
+						  <span class="font-mono">{{ record.order_no || `OD-${record.id}` }}</span>
+							<span v-if="record.is_group_head">组头单</span>
+							<span v-else-if="record.parent_order_id">子单 #{{ record.sequence_no || '-' }}</span>
+							<span v-else>普通单</span>
 						<span class="ml-2" v-if="record.group_id">G{{ record.group_id }}</span>
 					  </div>
 					</div>
@@ -2474,17 +2782,19 @@ function downloadBlobFile(data: Blob, filename: string) {
                   <template v-else-if="column.key === 'action'">
 					<a-space :size="4" wrap>
 					  <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
-					  <a-button size="small" @click="openOrderEdit(record)">编辑</a-button>
+					  <a-button size="small" @click="openOrderEditSmart(record)">{{ record.is_group_head ? '组编辑' : '编辑' }}</a-button>
 					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
-					  <a-button size="small" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
+					  <a-button size="small" :disabled="record.mode === 'dedicated'" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
 					  <a-dropdown>
 						<a-button size="small">更多</a-button>
 						<template #overlay>
 						  <a-menu>
 							<a-menu-item @click="renewOrder(record.id)">续期</a-menu-item>
-							<a-menu-item @click="streamTestOrder(record.id)">流式测活</a-menu-item>
+							<a-menu-item :disabled="record.mode === 'dedicated'" @click="streamTestOrder(record.id)">流式测活</a-menu-item>
 							<a-menu-item v-if="isResidentialMode(record.mode)" @click="resetOrderCredentials(record.id)">刷新家宽凭据</a-menu-item>
 							<a-menu-item v-if="!record.parent_order_id && record.quantity > 1" @click="splitOrderHead(record.id)">拆分为子订单</a-menu-item>
+							<a-menu-item v-if="record.is_group_head" @click="openGroupEditor(record.id)">组编辑工作台</a-menu-item>
+							<a-menu-item v-if="record.is_group_head" @click="openGroupGeoModal(record.id)">批量设置国家地区</a-menu-item>
 							<a-menu-item v-if="record.is_group_head" @click="openGroupSocksModal(record.id)">组内顺序改 Socks5</a-menu-item>
 							<a-menu-item v-if="record.is_group_head" @click="openGroupCredModal(record.id)">组内批量改凭据</a-menu-item>
 							<a-menu-item v-if="record.is_group_head" @click="openGroupRenewModal(record.id)">组内部分续期</a-menu-item>
@@ -2521,6 +2831,7 @@ function downloadBlobFile(data: Blob, filename: string) {
 			<a-card :bordered="false" title="发货控制台">
 			  <template #extra>
 				<a-space>
+				  <a-input v-model:value="deliverySearchKeyword" style="width:220px" placeholder="搜索: 订单号/客户/域名/IP/账号" allow-clear />
 				  <a-select v-model:value="deliveryCustomerID" style="width:180px" placeholder="客户筛选">
 					<a-select-option :value="0">全部客户</a-select-option>
 					<a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}</a-select-option>
@@ -2530,20 +2841,27 @@ function downloadBlobFile(data: Blob, filename: string) {
 					<a-select-option value="home">家宽</a-select-option>
 					<a-select-option value="dedicated">专线</a-select-option>
 				  </a-select>
+				  <a-select v-model:value="exportFormat" size="small" style="width: 110px">
+					<a-select-option value="xlsx">导出XLSX</a-select-option>
+					<a-select-option value="txt">导出TXT</a-select-option>
+				  </a-select>
 				</a-space>
 			  </template>
 			  <a-alert class="mb-3" type="info" show-icon message="订单管理与发货已分离：本页用于导出、复制发货内容、刷新家宽凭据。" />
-			  <a-table :data-source="deliveryRows" :row-key="(row:any)=>row.id" size="small" :pagination="{ pageSize: 12 }">
-				<a-table-column title="订单" key="name" width="230">
+			  <a-table :data-source="deliveryRows" :row-key="(row:any)=>row.id" size="small" :pagination="{ current: deliveryPagination.current, pageSize: deliveryPagination.pageSize, showSizeChanger: false, onChange: (page:number, pageSize:number) => { deliveryPagination.current = Number(page || 1); deliveryPagination.pageSize = Number(pageSize || 12) } }">
+				<a-table-column title="类型" key="mode" width="120">
+				  <template #default="{ record }">
+					<a-tag :color="record.mode === 'dedicated' ? 'magenta' : 'cyan'">{{ record.mode === 'dedicated' ? '专线' : '家宽' }}</a-tag>
+				  </template>
+				</a-table-column>
+				<a-table-column title="订单" key="name" width="280">
 				  <template #default="{ record }">#{{ record.id }} / {{ record.name || '-' }}</template>
 				</a-table-column>
 				<a-table-column title="客户" key="customer" width="160">
 				  <template #default="{ record }">{{ record.customer?.name || record.customer_id }}</template>
 				</a-table-column>
-				<a-table-column title="类型" key="mode" width="120">
-				  <template #default="{ record }">
-					<a-tag :color="record.mode === 'dedicated' ? 'magenta' : 'cyan'">{{ record.mode === 'dedicated' ? '专线' : '家宽' }}</a-tag>
-				  </template>
+				<a-table-column title="订单号" key="order_no" width="170">
+				  <template #default="{ record }"><span class="font-mono text-xs">{{ record.order_no || '-' }}</span></template>
 				</a-table-column>
 				<a-table-column title="到期" key="expires" width="180">
 				  <template #default="{ record }">{{ formatTime(record.expires_at) }}</template>
@@ -3046,6 +3364,7 @@ function downloadBlobFile(data: Blob, filename: string) {
       <div v-else-if="panel.selectedOrder">
         <a-descriptions bordered :column="2" size="small" class="mb-3">
           <a-descriptions-item label="订单ID">#{{ panel.selectedOrder.id }}</a-descriptions-item>
+          <a-descriptions-item label="订单号"><span class="font-mono">{{ panel.selectedOrder.order_no || '-' }}</span></a-descriptions-item>
           <a-descriptions-item label="客户">{{ panel.selectedOrder.customer?.name || panel.selectedOrder.customer_id }}</a-descriptions-item>
           <a-descriptions-item label="状态"><a-tag :color="statusColor(panel.selectedOrder.status)">{{ panel.selectedOrder.status }}</a-tag></a-descriptions-item>
           <a-descriptions-item label="模式"><a-tag :color="modeColor(panel.selectedOrder.mode)">{{ modeLabel(panel.selectedOrder.mode) }}</a-tag></a-descriptions-item>
@@ -3138,6 +3457,20 @@ function downloadBlobFile(data: Blob, filename: string) {
               {{ row.name || row.domain }} / {{ row.domain }}:{{ row.ingress_port }} / {{ (row.country_code || '--').toUpperCase() }} {{ row.region || '' }} <span v-if="!row.enabled">(停用)</span>
             </a-select-option>
           </a-select>
+		  <div class="mt-2">
+			<div class="mb-1 text-xs text-slate-500">当前入站Socks5凭据(可复制)</div>
+			<a-space class="mb-1">
+			  <a-button size="small" @click="copyOrderEditInboundLines">一键复制当前入站</a-button>
+			</a-space>
+			<a-textarea :value="orderEditCurrentInboundLines" :rows="3" readonly />
+		  </div>
+		  <div class="mt-2">
+			<div class="mb-1 text-xs text-slate-500">当前出站Socks5(可复制)</div>
+			<a-space class="mb-1">
+			  <a-button size="small" @click="copyOrderEditEgressLines">一键复制当前出站</a-button>
+			</a-space>
+			<a-textarea :value="orderEditCurrentEgressLines" :rows="3" readonly />
+		  </div>
           <a-textarea v-model:value="orderEditForm.dedicated_egress_lines" class="mt-2" :rows="4" placeholder="可选: 顺序更新上游，每行 ip:port:user:pass" />
           <a-textarea v-model:value="orderEditForm.dedicated_credential_lines" class="mt-2" :rows="3" placeholder="可选: 顺序更新入站凭据，每行 user:pass[:uuid]" />
           <a-checkbox v-model:checked="orderEditForm.regenerate_dedicated_credentials" class="mt-2">随机重置组内凭据</a-checkbox>
@@ -3221,6 +3554,13 @@ function downloadBlobFile(data: Blob, filename: string) {
 
 	<a-modal v-model:open="groupSocksModalOpen" title="顺序更新组内 Socks5" :confirm-loading="groupSocksSaving" @ok="submitGroupSocksUpdate">
 	  <a-alert type="info" show-icon message="每行格式: ip:port:user:pass；顺序必须与子订单顺序一致" class="mb-2" />
+	  <a-checkbox-group v-model:value="groupBatchChildOrderIDs" style="width:100%">
+		<a-space direction="vertical" style="width:100%" class="mb-2">
+		  <a-checkbox v-for="row in groupBatchCandidates" :key="row.id" :value="row.id">
+			#{{ row.id }} / {{ row.name }} / {{ row.sequence_no || '-' }}
+		  </a-checkbox>
+		</a-space>
+	  </a-checkbox-group>
 	  <a-space class="mb-2">
 		<a-button size="small" @click="downloadGroupSocksTemplate">下载模板</a-button>
 		<a-upload :show-upload-list="false" accept=".xlsx" :before-upload="beforeUploadGroupSocksXLSX">
@@ -3233,6 +3573,13 @@ function downloadBlobFile(data: Blob, filename: string) {
 
 	<a-modal v-model:open="groupCredModalOpen" title="批量更新组内入站凭据" :confirm-loading="groupCredSaving" @ok="submitGroupCredentialUpdate">
 	  <a-alert type="info" show-icon message="每行格式: user:pass[:uuid]；不填 uuid 自动生成" class="mb-2" />
+	  <a-checkbox-group v-model:value="groupBatchChildOrderIDs" style="width:100%">
+		<a-space direction="vertical" style="width:100%" class="mb-2">
+		  <a-checkbox v-for="row in groupBatchCandidates" :key="row.id" :value="row.id">
+			#{{ row.id }} / {{ row.name }} / {{ row.sequence_no || '-' }}
+		  </a-checkbox>
+		</a-space>
+	  </a-checkbox-group>
 	  <a-space class="mb-2">
 		<a-button size="small" @click="downloadGroupCredentialTemplate">下载模板</a-button>
 		<a-upload :show-upload-list="false" accept=".xlsx" :before-upload="beforeUploadGroupCredXLSX">
@@ -3242,6 +3589,43 @@ function downloadBlobFile(data: Blob, filename: string) {
 	  </a-space>
 	  <a-checkbox v-model:checked="groupCredRegenerate" class="mb-2">忽略文本，随机重置全组凭据</a-checkbox>
 	  <a-textarea v-model:value="groupCredLines" :rows="8" :disabled="groupCredRegenerate" placeholder="按顺序粘贴凭据" />
+	</a-modal>
+
+	<a-modal v-model:open="groupGeoModalOpen" title="批量设置国家地区" @ok="submitGroupGeoUpdate">
+	  <a-alert class="mb-2" type="info" show-icon message="支持两种方式：A) 统一赋值；B) 映射行（ip:port:user:pass|US|Virginia）" />
+	  <a-checkbox-group v-model:value="groupBatchChildOrderIDs" style="width:100%">
+		<a-space direction="vertical" style="width:100%" class="mb-2">
+		  <a-checkbox v-for="row in groupBatchCandidates" :key="row.id" :value="row.id">
+			#{{ row.id }} / {{ row.name }} / {{ row.sequence_no || '-' }}
+		  </a-checkbox>
+		</a-space>
+	  </a-checkbox-group>
+	  <a-space class="mb-2" style="width:100%">
+		<a-input v-model:value="groupGeoCountryCode" placeholder="国家代码，如 US" />
+		<a-input v-model:value="groupGeoRegion" placeholder="地区，如 Virginia" />
+	  </a-space>
+	  <a-textarea v-model:value="groupGeoMappingLines" :rows="7" placeholder="可选映射行\nip:port:user:pass|US|Virginia\nip:port:user:pass|MX|Jalisco" />
+	</a-modal>
+
+	<a-modal v-model:open="groupEditorOpen" title="组编辑工作台" :footer="null" width="860px">
+	  <a-alert class="mb-2" type="info" show-icon message="先多选子订单，再执行批量操作；也可直接点单条编辑。" />
+	  <a-space class="mb-2" wrap>
+		<a-button @click="openGroupHeadOrderEditFromEditor">编辑组头信息</a-button>
+		<a-button type="primary" @click="openGroupSocksModalFromEditor">批量改 Socks5</a-button>
+		<a-button @click="openGroupCredModalFromEditor">批量改凭据</a-button>
+		<a-button @click="openGroupGeoModalFromEditor">批量设国家地区</a-button>
+		<a-button @click="openGroupRenewModalFromEditor">部分续期</a-button>
+	  </a-space>
+	  <a-checkbox-group v-model:value="groupEditorChildOrderIDs" style="width:100%">
+		<a-space direction="vertical" style="width:100%">
+		  <div v-for="row in groupEditorCandidates" :key="row.id" class="rounded border border-slate-200 px-2 py-2">
+			<a-space style="width:100%;justify-content:space-between" align="center">
+			  <a-checkbox :value="row.id">#{{ row.id }} / {{ row.name }} / 到期 {{ formatTime(row.expires_at) }}</a-checkbox>
+			  <a-button size="small" @click="openOrderEdit(row)">单独编辑</a-button>
+			</a-space>
+		  </div>
+		</a-space>
+	  </a-checkbox-group>
 	</a-modal>
 
 	<a-modal v-model:open="groupRenewModalOpen" title="部分续期子订单" :confirm-loading="groupRenewSaving" @ok="submitGroupSelectedRenew">
