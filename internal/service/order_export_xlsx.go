@@ -6,6 +6,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"math/rand"
 	"net/url"
 	"sort"
@@ -16,6 +20,9 @@ import (
 
 	"github.com/skip2/go-qrcode"
 	"github.com/xuri/excelize/v2"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 )
 
 type XLSXExportOptions struct {
@@ -178,7 +185,11 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if strings.TrimSpace(link) == "" {
 				continue
 			}
-			qr, err := buildSingleProtocolQRCodeImage(link)
+			qrTitle := ""
+			if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+				qrTitle = tag
+			}
+			qr, err := buildSingleProtocolQRCodeImage(link, qrTitle)
 			if err != nil {
 				return nil, err
 			}
@@ -638,11 +649,39 @@ func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, proto
 	}
 }
 
-func buildSingleProtocolQRCodeImage(link string) ([]byte, error) {
+func buildSingleProtocolQRCodeImage(link string, title string) ([]byte, error) {
 	if strings.TrimSpace(link) == "" {
 		return nil, nil
 	}
-	return qrcode.Encode(link, qrcode.Medium, 420)
+	qrPNG, err := qrcode.Encode(link, qrcode.Medium, 420)
+	if err != nil {
+		return nil, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return qrPNG, nil
+	}
+	decoded, err := png.Decode(bytes.NewReader(qrPNG))
+	if err != nil {
+		return qrPNG, nil
+	}
+	bounds := decoded.Bounds()
+	bannerHeight := 28
+	canvas := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()+bannerHeight))
+	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	draw.Draw(canvas, image.Rect(0, bannerHeight, bounds.Dx(), bannerHeight+bounds.Dy()), decoded, bounds.Min, draw.Src)
+	d := &font.Drawer{
+		Dst:  canvas,
+		Src:  image.NewUniform(color.Black),
+		Face: basicfont.Face7x13,
+		Dot:  fixed.P(8, 18),
+	}
+	d.DrawString(title)
+	buf := bytes.NewBuffer(nil)
+	if err := png.Encode(buf, canvas); err != nil {
+		return qrPNG, nil
+	}
+	return buf.Bytes(), nil
 }
 
 func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]byte, error) {
@@ -657,7 +696,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	isDedicated := strings.EqualFold(strings.TrimSpace(rows[0].Mode), model.OrderModeDedicated)
 	headers := []string{"链接", "二维码", "到期日", "订单号"}
 	if isDedicated {
-		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
+		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "入口Socks5(Domain:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
 	} else if includeRaw {
 		headers = append([]string{"原始Socks5"}, headers...)
 	}
@@ -671,12 +710,14 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	expiresCol := "C"
 	orderNoCol := "D"
 	rawCol := ""
+	inboundCol := ""
 	if isDedicated {
 		rawCol = "A"
-		linkCol = "B"
-		qrCol = "C"
-		expiresCol = "D"
-		orderNoCol = "E"
+		inboundCol = "B"
+		linkCol = "C"
+		qrCol = "D"
+		expiresCol = "E"
+		orderNoCol = "F"
 	} else if includeRaw {
 		rawCol = "A"
 		linkCol = "B"
@@ -691,6 +732,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", orderNoCol, r), row.OrderNo)
 		if isDedicated {
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", inboundCol, r), row.DomainLine)
 		} else if includeRaw {
 			rawValue := row.RawSocks5
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), rawValue)
@@ -714,11 +756,14 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	if isDedicated || includeRaw {
 		_ = f.SetColWidth(sheet, "A", "A", 44)
 	}
+	if isDedicated {
+		_ = f.SetColWidth(sheet, inboundCol, inboundCol, 44)
+	}
 	_ = f.SetColWidth(sheet, linkCol, linkCol, 72)
 	_ = f.SetColWidth(sheet, qrCol, qrCol, qrColWidth)
 	_ = f.SetColWidth(sheet, expiresCol, expiresCol, 22)
 	_ = f.SetColWidth(sheet, orderNoCol, orderNoCol, 18)
-	if isDedicated || includeRaw {
+	if includeRaw {
 		_ = f.SetColWidth(sheet, rawCol, rawCol, 44)
 	}
 	endCol := orderNoCol

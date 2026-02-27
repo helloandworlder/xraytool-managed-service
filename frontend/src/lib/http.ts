@@ -2,7 +2,7 @@ import axios from 'axios'
 
 export const http = axios.create({
   baseURL: '/',
-  timeout: 12000
+  timeout: 20000
 })
 
 export function setAuthToken(token: string) {

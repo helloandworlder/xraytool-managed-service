@@ -360,7 +360,7 @@ export const usePanelStore = defineStore('panel', {
       this.selectedOrder = res.data
     },
     async createOrder(payload: Record<string, unknown>) {
-		const res = await http.post('/api/orders', payload)
+		const res = await http.post('/api/orders', payload, { timeout: 120000 })
       await this.loadOrders()
       await this.loadOversell(this.oversellCustomerID)
       const customerID = Number(payload.customer_id || 0)
@@ -374,7 +374,7 @@ export const usePanelStore = defineStore('panel', {
 		return { order, warnings } as OrderSubmitResult
     },
     async updateOrder(orderID: number, payload: Record<string, unknown>) {
-      const res = await http.put(`/api/orders/${orderID}`, payload)
+      const res = await http.put(`/api/orders/${orderID}`, payload, { timeout: 120000 })
       await this.loadOrders()
       await this.loadOversell(this.oversellCustomerID)
       const customerID = this.orders.find((o) => o.id === orderID)?.customer_id
@@ -631,7 +631,7 @@ export const usePanelStore = defineStore('panel', {
       expires_at: string
       rows: ImportPreviewRow[]
     }) {
-      await http.post('/api/orders/import/confirm', payload)
+      await http.post('/api/orders/import/confirm', payload, { timeout: 120000 })
       await this.loadOrders()
       await this.loadOversell(this.oversellCustomerID)
       this.setNotice('导入成功并纳入生命周期')
