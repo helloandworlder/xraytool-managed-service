@@ -6,10 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"image"
-	"image/color"
-	"image/draw"
-	"image/png"
 	"math/rand"
 	"net/url"
 	"sort"
@@ -20,9 +16,6 @@ import (
 
 	"github.com/skip2/go-qrcode"
 	"github.com/xuri/excelize/v2"
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/basicfont"
-	"golang.org/x/image/math/fixed"
 )
 
 type XLSXExportOptions struct {
@@ -46,6 +39,7 @@ type xlsxExportRow struct {
 	Link         string
 	DomainLine   string
 	RawSocks5    string
+	QRTag        string
 	QRCodeData   []byte
 }
 
@@ -185,11 +179,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if strings.TrimSpace(link) == "" {
 				continue
 			}
-			qrTitle := ""
-			if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
-				qrTitle = tag
-			}
-			qr, err := buildSingleProtocolQRCodeImage(link, qrTitle)
+			qr, err := buildSingleProtocolQRCodeImage(link, "")
 			if err != nil {
 				return nil, err
 			}
@@ -228,6 +218,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 				Link:         link,
 				DomainLine:   domainLine,
 				RawSocks5:    rawSocks,
+				QRTag:        tag,
 				QRCodeData:   qr,
 			})
 		}
@@ -653,43 +644,17 @@ func buildSingleProtocolQRCodeImage(link string, title string) ([]byte, error) {
 	if strings.TrimSpace(link) == "" {
 		return nil, nil
 	}
-	qrPNG, err := qrcode.Encode(link, qrcode.Medium, 420)
-	if err != nil {
-		return nil, err
-	}
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return qrPNG, nil
-	}
-	decoded, err := png.Decode(bytes.NewReader(qrPNG))
-	if err != nil {
-		return qrPNG, nil
-	}
-	bounds := decoded.Bounds()
-	bannerHeight := 28
-	canvas := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()+bannerHeight))
-	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
-	draw.Draw(canvas, image.Rect(0, bannerHeight, bounds.Dx(), bannerHeight+bounds.Dy()), decoded, bounds.Min, draw.Src)
-	d := &font.Drawer{
-		Dst:  canvas,
-		Src:  image.NewUniform(color.Black),
-		Face: basicfont.Face7x13,
-		Dot:  fixed.P(8, 18),
-	}
-	d.DrawString(title)
-	buf := bytes.NewBuffer(nil)
-	if err := png.Encode(buf, canvas); err != nil {
-		return qrPNG, nil
-	}
-	return buf.Bytes(), nil
+	_ = title
+	return qrcode.Encode(link, qrcode.Medium, 420)
 }
 
 func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]byte, error) {
 	_ = protocol
-	const qrRowHeight = 190.0
+	const qrRowHeight = 208.0
 	const qrColWidth = 34.0
 	const qrScale = 0.55
 	const qrOffset = 4
+	const qrTitleOffsetY = 28
 
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
@@ -705,6 +670,10 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		_ = f.SetCellValue(sheet, cell, title)
 	}
 	wrapStyle, _ := f.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{WrapText: true, Vertical: "top"}})
+	qrTagStyle, _ := f.NewStyle(&excelize.Style{
+		Alignment: &excelize.Alignment{WrapText: true, Vertical: "top", Horizontal: "center"},
+		Font:      &excelize.Font{Size: 12},
+	})
 	linkCol := "A"
 	qrCol := "B"
 	expiresCol := "C"
@@ -731,6 +700,10 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", expiresCol, r), row.ExpiresAt.Format("2006-01-02 15:04:05"))
 		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", orderNoCol, r), row.OrderNo)
 		if isDedicated {
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", qrCol, r), row.QRTag)
+			_ = f.SetCellStyle(sheet, fmt.Sprintf("%s%d", qrCol, r), fmt.Sprintf("%s%d", qrCol, r), qrTagStyle)
+		}
+		if isDedicated {
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", inboundCol, r), row.DomainLine)
 		} else if includeRaw {
@@ -744,7 +717,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 				File:      row.QRCodeData,
 				Format: &excelize.GraphicOptions{
 					OffsetX:         qrOffset,
-					OffsetY:         qrOffset,
+					OffsetY:         qrOffset + qrTitleOffsetY,
 					ScaleX:          qrScale,
 					ScaleY:          qrScale,
 					LockAspectRatio: true,
@@ -770,6 +743,12 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	_ = f.SetCellStyle(sheet, "A1", endCol+"1", wrapStyle)
 	if len(rows) > 0 {
 		_ = f.SetCellStyle(sheet, "A2", fmt.Sprintf("%s%d", endCol, len(rows)+1), wrapStyle)
+		if isDedicated {
+			for idx := range rows {
+				r := idx + 2
+				_ = f.SetCellStyle(sheet, fmt.Sprintf("%s%d", qrCol, r), fmt.Sprintf("%s%d", qrCol, r), qrTagStyle)
+			}
+		}
 	}
 	body, err := f.WriteToBuffer()
 	if err != nil {

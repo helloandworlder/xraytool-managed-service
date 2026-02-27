@@ -14,7 +14,7 @@ func TestWritePreviewXLSXFile(t *testing.T) {
 	if outputPath == "" {
 		t.Skip("set XRAYTOOL_PREVIEW_XLSX_PATH to enable preview xlsx generation")
 	}
-	qr, err := buildSingleProtocolQRCodeImage("vless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test", "美国-1.2.3.4")
+	qr, err := buildSingleProtocolQRCodeImage("vless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test", "")
 	if err != nil {
 		t.Fatalf("build qr failed: %v", err)
 	}
@@ -25,6 +25,7 @@ func TestWritePreviewXLSXFile(t *testing.T) {
 			DomainLine: "line.example.com:443:user01:pass01",
 			Link:       "vless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test",
 			RawSocks5:  "10.0.0.8:1080:user01:pass01",
+			QRTag:      "美国-1.2.3.4",
 			ExpiresAt:  time.Date(2026, 2, 27, 13, 14, 15, 0, time.UTC),
 			QRCodeData: qr,
 		},

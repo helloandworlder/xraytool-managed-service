@@ -92,38 +92,8 @@ func TestBuildSingleProtocolQRCodeImageLargerSize(t *testing.T) {
 	if cfg.Width < 400 || cfg.Height < 400 {
 		t.Fatalf("expected larger qr size, got %dx%d", cfg.Width, cfg.Height)
 	}
-}
-
-func TestBuildSingleProtocolQRCodeImageWithTitleBanner(t *testing.T) {
-	img, err := buildSingleProtocolQRCodeImage("socks://YWJj", "美国-1.2.3.4")
-	if err != nil {
-		t.Fatalf("buildSingleProtocolQRCodeImage failed: %v", err)
-	}
-	decoded, _, err := image.Decode(bytes.NewReader(img))
-	if err != nil {
-		t.Fatalf("decode image failed: %v", err)
-	}
-	bounds := decoded.Bounds()
-	if bounds.Dy() <= bounds.Dx() {
-		t.Fatalf("expected banner height > width, got %dx%d", bounds.Dx(), bounds.Dy())
-	}
-	nonWhite := 0
-	for y := 0; y < 24; y++ {
-		for x := 0; x < bounds.Dx(); x++ {
-			r, g, b, _ := decoded.At(x, y).RGBA()
-			if r < 0xffff || g < 0xffff || b < 0xffff {
-				nonWhite++
-				if nonWhite > 12 {
-					break
-				}
-			}
-		}
-		if nonWhite > 12 {
-			break
-		}
-	}
-	if nonWhite == 0 {
-		t.Fatalf("expected title pixels in top banner")
+	if cfg.Width != cfg.Height {
+		t.Fatalf("qr image should stay square, got %dx%d", cfg.Width, cfg.Height)
 	}
 }
 
@@ -139,6 +109,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 			DomainLine: "line.example.com:443:user01:pass01",
 			Link:       "vless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test",
 			RawSocks5:  "10.0.0.8:1080:user01:pass01",
+			QRTag:      "美国-1.2.3.4",
 			ExpiresAt:  time.Date(2026, 2, 27, 13, 14, 15, 0, time.UTC),
 			QRCodeData: qr,
 		},
@@ -195,6 +166,31 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("unexpected inbound cell: %q", inbound)
 	}
 
+	qrTag, err := book.GetCellValue(sheet, "D2")
+	if err != nil {
+		t.Fatalf("get qr tag cell failed: %v", err)
+	}
+	if strings.TrimSpace(qrTag) != "美国-1.2.3.4" {
+		t.Fatalf("unexpected qr tag cell: %q", qrTag)
+	}
+	styleID, err := book.GetCellStyle(sheet, "D2")
+	if err != nil {
+		t.Fatalf("get qr tag style failed: %v", err)
+	}
+	style, err := book.GetStyle(styleID)
+	if err != nil {
+		t.Fatalf("get qr tag style detail failed: %v", err)
+	}
+	if style == nil || style.Alignment == nil {
+		t.Fatalf("qr tag style alignment is missing")
+	}
+	if strings.ToLower(strings.TrimSpace(style.Alignment.Horizontal)) != "center" {
+		t.Fatalf("qr tag should be horizontally centered, got: %q", style.Alignment.Horizontal)
+	}
+	if strings.ToLower(strings.TrimSpace(style.Alignment.Vertical)) != "top" {
+		t.Fatalf("qr tag should be top aligned, got: %q", style.Alignment.Vertical)
+	}
+
 	orderNo, err := book.GetCellValue(sheet, "F2")
 	if err != nil {
 		t.Fatalf("get order_no cell failed: %v", err)
@@ -217,6 +213,14 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 	}
 	if len(pics) == 0 || len(pics[0].File) == 0 {
 		t.Fatalf("expected qr image attached in D2")
+	}
+	if pics[0].Format == nil || pics[0].Format.OffsetY < 20 {
+		t.Fatalf("expected qr image moved down for top tag, offsetY=%v", func() int {
+			if pics[0].Format == nil {
+				return 0
+			}
+			return pics[0].Format.OffsetY
+		}())
 	}
 }
 
