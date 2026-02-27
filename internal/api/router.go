@@ -143,8 +143,10 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/orders/:id/group/update-egress-geo/mapping", a.updateOrderGroupEgressGeoByMapping)
 	secure.POST("/orders/:id/group/renew-selected", a.renewOrderGroupSelected)
 	secure.POST("/orders/:id/deactivate", a.deactivateOrder)
+	secure.POST("/orders/:id/activate", a.activateOrder)
 	secure.POST("/orders/:id/renew", a.renewOrder)
 	secure.POST("/orders/batch/deactivate", a.batchDeactivateOrders)
+	secure.POST("/orders/batch/activate", a.batchActivateOrders)
 	secure.POST("/orders/batch/renew", a.batchRenewOrders)
 	secure.POST("/orders/batch/resync", a.batchResyncOrders)
 	secure.POST("/orders/batch/test", a.batchTestOrders)
@@ -1457,6 +1459,18 @@ func (a *API) deactivateOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (a *API) activateOrder(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.orders.ActivateOrder(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (a *API) renewOrder(c *gin.Context) {
 	id, ok := parseUintParam(c, "id")
 	if !ok {
@@ -1503,6 +1517,22 @@ func (a *API) batchDeactivateOrders(c *gin.Context) {
 		req.Status = model.OrderStatusDisabled
 	}
 	results := a.orders.BatchDeactivate(c.Request.Context(), req.OrderIDs, req.Status)
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+func (a *API) batchActivateOrders(c *gin.Context) {
+	var req struct {
+		OrderIDs []uint `json:"order_ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.OrderIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is empty"})
+		return
+	}
+	results := a.orders.BatchActivate(c.Request.Context(), req.OrderIDs)
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 

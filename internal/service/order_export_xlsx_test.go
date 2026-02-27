@@ -103,7 +103,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		{
 			Mode:       model.OrderModeDedicated,
 			OrderNo:    "OD260227000001",
-			Link:       "line.example.com:443:user01:pass01\nvless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test",
+			Link:       "vless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test",
 			RawSocks5:  "10.0.0.8:1080:user01:pass01",
 			ExpiresAt:  time.Date(2026, 2, 27, 13, 14, 15, 0, time.UTC),
 			QRCodeData: qr,
@@ -129,7 +129,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("expected header row")
 	}
 	wantHeaders := []string{
-		"出口Socks5[IP:Port:User:Pass](可选)",
+		"Socks5 出口(IP:Port:User:Pass)",
 		"专线链接",
 		"二维码",
 		"到期日",
@@ -160,11 +160,63 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("unexpected order_no cell: %q", orderNo)
 	}
 
+	linkValue, err := book.GetCellValue(sheet, "B2")
+	if err != nil {
+		t.Fatalf("get link cell failed: %v", err)
+	}
+	if strings.Contains(linkValue, "line.example.com:443:user01:pass01") {
+		t.Fatalf("link cell should not merge socks5 outbound text, got: %q", linkValue)
+	}
+
 	pics, err := book.GetPictures(sheet, "C2")
 	if err != nil {
 		t.Fatalf("get pictures failed: %v", err)
 	}
 	if len(pics) == 0 || len(pics[0].File) == 0 {
 		t.Fatalf("expected qr image attached in C2")
+	}
+}
+
+func TestBuildOrdersXLSXDedicatedAlwaysSeparatesOutboundColumn(t *testing.T) {
+	rows := []xlsxExportRow{
+		{
+			Mode:      model.OrderModeDedicated,
+			OrderNo:   "OD260227000002",
+			Link:      "vmess://test-payload",
+			RawSocks5: "10.0.0.9:1080:user02:pass02",
+			ExpiresAt: time.Date(2026, 3, 1, 10, 11, 12, 0, time.UTC),
+		},
+	}
+	body, err := buildOrdersXLSX(rows, model.DedicatedFeatureVmess, false)
+	if err != nil {
+		t.Fatalf("buildOrdersXLSX failed: %v", err)
+	}
+	book, err := excelize.OpenReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("open xlsx failed: %v", err)
+	}
+	t.Cleanup(func() { _ = book.Close() })
+
+	sheet := book.GetSheetName(0)
+	head, err := book.GetCellValue(sheet, "A1")
+	if err != nil {
+		t.Fatalf("get A1 failed: %v", err)
+	}
+	if strings.TrimSpace(head) != "Socks5 出口(IP:Port:User:Pass)" {
+		t.Fatalf("unexpected A1 header: %q", head)
+	}
+	raw, err := book.GetCellValue(sheet, "A2")
+	if err != nil {
+		t.Fatalf("get A2 failed: %v", err)
+	}
+	if strings.TrimSpace(raw) != "10.0.0.9:1080:user02:pass02" {
+		t.Fatalf("unexpected A2 value: %q", raw)
+	}
+	link, err := book.GetCellValue(sheet, "B2")
+	if err != nil {
+		t.Fatalf("get B2 failed: %v", err)
+	}
+	if strings.TrimSpace(link) != "vmess://test-payload" {
+		t.Fatalf("unexpected B2 value: %q", link)
 	}
 }

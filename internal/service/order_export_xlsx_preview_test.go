@@ -22,7 +22,7 @@ func TestWritePreviewXLSXFile(t *testing.T) {
 		{
 			Mode:       model.OrderModeDedicated,
 			OrderNo:    "OD260227000001",
-			Link:       "line.example.com:443:user01:pass01\nvless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test",
+			Link:       "vless://11111111-2222-3333-4444-555555555555@line.example.com:443?security=tls#test",
 			RawSocks5:  "10.0.0.8:1080:user01:pass01",
 			ExpiresAt:  time.Date(2026, 2, 27, 13, 14, 15, 0, time.UTC),
 			QRCodeData: qr,

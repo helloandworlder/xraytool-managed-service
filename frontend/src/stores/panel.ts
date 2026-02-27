@@ -467,6 +467,11 @@ export const usePanelStore = defineStore('panel', {
       await this.loadOrders()
       this.setNotice('订单已停用')
     },
+    async activateOrder(orderID: number) {
+      await http.post(`/api/orders/${orderID}/activate`, {})
+      await this.loadOrders()
+      this.setNotice('订单已启用')
+    },
     async renewOrder(orderID: number, moreDays: number, expiresAt = '') {
       await http.post(`/api/orders/${orderID}/renew`, { more_days: moreDays, expires_at: expiresAt })
       await this.loadOrders()
@@ -540,6 +545,13 @@ export const usePanelStore = defineStore('panel', {
       const res = await http.post('/api/orders/batch/deactivate', {
         order_ids: orderIDs,
         status
+      })
+      await this.loadOrders()
+      return (res.data.results || []) as BatchResult[]
+    },
+    async batchActivate(orderIDs: number[]) {
+      const res = await http.post('/api/orders/batch/activate', {
+        order_ids: orderIDs
       })
       await this.loadOrders()
       return (res.data.results || []) as BatchResult[]

@@ -625,10 +625,89 @@ func (s *OrderService) DeactivateOrder(ctx context.Context, orderID uint, status
 	})
 }
 
+func (s *OrderService) ActivateOrder(ctx context.Context, orderID uint) error {
+	var order model.Order
+	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
+		return err
+	}
+	if order.Status == model.OrderStatusActive {
+		return nil
+	}
+	if order.Status != model.OrderStatusDisabled {
+		return fmt.Errorf("only disabled order can be activated, current status: %s", order.Status)
+	}
+	now := time.Now()
+	if !order.ExpiresAt.After(now) {
+		return errors.New("order already expired, please renew first")
+	}
+
+	if order.IsGroupHead {
+		var expiredCount int64
+		if err := s.db.Model(&model.Order{}).Where("(id = ? or parent_order_id = ?) and expires_at <= ?", order.ID, order.ID, now).Count(&expiredCount).Error; err != nil {
+			return err
+		}
+		if expiredCount > 0 {
+			return errors.New("group contains expired child orders, please renew first")
+		}
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&model.Order{}).Where("id = ? or parent_order_id = ?", order.ID, order.ID).Updates(map[string]interface{}{
+				"status":              model.OrderStatusActive,
+				"notify_one_day_sent": false,
+				"notify_expired_sent": false,
+				"updated_at":          now,
+			}).Error; err != nil {
+				return err
+			}
+			return tx.Model(&model.OrderItem{}).Where("order_id in (?)", tx.Model(&model.Order{}).Select("id").Where("id = ? or parent_order_id = ?", order.ID, order.ID)).Updates(map[string]interface{}{
+				"status":     model.OrderItemStatusActive,
+				"updated_at": now,
+			}).Error
+		}); err != nil {
+			return err
+		}
+		return s.rebuildManagedRuntime(ctx)
+	}
+
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
+			"status":              model.OrderStatusActive,
+			"notify_one_day_sent": false,
+			"notify_expired_sent": false,
+			"updated_at":          now,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.OrderItem{}).Where("order_id = ?", orderID).Updates(map[string]interface{}{
+			"status":     model.OrderItemStatusActive,
+			"updated_at": now,
+		}).Error
+	}); err != nil {
+		return err
+	}
+
+	if order.Mode == model.OrderModeDedicated || order.ParentOrderID != nil {
+		return s.rebuildManagedRuntime(ctx)
+	}
+	return s.SyncOrderRuntime(ctx, orderID)
+}
+
 func (s *OrderService) BatchDeactivate(ctx context.Context, orderIDs []uint, status string) []BatchActionResult {
 	out := make([]BatchActionResult, 0, len(orderIDs))
 	for _, id := range orderIDs {
 		err := s.DeactivateOrder(ctx, id, status)
+		entry := BatchActionResult{ID: id, Success: err == nil}
+		if err != nil {
+			entry.Error = err.Error()
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func (s *OrderService) BatchActivate(ctx context.Context, orderIDs []uint) []BatchActionResult {
+	out := make([]BatchActionResult, 0, len(orderIDs))
+	for _, id := range orderIDs {
+		err := s.ActivateOrder(ctx, id)
 		entry := BatchActionResult{ID: id, Success: err == nil}
 		if err != nil {
 			entry.Error = err.Error()

@@ -1099,6 +1099,23 @@ async function deactivateOrder(orderID: number) {
 	})
 }
 
+async function activateOrder(orderID: number) {
+	Modal.confirm({
+		title: '启用订单',
+		content: `确认启用订单 #${orderID} 吗？`,
+		okText: '启用',
+		onOk: async () => {
+			try {
+				await panel.activateOrder(orderID)
+				message.success('订单已启用')
+			} catch (err) {
+				panel.setError(err)
+				message.error(panel.error || '启用失败')
+			}
+		}
+	})
+}
+
 async function resetOrderCredentials(orderID: number) {
 	Modal.confirm({
 		title: '刷新家宽凭据',
@@ -1212,6 +1229,38 @@ async function doBatchDeactivate() {
       }
     }
   })
+}
+
+async function doBatchActivate() {
+	if (panel.orderSelection.length === 0) return
+	const disabledIDs = panel.orderSelection.filter((id) => {
+		const row = panel.orders.find((item) => Number(item.id) === Number(id))
+		return String(row?.status || '') === 'disabled'
+	})
+	if (disabledIDs.length === 0) {
+		message.warning('所选订单没有可启用项（仅 disabled 可启用）')
+		return
+	}
+	if (disabledIDs.length < panel.orderSelection.length) {
+		message.warning('已自动跳过非 disabled 订单')
+	}
+	Modal.confirm({
+		title: '确认批量启用',
+		content: `将启用 ${disabledIDs.length} 个订单，是否继续？`,
+		okText: '继续',
+		cancelText: '取消',
+		async onOk() {
+			try {
+				const results = await panel.batchActivate(disabledIDs)
+				const ok = results.filter((r) => r.success).length
+				const fail = results.length - ok
+				message.success(`批量启用完成，成功 ${ok}，失败 ${fail}`)
+				panel.orderSelection = []
+			} catch (err) {
+				panel.setError(err)
+			}
+		}
+	})
 }
 
 async function exportOrder(orderID: number) {
@@ -2733,6 +2782,7 @@ function downloadBlobFile(data: Blob, filename: string) {
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchResync">批量重同步</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchTest">批量测活</a-button>
                   <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchExport">批量导出</a-button>
+                  <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchActivate">批量启用</a-button>
                   <a-button size="small" danger :disabled="panel.orderSelection.length===0" @click="doBatchDeactivate">批量停用</a-button>
                 </a-space>
               </template>
@@ -2800,7 +2850,8 @@ function downloadBlobFile(data: Blob, filename: string) {
 							<a-menu-item v-if="record.is_group_head" @click="openGroupRenewModal(record.id)">组内部分续期</a-menu-item>
 							<a-menu-divider />
 							<a-menu-item danger @click="removeOrder(record.id)">删除订单</a-menu-item>
-							<a-menu-item danger @click="deactivateOrder(record.id)">停用订单</a-menu-item>
+							<a-menu-item v-if="record.status === 'disabled'" @click="activateOrder(record.id)">启用订单</a-menu-item>
+							<a-menu-item v-else danger @click="deactivateOrder(record.id)">停用订单</a-menu-item>
 						  </a-menu>
 						</template>
 					  </a-dropdown>

@@ -198,10 +198,6 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
 				domainLine = dedicatedDomainCredentialLine(order, item)
 			}
-			linkValue := link
-			if domainLine != "" && strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
-				linkValue = domainLine + "\n" + link
-			}
 			rawSocks := fmt.Sprintf("%s:%d:%s:%s", item.ForwardAddress, item.ForwardPort, item.ForwardUsername, item.ForwardPassword)
 			if strings.TrimSpace(item.ForwardAddress) == "" || item.ForwardPort <= 0 {
 				rawSocks = ""
@@ -218,7 +214,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 				CycleTag:     cycleTag(order, now),
 				DurationDays: cycleDays(order, now),
 				ExpiresAt:    order.ExpiresAt,
-				Link:         linkValue,
+				Link:         link,
 				DomainLine:   domainLine,
 				RawSocks5:    rawSocks,
 				QRCodeData:   qr,
@@ -653,22 +649,17 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	_ = protocol
 	const qrRowHeight = 190.0
 	const qrColWidth = 34.0
-	const qrScale = 0.78
+	const qrScale = 0.55
 	const qrOffset = 4
 
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
 	isDedicated := strings.EqualFold(strings.TrimSpace(rows[0].Mode), model.OrderModeDedicated)
-	headers := []string{"专线链接", "二维码", "到期日", "订单号"}
-	if !isDedicated {
-		headers = []string{"链接", "二维码", "到期日", "订单号"}
-	}
-	if includeRaw {
-		if isDedicated {
-			headers = append([]string{"出口Socks5[IP:Port:User:Pass](可选)"}, headers...)
-		} else {
-			headers = append([]string{"原始Socks5"}, headers...)
-		}
+	headers := []string{"链接", "二维码", "到期日", "订单号"}
+	if isDedicated {
+		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
+	} else if includeRaw {
+		headers = append([]string{"原始Socks5"}, headers...)
 	}
 	for i, title := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
@@ -680,7 +671,13 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	expiresCol := "C"
 	orderNoCol := "D"
 	rawCol := ""
-	if includeRaw {
+	if isDedicated {
+		rawCol = "A"
+		linkCol = "B"
+		qrCol = "C"
+		expiresCol = "D"
+		orderNoCol = "E"
+	} else if includeRaw {
 		rawCol = "A"
 		linkCol = "B"
 		qrCol = "C"
@@ -692,11 +689,10 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", linkCol, r), row.Link)
 		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", expiresCol, r), row.ExpiresAt.Format("2006-01-02 15:04:05"))
 		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", orderNoCol, r), row.OrderNo)
-		if includeRaw {
+		if isDedicated {
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
+		} else if includeRaw {
 			rawValue := row.RawSocks5
-			if isDedicated {
-				rawValue = row.RawSocks5
-			}
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), rawValue)
 		}
 		_ = f.SetRowHeight(sheet, r, qrRowHeight)
@@ -715,14 +711,14 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 			})
 		}
 	}
-	if includeRaw {
+	if isDedicated || includeRaw {
 		_ = f.SetColWidth(sheet, "A", "A", 44)
 	}
 	_ = f.SetColWidth(sheet, linkCol, linkCol, 72)
 	_ = f.SetColWidth(sheet, qrCol, qrCol, qrColWidth)
 	_ = f.SetColWidth(sheet, expiresCol, expiresCol, 22)
 	_ = f.SetColWidth(sheet, orderNoCol, orderNoCol, 18)
-	if includeRaw {
+	if isDedicated || includeRaw {
 		_ = f.SetColWidth(sheet, rawCol, rawCol, 44)
 	}
 	endCol := orderNoCol
