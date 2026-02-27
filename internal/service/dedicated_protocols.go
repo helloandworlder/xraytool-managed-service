@@ -114,6 +114,12 @@ type DedicatedEgressLine struct {
 	Password string
 }
 
+type DedicatedEgressGeoLine struct {
+	DedicatedEgressLine
+	CountryCode string
+	Region      string
+}
+
 func parseDedicatedEgressLines(lines string) ([]DedicatedEgressLine, error) {
 	scanner := bufio.NewScanner(strings.NewReader(lines))
 	out := make([]DedicatedEgressLine, 0)
@@ -122,22 +128,9 @@ func parseDedicatedEgressLines(lines string) ([]DedicatedEgressLine, error) {
 		if raw == "" {
 			continue
 		}
-		parts := strings.Split(raw, ":")
-		if len(parts) != 4 {
-			return nil, fmt.Errorf("invalid line %q, expect ip:port:user:pass", raw)
-		}
-		port, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if err != nil || port <= 0 || port > 65535 {
-			return nil, fmt.Errorf("invalid port in line %q", raw)
-		}
-		row := DedicatedEgressLine{
-			Address:  strings.TrimSpace(parts[0]),
-			Port:     port,
-			Username: strings.TrimSpace(parts[2]),
-			Password: strings.TrimSpace(parts[3]),
-		}
-		if row.Address == "" || row.Username == "" || row.Password == "" {
-			return nil, fmt.Errorf("invalid line %q, address/user/pass required", raw)
+		row, err := parseDedicatedEgressLine(raw)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, row)
 	}
@@ -148,6 +141,83 @@ func parseDedicatedEgressLines(lines string) ([]DedicatedEgressLine, error) {
 		return nil, errors.New("no valid socks5 lines")
 	}
 	return out, nil
+}
+
+func parseDedicatedEgressGeoLines(lines string, defaultCountryCode string, defaultRegion string) ([]DedicatedEgressGeoLine, error) {
+	scanner := bufio.NewScanner(strings.NewReader(lines))
+	out := make([]DedicatedEgressGeoLine, 0)
+	defaultCountryCode = strings.ToLower(strings.TrimSpace(defaultCountryCode))
+	defaultRegion = strings.TrimSpace(defaultRegion)
+	for scanner.Scan() {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		core := raw
+		country := defaultCountryCode
+		region := defaultRegion
+		if strings.Contains(raw, "|") {
+			parts := strings.Split(raw, "|")
+			if len(parts) < 2 || len(parts) > 3 {
+				return nil, fmt.Errorf("invalid geo mapping line %q, expect ip:port:user:pass|country|region", raw)
+			}
+			core = strings.TrimSpace(parts[0])
+			country = strings.ToLower(strings.TrimSpace(parts[1]))
+			if len(parts) == 3 {
+				region = strings.TrimSpace(parts[2])
+			} else {
+				region = ""
+			}
+		}
+		if strings.Contains(core, ",") {
+			parts := strings.Split(core, ",")
+			if len(parts) == 6 {
+				core = strings.Join(parts[:4], ":")
+				country = strings.ToLower(strings.TrimSpace(parts[4]))
+				region = strings.TrimSpace(parts[5])
+			}
+		}
+		line, err := parseDedicatedEgressLine(core)
+		if err != nil {
+			return nil, err
+		}
+		if country == "" {
+			return nil, fmt.Errorf("invalid geo mapping line %q, country code required", raw)
+		}
+		out = append(out, DedicatedEgressGeoLine{
+			DedicatedEgressLine: line,
+			CountryCode:         country,
+			Region:              region,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no valid geo mapping lines")
+	}
+	return out, nil
+}
+
+func parseDedicatedEgressLine(raw string) (DedicatedEgressLine, error) {
+	parts := strings.Split(raw, ":")
+	if len(parts) != 4 {
+		return DedicatedEgressLine{}, fmt.Errorf("invalid line %q, expect ip:port:user:pass", raw)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || port <= 0 || port > 65535 {
+		return DedicatedEgressLine{}, fmt.Errorf("invalid port in line %q", raw)
+	}
+	row := DedicatedEgressLine{
+		Address:  strings.TrimLeft(strings.TrimSpace(parts[0]), "~"),
+		Port:     port,
+		Username: strings.TrimSpace(parts[2]),
+		Password: strings.TrimSpace(parts[3]),
+	}
+	if row.Address == "" || row.Username == "" || row.Password == "" {
+		return DedicatedEgressLine{}, fmt.Errorf("invalid line %q, address/user/pass required", raw)
+	}
+	return row, nil
 }
 
 type DedicatedCredentialLine struct {

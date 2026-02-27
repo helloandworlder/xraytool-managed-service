@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -438,7 +439,11 @@ func probeSocksOutboundGeo(address string, port int, username, password string) 
 	if exitIP == "" {
 		return "", "", "", errors.New("empty exit ip")
 	}
-	country, region, _ := lookupCountryRegion(exitIP)
+	country, region, err := lookupCountryRegion(exitIP)
+	if err != nil {
+		country = "xx"
+		region = ""
+	}
 	return exitIP, country, region, nil
 }
 
@@ -448,49 +453,121 @@ func lookupCountryCode(ip string) (string, error) {
 }
 
 func lookupCountryRegion(ip string) (string, string, error) {
-	url := fmt.Sprintf("https://ipapi.co/%s/country/", strings.TrimSpace(ip))
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return "", "", errors.New("ip is empty")
+	}
 	client := &http.Client{Timeout: 6 * time.Second}
+	type provider func(*http.Client, string) (string, string, error)
+	providers := []provider{lookupViaIPAPICo, lookupViaIPWhoIs, lookupViaIPInfo}
+	var lastErr error
+	for _, fn := range providers {
+		country, region, err := fn(client, ip)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		country = strings.ToLower(strings.TrimSpace(country))
+		if len(country) == 2 {
+			return country, strings.TrimSpace(region), nil
+		}
+		lastErr = errors.New("country code unavailable")
+	}
+	if lastErr == nil {
+		lastErr = errors.New("country code unavailable")
+	}
+	return "", "", lastErr
+}
+
+func lookupViaIPAPICo(client *http.Client, ip string) (string, string, error) {
+	url := fmt.Sprintf("https://ipapi.co/%s/json/", ip)
 	resp, err := client.Get(url)
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("country lookup status %d", resp.StatusCode)
+		return "", "", fmt.Errorf("ipapi.co status %d", resp.StatusCode)
 	}
-	buf := make([]byte, 64)
-	n, _ := resp.Body.Read(buf)
-	code := strings.ToLower(strings.TrimSpace(string(buf[:n])))
-	if len(code) == 2 {
-		region := ""
-		geoURL := fmt.Sprintf("https://ipapi.co/%s/json/", strings.TrimSpace(ip))
-		if geoResp, geoErr := client.Get(geoURL); geoErr == nil {
-			defer geoResp.Body.Close()
-			if geoResp.StatusCode < 300 {
-				data := make([]byte, 4096)
-				m, _ := geoResp.Body.Read(data)
-				var payload struct {
-					Region string `json:"region"`
-				}
-				if jsonErr := json.Unmarshal(data[:m], &payload); jsonErr == nil {
-					region = strings.TrimSpace(payload.Region)
-				}
-			}
-		}
-		return code, region, nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
 	}
-
 	var payload struct {
-		Country string `json:"country_code"`
+		CountryCode string `json:"country_code"`
+		Region      string `json:"region"`
+		Error       bool   `json:"error"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", "", err
+	}
+	if payload.Error {
+		if strings.TrimSpace(payload.Reason) != "" {
+			return "", "", errors.New(strings.TrimSpace(payload.Reason))
+		}
+		return "", "", errors.New("ipapi.co returned error")
+	}
+	return payload.CountryCode, payload.Region, nil
+}
+
+func lookupViaIPWhoIs(client *http.Client, ip string) (string, string, error) {
+	url := fmt.Sprintf("https://ipwho.is/%s", ip)
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("ipwho.is status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+	var payload struct {
+		Success     bool   `json:"success"`
+		CountryCode string `json:"country_code"`
+		Region      string `json:"region"`
+		Message     string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", "", err
+	}
+	if !payload.Success {
+		if strings.TrimSpace(payload.Message) != "" {
+			return "", "", errors.New(strings.TrimSpace(payload.Message))
+		}
+		return "", "", errors.New("ipwho.is returned unsuccessful")
+	}
+	return payload.CountryCode, payload.Region, nil
+}
+
+func lookupViaIPInfo(client *http.Client, ip string) (string, string, error) {
+	url := fmt.Sprintf("https://ipinfo.io/%s/json", ip)
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("ipinfo.io status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+	var payload struct {
+		Country string `json:"country"`
 		Region  string `json:"region"`
 	}
-	if err := json.Unmarshal(buf[:n], &payload); err == nil {
-		v := strings.ToLower(strings.TrimSpace(payload.Country))
-		if len(v) == 2 {
-			return v, strings.TrimSpace(payload.Region), nil
-		}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", "", err
 	}
-	return "", "", errors.New("country code unavailable")
+	if strings.TrimSpace(payload.Country) == "" {
+		return "", "", errors.New("ipinfo country is empty")
+	}
+	return payload.Country, payload.Region, nil
 }
 
 func sortForwardRowsByRouteUser(rows []model.SocksOutbound) {
