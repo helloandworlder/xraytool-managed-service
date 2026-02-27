@@ -653,7 +653,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	_ = protocol
 	const qrRowHeight = 190.0
 	const qrColWidth = 34.0
-	const qrScale = 0.82
+	const qrScale = 0.78
 	const qrOffset = 4
 
 	f := excelize.NewFile()
