@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,6 +121,9 @@ func (a *API) Router() *gin.Engine {
 	secure.PUT("/orders/dedicated-ingresses/:id", a.updateDedicatedIngress)
 	secure.DELETE("/orders/dedicated-ingresses/:id", a.deleteDedicatedIngress)
 	secure.POST("/orders/dedicated-ingresses/:id/toggle", a.toggleDedicatedIngress)
+	secure.GET("/dedicated/ingress-lines", a.listDedicatedIngressLines)
+	secure.POST("/dedicated/provision", a.provisionDedicated)
+	secure.POST("/dedicated/switch-protocol", a.switchDedicatedProtocol)
 
 	secure.GET("/orders", a.listOrders)
 	secure.POST("/orders/forward/reuse-warnings", a.forwardReuseWarnings)
@@ -799,6 +803,285 @@ func (a *API) toggleDedicatedIngress(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+type dedicatedIngressLineResponse struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	RouteType   string `json:"routeType"`
+	IngressHost string `json:"ingressHost"`
+	IngressPort int    `json:"ingressPort"`
+}
+
+type dedicatedRuntimeRequest struct {
+	RouteType     string `json:"routeType"`
+	Protocol      string `json:"protocol"`
+	IngressLineID string `json:"ingressLineId"`
+	ResourceCode  string `json:"resourceCode"`
+	OrderItemID   string `json:"orderItemId"`
+	IP            string `json:"ip"`
+	Port          int    `json:"port"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+}
+
+func (a *API) listDedicatedIngressLines(c *gin.Context) {
+	routeType, err := normalizeDedicatedRouteTypeCompat(c.Query("routeType"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	rows, err := a.ingress.ListIngresses()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	items := make([]dedicatedIngressLineResponse, 0)
+	fallback := make([]dedicatedIngressLineResponse, 0)
+	for _, row := range rows {
+		if !row.Enabled || strings.TrimSpace(row.Domain) == "" || row.IngressPort <= 0 {
+			continue
+		}
+		inferred := inferDedicatedRouteTypeCompat(row)
+		item := dedicatedIngressLineResponse{
+			ID:          strconv.FormatUint(uint64(row.ID), 10),
+			Name:        strings.TrimSpace(row.Name),
+			RouteType:   inferred,
+			IngressHost: strings.TrimSpace(row.Domain),
+			IngressPort: row.IngressPort,
+		}
+		fallback = append(fallback, item)
+		if inferred == routeType {
+			items = append(items, item)
+		}
+	}
+
+	if len(items) == 0 {
+		items = fallback
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (a *API) provisionDedicated(c *gin.Context) {
+	a.handleDedicatedRuntime(c, false)
+}
+
+func (a *API) switchDedicatedProtocol(c *gin.Context) {
+	a.handleDedicatedRuntime(c, true)
+}
+
+func (a *API) handleDedicatedRuntime(c *gin.Context, requireOrderItem bool) {
+	var req dedicatedRuntimeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	routeType, err := normalizeDedicatedRouteTypeCompat(req.RouteType)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	protocol, err := normalizeDedicatedProtocolCompat(req.Protocol)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if requireOrderItem && strings.TrimSpace(req.OrderItemID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "orderItemId is required"})
+		return
+	}
+	if strings.TrimSpace(req.IP) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ip is required"})
+		return
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "port must be between 1 and 65535"})
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username/password are required"})
+		return
+	}
+
+	ingress, err := a.pickDedicatedIngress(routeType, req.IngressLineID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	links := buildDedicatedLinksCompat(protocol, ingress.Domain, ingress.IngressPort, req.Username, req.Password)
+	if len(links) == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate dedicated links"})
+		return
+	}
+
+	resourceCode := strings.TrimSpace(req.ResourceCode)
+	if resourceCode == "" {
+		resourceCode = fmt.Sprintf("ded-%s-%d", strings.ToLower(routeType), time.Now().Unix())
+	}
+
+	landingConfig := gin.H{
+		"protocol":      protocol,
+		"routeType":     routeType,
+		"resourceCode":  resourceCode,
+		"ingressLineId": strconv.FormatUint(uint64(ingress.ID), 10),
+		"ingressHost":   ingress.Domain,
+		"ingressPort":   ingress.IngressPort,
+		"links":         links,
+		"primaryLink":   links[0],
+		"updatedAt":     time.Now().UTC().Format(time.RFC3339),
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"landingConfig": landingConfig,
+		"links":         links,
+	})
+}
+
+func (a *API) pickDedicatedIngress(routeType string, ingressLineID string) (model.DedicatedIngress, error) {
+	rows, err := a.ingress.ListIngresses()
+	if err != nil {
+		return model.DedicatedIngress{}, err
+	}
+
+	enabled := make([]model.DedicatedIngress, 0)
+	for _, row := range rows {
+		if row.Enabled && strings.TrimSpace(row.Domain) != "" && row.IngressPort > 0 {
+			enabled = append(enabled, row)
+		}
+	}
+	if len(enabled) == 0 {
+		return model.DedicatedIngress{}, errors.New("no enabled dedicated ingress lines available")
+	}
+
+	id := strings.TrimSpace(ingressLineID)
+	if id != "" {
+		parsed, err := strconv.ParseUint(id, 10, 64)
+		if err != nil {
+			return model.DedicatedIngress{}, fmt.Errorf("invalid ingressLineId %q", ingressLineID)
+		}
+		for _, row := range enabled {
+			if row.ID == uint(parsed) {
+				return row, nil
+			}
+		}
+		return model.DedicatedIngress{}, fmt.Errorf("ingressLineId %s not found or disabled", ingressLineID)
+	}
+
+	matched := make([]model.DedicatedIngress, 0)
+	for _, row := range enabled {
+		if inferDedicatedRouteTypeCompat(row) == routeType {
+			matched = append(matched, row)
+		}
+	}
+	if len(matched) == 0 {
+		matched = enabled
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if matched[i].Priority == matched[j].Priority {
+			return matched[i].ID < matched[j].ID
+		}
+		return matched[i].Priority < matched[j].Priority
+	})
+	return matched[0], nil
+}
+
+func normalizeDedicatedRouteTypeCompat(raw string) (string, error) {
+	v := strings.ToUpper(strings.TrimSpace(raw))
+	if v == "" {
+		return "SHORT_VIDEO", nil
+	}
+	switch v {
+	case "SHORT_VIDEO", "SHORTVIDEO", "SHORT":
+		return "SHORT_VIDEO", nil
+	case "LIVE_STREAM", "LIVESTREAM", "LIVE":
+		return "LIVE_STREAM", nil
+	default:
+		return "", fmt.Errorf("unsupported routeType %s", raw)
+	}
+}
+
+func normalizeDedicatedProtocolCompat(raw string) (string, error) {
+	v := strings.ToUpper(strings.TrimSpace(raw))
+	v = strings.ReplaceAll(v, "-", "_")
+	switch v {
+	case "VMESS", "VLESS", "SHADOWSOCKS", "SOCKS5_MIXED":
+		return v, nil
+	case "SS":
+		return "SHADOWSOCKS", nil
+	case "SOCKS5", "SOCKS5MIXED", "MIXED":
+		return "SOCKS5_MIXED", nil
+	default:
+		return "", fmt.Errorf("unsupported protocol %s", raw)
+	}
+}
+
+func inferDedicatedRouteTypeCompat(row model.DedicatedIngress) string {
+	text := strings.ToLower(strings.Join([]string{
+		row.Name,
+		row.Notes,
+		row.Region,
+		row.CountryCode,
+		row.DedicatedInbound.Name,
+	}, " "))
+	if strings.Contains(text, "live") || strings.Contains(text, "stream") || strings.Contains(text, "直播") {
+		return "LIVE_STREAM"
+	}
+	if strings.Contains(text, "short") || strings.Contains(text, "video") || strings.Contains(text, "douyin") || strings.Contains(text, "tiktok") || strings.Contains(text, "短视频") {
+		return "SHORT_VIDEO"
+	}
+	return "SHORT_VIDEO"
+}
+
+func buildDedicatedLinksCompat(protocol string, host string, port int, username string, password string) []string {
+	uuid := username
+	if uuid == "" {
+		uuid = "00000000-0000-0000-0000-000000000000"
+	}
+	vless := fmt.Sprintf("vless://%s@%s:%d?type=tcp&security=none#xraytool-vless", url.QueryEscape(uuid), host, port)
+	vmessPayload, _ := json.Marshal(map[string]string{
+		"v":    "2",
+		"ps":   "xraytool-vmess",
+		"add":  host,
+		"port": strconv.Itoa(port),
+		"id":   uuid,
+		"aid":  "0",
+		"net":  "tcp",
+		"type": "none",
+		"host": "",
+		"path": "",
+		"tls":  "",
+	})
+	vmess := "vmess://" + base64.StdEncoding.EncodeToString(vmessPayload)
+	ssCredential := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("chacha20-ietf-poly1305:%s", password)))
+	ss := fmt.Sprintf("ss://%s@%s:%d#xraytool-ss", ssCredential, host, port)
+	socks := fmt.Sprintf("socks5://%s:%s@%s:%d#xraytool-mixed", url.QueryEscape(username), url.QueryEscape(password), host, port)
+
+	all := map[string]string{
+		"VMESS":        vmess,
+		"VLESS":        vless,
+		"SHADOWSOCKS":  ss,
+		"SOCKS5_MIXED": socks,
+	}
+	order := []string{protocol, "VMESS", "VLESS", "SHADOWSOCKS", "SOCKS5_MIXED"}
+	out := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	for _, key := range order {
+		value := strings.TrimSpace(all[key])
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func (a *API) listHostIPs(c *gin.Context) {
