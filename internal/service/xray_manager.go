@@ -41,10 +41,17 @@ type XrayManager struct {
 
 	mu  sync.Mutex
 	cmd *exec.Cmd
+
+	runtimeSyncMu       sync.Mutex
+	runtimeSyncCond     *sync.Cond
+	runtimeSyncInFlight bool
+	runtimeSyncLastErr  error
 }
 
 func NewXrayManager(cfg config.Config, db *gorm.DB, log *zap.Logger) *XrayManager {
-	return &XrayManager{cfg: cfg, db: db, log: log}
+	mgr := &XrayManager{cfg: cfg, db: db, log: log}
+	mgr.runtimeSyncCond = sync.NewCond(&mgr.runtimeSyncMu)
+	return mgr
 }
 
 func InboundTag(port int) string {
@@ -67,10 +74,7 @@ func (m *XrayManager) StartManaged() error {
 	if !m.cfg.ManagedXrayEnabled {
 		return nil
 	}
-	if err := m.RebuildConfigFile(context.Background()); err != nil {
-		return err
-	}
-	return m.RestartManaged()
+	return m.RebuildAndRestartManaged(context.Background())
 }
 
 func (m *XrayManager) StopManaged() {
@@ -133,13 +137,45 @@ func (m *XrayManager) ApplyOrFallback(ctx context.Context, fn func(ctx context.C
 		return nil
 	}
 	m.log.Warn("grpc apply failed, fallback to config rebuild", zap.Error(err))
-	if rebuildErr := m.RebuildConfigFile(ctx); rebuildErr != nil {
-		return fmt.Errorf("grpc err: %w, rebuild err: %v", err, rebuildErr)
-	}
-	if restartErr := m.RestartManaged(); restartErr != nil {
-		return fmt.Errorf("grpc err: %w, restart err: %v", err, restartErr)
+	if syncErr := m.RebuildAndRestartManaged(ctx); syncErr != nil {
+		return fmt.Errorf("grpc err: %w, runtime sync err: %v", err, syncErr)
 	}
 	return nil
+}
+
+func (m *XrayManager) RebuildAndRestartManaged(ctx context.Context) error {
+	if !m.cfg.ManagedXrayEnabled {
+		return nil
+	}
+
+	m.runtimeSyncMu.Lock()
+	if m.runtimeSyncInFlight {
+		for m.runtimeSyncInFlight {
+			m.runtimeSyncCond.Wait()
+		}
+		err := m.runtimeSyncLastErr
+		m.runtimeSyncMu.Unlock()
+		return err
+	}
+	m.runtimeSyncInFlight = true
+	m.runtimeSyncMu.Unlock()
+
+	err := m.rebuildAndRestartManaged(ctx)
+
+	m.runtimeSyncMu.Lock()
+	m.runtimeSyncLastErr = err
+	m.runtimeSyncInFlight = false
+	m.runtimeSyncCond.Broadcast()
+	m.runtimeSyncMu.Unlock()
+
+	return err
+}
+
+func (m *XrayManager) rebuildAndRestartManaged(ctx context.Context) error {
+	if err := m.RebuildConfigFile(ctx); err != nil {
+		return err
+	}
+	return m.RestartManaged()
 }
 
 func (m *XrayManager) dial(ctx context.Context) (*grpc.ClientConn, error) {

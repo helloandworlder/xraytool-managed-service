@@ -290,10 +290,7 @@ func (s *OrderService) resolveDedicatedBindingForUpdateTx(tx *gorm.DB, protocol 
 }
 
 func (s *OrderService) rebuildManagedRuntime(ctx context.Context) error {
-	if err := s.xray.RebuildConfigFile(ctx); err != nil {
-		return err
-	}
-	return s.xray.RestartManaged()
+	return s.xray.RebuildAndRestartManaged(ctx)
 }
 
 func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, in UpdateOrderInput) error {
