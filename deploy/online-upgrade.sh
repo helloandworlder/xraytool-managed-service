@@ -8,8 +8,10 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SERVICE_NAME="xraytool"
-ENV_FILE="/etc/default/${SERVICE_NAME}"
+SERVICE_NAME_DEFAULT="xraytool"
+SERVICE_NAME_INPUT="${XTOOL_SERVICE_NAME:-}"
+SERVICE_NAME="${SERVICE_NAME_DEFAULT}"
+ENV_FILE=""
 PUBLIC_INSTALLER="${SCRIPT_DIR}/public-install.sh"
 REGRESSION_SCRIPT="${ROOT_DIR}/scripts/online_regression.py"
 
@@ -26,6 +28,7 @@ Usage:
 Options:
   --version <tag|latest>      Upgrade target version (default: latest)
   --install-dir <dir>         Install directory (default: inferred from env)
+  --service-name <name>       systemd service name (default: xraytool)
   --skip-regression           Skip post-upgrade regression script
   --skip-backup               Skip pre-upgrade database backup
   -h, --help                  Show help
@@ -45,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --install-dir)
       INSTALL_DIR_INPUT="$2"
+      shift 2
+      ;;
+    --service-name)
+      SERVICE_NAME_INPUT="$2"
       shift 2
       ;;
     --skip-regression)
@@ -75,6 +82,20 @@ fail() {
   echo "[ERROR] $*" >&2
   exit 1
 }
+
+is_valid_service_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9_.@-]+$ ]]
+}
+
+if [[ -n "${SERVICE_NAME_INPUT}" ]]; then
+  if [[ "${SERVICE_NAME_INPUT}" == *.service ]]; then
+    fail "--service-name should not include .service"
+  fi
+  is_valid_service_name "${SERVICE_NAME_INPUT}" || fail "invalid service name: ${SERVICE_NAME_INPUT}"
+  SERVICE_NAME="${SERVICE_NAME_INPUT}"
+fi
+ENV_FILE="/etc/default/${SERVICE_NAME}"
 
 read_env_var() {
   local key="$1"
@@ -186,6 +207,7 @@ fi
 log "upgrading to ${RELEASE_VERSION}"
 bash "${PUBLIC_INSTALLER}" \
   --non-interactive \
+  --service-name "${SERVICE_NAME}" \
   --install-dir "${INSTALL_DIR}" \
   --version "${RELEASE_VERSION}" \
   --port "${LISTEN_PORT}" \
@@ -231,8 +253,8 @@ for _ in range(20):
                 print("healthz ok")
                 sys.exit(0)
     except Exception:
-    time.sleep(1)
-    continue
+        time.sleep(1)
+        continue
 sys.exit(1)
 PY
 

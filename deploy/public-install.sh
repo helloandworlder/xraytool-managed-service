@@ -9,16 +9,27 @@ fi
 REPO_OWNER="${REPO_OWNER:-helloandworlder}"
 REPO_NAME="${REPO_NAME:-xraytool-managed-service}"
 RELEASE_VERSION="${RELEASE_VERSION:-latest}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/xraytool}"
-SERVICE_NAME="xraytool"
+INSTALL_DIR_DEFAULT="/opt/xraytool"
+INSTALL_DIR="${INSTALL_DIR:-}"
+INSTALL_DIR_SET=false
+if [[ -z "${INSTALL_DIR}" ]]; then
+  INSTALL_DIR="${INSTALL_DIR_DEFAULT}"
+else
+  INSTALL_DIR_SET=true
+fi
+SERVICE_NAME_DEFAULT="xraytool"
+SERVICE_NAME="${SERVICE_NAME_DEFAULT}"
 
 NON_INTERACTIVE=false
 LISTEN_PORT_INPUT="${XTOOL_INSTALL_PORT:-}"
 ADMIN_USER_INPUT="${XTOOL_INSTALL_ADMIN_USER:-}"
 ADMIN_PASS_INPUT="${XTOOL_INSTALL_ADMIN_PASS:-}"
 XRAY_API_PORT_INPUT="${XTOOL_INSTALL_XRAY_API_PORT:-}"
+INSTANCE_ID_INPUT="${XTOOL_INSTALL_INSTANCE_ID:-}"
+SERVICE_NAME_INPUT="${XTOOL_INSTALL_SERVICE_NAME:-}"
 PACKAGE_PATH="${XTOOL_PACKAGE_PATH:-}"
 XRAY_BIN_PATH="${XTOOL_XRAY_BIN_PATH:-}"
+INSTANCE_ID=""
 
 usage() {
   cat <<'EOF'
@@ -27,10 +38,13 @@ Usage:
 
 Options:
   --install-dir <dir>    Install directory (default: /opt/xraytool)
+  --instance-id <id>     Instance id suffix (service: xraytool-<id>)
+  --service-name <name>  Custom systemd service name (without .service)
   --version <tag|latest> Release version tag (default: latest)
   --port <1-65535>       Web panel port
   --admin-user <name>    Admin username
   --admin-pass <pass>    Admin password
+  --xray-bin-path <path> Local xray binary path
   --xray-api-port <p|random>  Managed Xray API port (default: auto-choose)
   -y, --non-interactive  Skip prompts and use provided/random values
   -h, --help             Show help
@@ -41,6 +55,8 @@ Env overrides (for testing):
   XTOOL_INSTALL_PORT     Same as --port
   XTOOL_INSTALL_ADMIN_USER  Same as --admin-user
   XTOOL_INSTALL_ADMIN_PASS  Same as --admin-pass
+  XTOOL_INSTALL_INSTANCE_ID Same as --instance-id
+  XTOOL_INSTALL_SERVICE_NAME Same as --service-name
   XTOOL_INSTALL_XRAY_API_PORT Same as --xray-api-port
 EOF
 }
@@ -49,6 +65,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir)
       INSTALL_DIR="$2"
+      INSTALL_DIR_SET=true
+      shift 2
+      ;;
+    --instance-id)
+      INSTANCE_ID_INPUT="$2"
+      shift 2
+      ;;
+    --service-name)
+      SERVICE_NAME_INPUT="$2"
       shift 2
       ;;
     --version)
@@ -65,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --admin-pass)
       ADMIN_PASS_INPUT="$2"
+      shift 2
+      ;;
+    --xray-bin-path)
+      XRAY_BIN_PATH="$2"
       shift 2
       ;;
     --xray-api-port)
@@ -216,6 +245,48 @@ is_valid_port() {
   return 0
 }
 
+is_valid_instance_id() {
+  local instance_id="$1"
+  [[ "$instance_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+}
+
+is_valid_service_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9_.@-]+$ ]]
+}
+
+trim_ws() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+resolve_instance_identity() {
+  INSTANCE_ID="$(trim_ws "${INSTANCE_ID_INPUT}" | tr 'A-Z' 'a-z')"
+  SERVICE_NAME_INPUT="$(trim_ws "${SERVICE_NAME_INPUT}")"
+
+  if [[ -n "${INSTANCE_ID}" ]]; then
+    is_valid_instance_id "${INSTANCE_ID}" || fail "Invalid instance id: ${INSTANCE_ID} (allowed: a-z 0-9 _ -)"
+  fi
+
+  if [[ -n "${SERVICE_NAME_INPUT}" ]]; then
+    is_valid_service_name "${SERVICE_NAME_INPUT}" || fail "Invalid service name: ${SERVICE_NAME_INPUT}"
+    if [[ "${SERVICE_NAME_INPUT}" == *.service ]]; then
+      fail "--service-name should not include '.service' suffix"
+    fi
+    SERVICE_NAME="${SERVICE_NAME_INPUT}"
+  elif [[ -n "${INSTANCE_ID}" ]]; then
+    SERVICE_NAME="xraytool-${INSTANCE_ID}"
+  else
+    SERVICE_NAME="${SERVICE_NAME_DEFAULT}"
+  fi
+
+  if [[ "${INSTALL_DIR_SET}" != true && -n "${INSTANCE_ID}" ]]; then
+    INSTALL_DIR="/opt/xraytool-${INSTANCE_ID}"
+  fi
+}
+
 detect_arch() {
   local machine
   machine="$(uname -m)"
@@ -261,7 +332,7 @@ resolve_runtime_values() {
     existing_port="$(read_existing_env XTOOL_LISTEN || true)"
     existing_port="${existing_port#:}"
     if [[ -n "$existing_port" && "$existing_port" == "$LISTEN_PORT" ]]; then
-      log "port ${LISTEN_PORT} is currently used by existing xraytool service, reusing it"
+      log "port ${LISTEN_PORT} is currently used by service ${SERVICE_NAME}, reusing it"
     else
       fail "Port is already in use: $LISTEN_PORT"
     fi
@@ -319,7 +390,7 @@ resolve_xray_api_port() {
     existing_api="$(read_existing_env XTOOL_XRAY_API || true)"
     existing_port="$(extract_port_from_addr "$existing_api")"
     if [[ -n "$existing_port" && "$existing_port" == "$XRAY_API_PORT" ]]; then
-      log "xray api port ${XRAY_API_PORT} is currently used by existing xraytool service, reusing it"
+      log "xray api port ${XRAY_API_PORT} is currently used by service ${SERVICE_NAME}, reusing it"
     elif [[ -z "$XRAY_API_PORT_INPUT" ]]; then
       XRAY_API_PORT="$(random_port)"
       log "xray api port 10085 occupied, switched to random ${XRAY_API_PORT}"
@@ -416,7 +487,7 @@ write_systemd_and_env() {
   env_file="/etc/default/${SERVICE_NAME}"
   jwt_secret="$(random_alnum 40)"
 
-  sed "s#/opt/xraytool#${INSTALL_DIR}#g" "$unit_template" > "$unit_target"
+  sed -e "s#/opt/xraytool#${INSTALL_DIR}#g" -e "s#/etc/default/xraytool#${env_file}#g" "$unit_template" > "$unit_target"
 
   if [[ -f "$env_file" ]]; then
     backup_file="${env_file}.bak.$(date +%Y%m%d%H%M%S)"
@@ -432,6 +503,7 @@ XTOOL_BACKUP_DIR=${INSTALL_DIR}/data/backups
 XTOOL_JWT_SECRET=${jwt_secret}
 XTOOL_ADMIN_USER=${ADMIN_USER}
 XTOOL_ADMIN_PASS=${ADMIN_PASS}
+XTOOL_SERVICE_NAME=${SERVICE_NAME}
 XTOOL_MANAGED_XRAY=true
 XTOOL_XRAY_DIR=${INSTALL_DIR}/data/xray
 XTOOL_XRAY_BIN=${INSTALL_DIR}/data/xray/xray
@@ -471,6 +543,7 @@ ensure_cmd unzip
 ensure_cmd ss
 ensure_cmd systemctl
 
+resolve_instance_identity
 detect_arch
 resolve_runtime_values
 resolve_xray_api_port
@@ -487,6 +560,8 @@ start_service_and_verify
 echo
 echo "Install completed successfully."
 echo "Install dir : ${INSTALL_DIR}"
+echo "Service name: ${SERVICE_NAME}"
+echo "Env file    : /etc/default/${SERVICE_NAME}"
 echo "Panel URL   : http://<server-ip>:${LISTEN_PORT}"
 echo "Admin user  : ${ADMIN_USER}"
 echo "Admin pass  : ${ADMIN_PASS}"

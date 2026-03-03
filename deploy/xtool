@@ -8,12 +8,69 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SERVICE_NAME="xraytool"
-ENV_FILE="/etc/default/${SERVICE_NAME}"
-UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+SERVICE_NAME_DEFAULT="xraytool"
+SERVICE_NAME_INPUT="${XTOOL_SERVICE_NAME:-}"
+SERVICE_NAME="${SERVICE_NAME_DEFAULT}"
+ENV_FILE=""
+UNIT_FILE=""
 CTL_BIN="${ROOT_DIR}/xraytoolctl"
 PUBLIC_INSTALLER="${SCRIPT_DIR}/public-install.sh"
 REPO_INSTALLER_URL="https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/refs/heads/main/deploy/public-install.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  sudo ./deploy/xtool [--service-name xraytool-foo]
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --service-name)
+      SERVICE_NAME_INPUT="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+infer_service_name() {
+  local base
+  base="$(basename "${ROOT_DIR}")"
+  if [[ "$base" =~ ^xraytool-[a-z0-9_-]+$ ]]; then
+    echo "$base"
+    return
+  fi
+  echo "${SERVICE_NAME_DEFAULT}"
+}
+
+is_valid_service_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9_.@-]+$ ]]
+}
+
+if [[ -z "${SERVICE_NAME_INPUT}" ]]; then
+  SERVICE_NAME_INPUT="$(infer_service_name)"
+fi
+if [[ "${SERVICE_NAME_INPUT}" == *.service ]]; then
+  echo "--service-name should not include .service"
+  exit 1
+fi
+is_valid_service_name "${SERVICE_NAME_INPUT}" || {
+  echo "invalid service name: ${SERVICE_NAME_INPUT}"
+  exit 1
+}
+SERVICE_NAME="${SERVICE_NAME_INPUT}"
+ENV_FILE="/etc/default/${SERVICE_NAME}"
+UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 random_alnum() {
   local n="$1"
@@ -135,6 +192,7 @@ update_service() {
   ensure_public_installer || return 1
   bash "${PUBLIC_INSTALLER}" \
     --non-interactive \
+    --service-name "${SERVICE_NAME}" \
     --install-dir "${INSTALL_DIR}" \
     --version "${version}" \
     --port "${PORT_RAW}" \

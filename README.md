@@ -26,6 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-se
 - 面板监听端口（回车自动随机，也可手动输入）
 - 管理员账号（回车自动随机，也可手动输入）
 - 管理员密码（回车自动随机，也可手动输入）
+- （可选）实例 ID / 服务名（用于同机多实例）
 
 并自动完成：
 
@@ -40,11 +41,19 @@ curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-se
 ```bash
 curl -fsSL https://raw.githubusercontent.com/helloandworlder/xraytool-managed-service/refs/heads/main/deploy/public-install.sh | sudo bash -s -- \
   --non-interactive \
+  --instance-id hk01 \
   --xray-api-port random \
   --port 18080 \
   --admin-user admin \
   --admin-pass 'YourStrongPass123'
 ```
+
+同机多实例建议：
+
+- 用 `--instance-id <id>` 自动生成独立 systemd 服务名（`xraytool-<id>`）与默认安装目录（`/opt/xraytool-<id>`）
+- 或用 `--service-name <name>` 指定自定义服务名（不带 `.service`）
+- 每个实例请使用不同的 `--port`、`--xray-api-port`（建议 `random`）
+- 可用 `--xray-bin-path /path/to/xray` 为实例指定独立 Xray Core 二进制来源
 
 ### 源码构建安装（开发环境）
 
@@ -124,6 +133,8 @@ sudo ./deploy/install.sh --xray-bin /path/to/xray
 
 - `--install-dir /opt/xraytool`
 - `--xray-bin /path/to/xray`
+- `--instance-id hk01`
+- `--service-name xraytool-hk01`
 
 ### Public 安装脚本（可下载到本地执行）
 

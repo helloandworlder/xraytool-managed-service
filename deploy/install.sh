@@ -9,14 +9,24 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/xraytool}"
-SERVICE_NAME="xraytool"
+INSTALL_DIR_DEFAULT="/opt/xraytool"
+INSTALL_DIR="${INSTALL_DIR:-}"
+INSTALL_DIR_SET=false
+if [[ -z "${INSTALL_DIR}" ]]; then
+  INSTALL_DIR="${INSTALL_DIR_DEFAULT}"
+else
+  INSTALL_DIR_SET=true
+fi
+SERVICE_NAME_DEFAULT="xraytool"
+SERVICE_NAME="${SERVICE_NAME_DEFAULT}"
+INSTANCE_ID_INPUT="${XTOOL_INSTALL_INSTANCE_ID:-}"
+SERVICE_NAME_INPUT="${XTOOL_INSTALL_SERVICE_NAME:-}"
 XRAY_BIN="${XRAY_BIN:-}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  sudo ./deploy/install.sh [--install-dir /opt/xraytool] [--xray-bin /path/to/xray]
+  sudo ./deploy/install.sh [--install-dir /opt/xraytool] [--instance-id foo] [--service-name xraytool-foo] [--xray-bin /path/to/xray]
 
 Env:
   INSTALL_DIR   Installation directory (default: /opt/xraytool)
@@ -28,6 +38,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir)
       INSTALL_DIR="$2"
+      INSTALL_DIR_SET=true
+      shift 2
+      ;;
+    --instance-id)
+      INSTANCE_ID_INPUT="$2"
+      shift 2
+      ;;
+    --service-name)
+      SERVICE_NAME_INPUT="$2"
       shift 2
       ;;
     --xray-bin)
@@ -45,6 +64,56 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+is_valid_instance_id() {
+  local instance_id="$1"
+  [[ "$instance_id" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+}
+
+is_valid_service_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9_.@-]+$ ]]
+}
+
+trim_ws() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+resolve_instance_identity() {
+  local instance_id
+  instance_id="$(trim_ws "${INSTANCE_ID_INPUT}" | tr 'A-Z' 'a-z')"
+  SERVICE_NAME_INPUT="$(trim_ws "${SERVICE_NAME_INPUT}")"
+
+  if [[ -n "${instance_id}" ]]; then
+    is_valid_instance_id "${instance_id}" || {
+      echo "Invalid instance id: ${instance_id}"
+      exit 1
+    }
+  fi
+
+  if [[ -n "${SERVICE_NAME_INPUT}" ]]; then
+    if [[ "${SERVICE_NAME_INPUT}" == *.service ]]; then
+      echo "--service-name should not include .service"
+      exit 1
+    fi
+    is_valid_service_name "${SERVICE_NAME_INPUT}" || {
+      echo "Invalid service name: ${SERVICE_NAME_INPUT}"
+      exit 1
+    }
+    SERVICE_NAME="${SERVICE_NAME_INPUT}"
+  elif [[ -n "${instance_id}" ]]; then
+    SERVICE_NAME="xraytool-${instance_id}"
+  fi
+
+  if [[ "${INSTALL_DIR_SET}" != true && -n "${instance_id}" ]]; then
+    INSTALL_DIR="/opt/xraytool-${instance_id}"
+  fi
+}
+
+resolve_instance_identity
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -97,9 +166,9 @@ fi
 echo "==> writing systemd unit"
 UNIT_SRC="${PROJECT_ROOT}/deploy/systemd/xraytool.service"
 UNIT_DST="/etc/systemd/system/${SERVICE_NAME}.service"
-sed "s#/opt/xraytool#${INSTALL_DIR}#g" "${UNIT_SRC}" > "${UNIT_DST}"
+ENV_FILE="/etc/default/${SERVICE_NAME}"
+sed -e "s#/opt/xraytool#${INSTALL_DIR}#g" -e "s#/etc/default/xraytool#${ENV_FILE}#g" "${UNIT_SRC}" > "${UNIT_DST}"
 
-ENV_FILE="/etc/default/xraytool"
 if [[ ! -f "${ENV_FILE}" ]]; then
   cat > "${ENV_FILE}" <<EOF
 XTOOL_LISTEN=:18080
@@ -109,6 +178,7 @@ XTOOL_BACKUP_DIR=${INSTALL_DIR}/data/backups
 XTOOL_JWT_SECRET=change-me-please
 XTOOL_ADMIN_USER=admin
 XTOOL_ADMIN_PASS=admin123456
+XTOOL_SERVICE_NAME=${SERVICE_NAME}
 XTOOL_MANAGED_XRAY=true
 XTOOL_XRAY_DIR=${INSTALL_DIR}/data/xray
 XTOOL_XRAY_BIN=${INSTALL_DIR}/data/xray/xray
