@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +44,9 @@ type API struct {
 	cfg       config.Config
 	logger    *zap.Logger
 }
+
+var dedicatedProtocolProbe = service.ProbeDedicatedWithXrayCore
+var dedicatedUUIDRegexCompat = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func New(db *gorm.DB, st *store.Store, orders *service.OrderService, singbox *service.SingboxImportService, nodes *service.NodeService, forward *service.ForwardOutboundService, hostIPs *service.HostIPService, backups *service.BackupService, bark *service.BarkService, runtime *service.RuntimeStatsService, cfg config.Config, logger *zap.Logger) *API {
 	return &API{db: db, store: st, orders: orders, singbox: singbox, nodes: nodes, forward: forward, dedicated: service.NewDedicatedEntryService(db), ingress: service.NewDedicatedIngressService(db), hostIPs: hostIPs, backups: backups, bark: bark, runtime: runtime, cfg: cfg, logger: logger}
@@ -124,6 +130,7 @@ func (a *API) Router() *gin.Engine {
 	secure.GET("/dedicated/ingress-lines", a.listDedicatedIngressLines)
 	secure.POST("/dedicated/provision", a.provisionDedicated)
 	secure.POST("/dedicated/switch-protocol", a.switchDedicatedProtocol)
+	secure.POST("/dedicated/check", a.checkDedicated)
 
 	secure.GET("/orders", a.listOrders)
 	secure.POST("/orders/forward/reuse-warnings", a.forwardReuseWarnings)
@@ -823,6 +830,7 @@ type dedicatedRuntimeRequest struct {
 	Port          int    `json:"port"`
 	Username      string `json:"username"`
 	Password      string `json:"password"`
+	VmessUUID     string `json:"vmessUuid"`
 }
 
 func (a *API) listDedicatedIngressLines(c *gin.Context) {
@@ -873,6 +881,77 @@ func (a *API) switchDedicatedProtocol(c *gin.Context) {
 	a.handleDedicatedRuntime(c, true)
 }
 
+func (a *API) checkDedicated(c *gin.Context) {
+	var req dedicatedRuntimeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	routeType, err := normalizeDedicatedRouteTypeCompat(req.RouteType)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	protocol, err := normalizeDedicatedProtocolCompat(req.Protocol)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.IP) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ip is required"})
+		return
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "port must be between 1 and 65535"})
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username/password are required"})
+		return
+	}
+
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	probeCtx, cancel := context.WithTimeout(c.Request.Context(), 12*time.Second)
+	defer cancel()
+	probe := dedicatedProtocolProbe(probeCtx, service.DedicatedProtocolProbeRequest{
+		RouteType: routeType,
+		Protocol:  protocol,
+		IP:        strings.TrimSpace(req.IP),
+		Port:      req.Port,
+		Username:  strings.TrimSpace(req.Username),
+		Password:  strings.TrimSpace(req.Password),
+		VmessUUID: strings.TrimSpace(req.VmessUUID),
+	})
+
+	response := gin.H{
+		"routeType":      routeType,
+		"protocol":       protocol,
+		"connectivityOk": probe.ConnectivityOK,
+		"connectivity":   probe.ConnectivityOK,
+		"ok":             probe.ConnectivityOK,
+		"success":        probe.ConnectivityOK,
+		"checkedAt":      checkedAt,
+	}
+	if strings.TrimSpace(probe.ExitIP) != "" {
+		response["exitIp"] = strings.TrimSpace(probe.ExitIP)
+	}
+	if strings.TrimSpace(probe.CountryCode) != "" {
+		response["countryCode"] = strings.ToLower(strings.TrimSpace(probe.CountryCode))
+	}
+	if strings.TrimSpace(probe.Region) != "" {
+		response["region"] = strings.TrimSpace(probe.Region)
+	}
+	if strings.TrimSpace(probe.Message) != "" {
+		response["message"] = probe.Message
+	}
+	if strings.TrimSpace(probe.ErrorCode) != "" {
+		response["errorCode"] = probe.ErrorCode
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
 func (a *API) handleDedicatedRuntime(c *gin.Context, requireOrderItem bool) {
 	var req dedicatedRuntimeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -913,15 +992,22 @@ func (a *API) handleDedicatedRuntime(c *gin.Context, requireOrderItem bool) {
 		return
 	}
 
-	links := buildDedicatedLinksCompat(protocol, ingress.Domain, ingress.IngressPort, req.Username, req.Password)
-	if len(links) == 0 {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate dedicated links"})
-		return
-	}
-
 	resourceCode := strings.TrimSpace(req.ResourceCode)
 	if resourceCode == "" {
 		resourceCode = fmt.Sprintf("ded-%s-%d", strings.ToLower(routeType), time.Now().Unix())
+	}
+
+	vmessUUID := strings.TrimSpace(req.VmessUUID)
+	if protocol == "VMESS" || protocol == "VLESS" {
+		if !dedicatedUUIDRegexCompat.MatchString(vmessUUID) {
+			vmessUUID = deriveDedicatedProtocolUUIDCompat(resourceCode, req.Username, req.Password, ingress.Domain, ingress.IngressPort, protocol)
+		}
+	}
+
+	links := buildDedicatedLinksCompat(protocol, ingress.Domain, ingress.IngressPort, req.Username, req.Password, vmessUUID)
+	if len(links) == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate dedicated links"})
+		return
 	}
 
 	landingConfig := gin.H{
@@ -934,6 +1020,9 @@ func (a *API) handleDedicatedRuntime(c *gin.Context, requireOrderItem bool) {
 		"links":         links,
 		"primaryLink":   links[0],
 		"updatedAt":     time.Now().UTC().Format(time.RFC3339),
+	}
+	if vmessUUID != "" {
+		landingConfig["vmessUuid"] = vmessUUID
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1037,10 +1126,10 @@ func inferDedicatedRouteTypeCompat(row model.DedicatedIngress) string {
 	return "SHORT_VIDEO"
 }
 
-func buildDedicatedLinksCompat(protocol string, host string, port int, username string, password string) []string {
-	uuid := username
-	if uuid == "" {
-		uuid = "00000000-0000-0000-0000-000000000000"
+func buildDedicatedLinksCompat(protocol string, host string, port int, username string, password string, vmessUUID string) []string {
+	uuid := strings.TrimSpace(vmessUUID)
+	if !dedicatedUUIDRegexCompat.MatchString(uuid) {
+		uuid = deriveDedicatedProtocolUUIDCompat("compat", username, password, host, port, protocol)
 	}
 	vless := fmt.Sprintf("vless://%s@%s:%d?type=tcp&security=none#xraytool-vless", url.QueryEscape(uuid), host, port)
 	vmessPayload, _ := json.Marshal(map[string]string{
@@ -1082,6 +1171,28 @@ func buildDedicatedLinksCompat(protocol string, host string, port int, username 
 		out = append(out, value)
 	}
 	return out
+}
+
+func deriveDedicatedProtocolUUIDCompat(resourceCode string, username string, password string, host string, port int, protocol string) string {
+	seed := strings.ToLower(strings.TrimSpace(protocol)) + "|" +
+		strings.TrimSpace(resourceCode) + "|" +
+		strings.TrimSpace(username) + "|" +
+		strings.TrimSpace(password) + "|" +
+		strings.TrimSpace(host) + "|" +
+		strconv.Itoa(port)
+	sum := sha1.Sum([]byte(seed))
+	b := make([]byte, 16)
+	copy(b, sum[:16])
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf(
+		"%08x-%04x-%04x-%04x-%012x",
+		uint32(b[0])<<24|uint32(b[1])<<16|uint32(b[2])<<8|uint32(b[3]),
+		uint16(b[4])<<8|uint16(b[5]),
+		uint16(b[6])<<8|uint16(b[7]),
+		uint16(b[8])<<8|uint16(b[9]),
+		uint64(b[10])<<40|uint64(b[11])<<32|uint64(b[12])<<24|uint64(b[13])<<16|uint64(b[14])<<8|uint64(b[15]),
+	)
 }
 
 func (a *API) listHostIPs(c *gin.Context) {

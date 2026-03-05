@@ -91,6 +91,30 @@ chmod +x ./deploy/xtool
 
 默认地址 `http://127.0.0.1:18080`，默认管理员 `admin / admin123456`。
 
+### 3x-ui Terminal UI（BubbleTea）
+
+新增命令：`cmd/threeuitui`
+
+```bash
+go build -o threeuitui ./cmd/threeuitui
+./threeuitui --target "http://host:port/basepath username password [2fa]" --quick-days 30
+# 非交互全量续费（所有有到期时间的账号统一续费 N 天）
+./threeuitui --target "http://host:port/basepath username password [2fa]" --renew-all-days 30
+# 非交互导出 VMESS 专线（中文表头 xlsx）
+./threeuitui --target "http://host:port/basepath username password [2fa]" --export-vmess-xlsx --export-path ./vmess.xlsx
+```
+
+功能包含：
+
+- 基于 `Inbound + Email` 前缀分组
+- 连接后展示“最近到期分组”视图（支持按出口 IP 范围查看）
+- 先选择出口 IP，再执行批量续费
+- 已到期账号批量续费（自动全续）
+- 即将到期账号批量续费（交互勾选，支持分页）
+- 近 3 天到期账号快速批量续费（交互分页）
+- 支持 `Y` 一键确认续费“今日已到期”账号（续费天数由 `--quick-days` 控制）
+- 导出 VMESS XLSX（中文列名：专线备注 / 账号 / VMESS专线 / 出口IP / 开通时间 / 到期时间）
+
 ## Web 备份与恢复
 
 - 设置页 -> 数据库备份恢复
