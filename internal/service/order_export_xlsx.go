@@ -124,7 +124,6 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 	if err != nil {
 		return nil, err
 	}
-	linkSettings := s.loadExportLinkSettings()
 	headOrderNoByID := map[uint]string{}
 	headIDs := make([]uint, 0)
 	for _, order := range orders {
@@ -175,7 +174,7 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			}
 			egress := egressByItem[item.ID]
 			tag := dedicatedLinkTag(egress.CountryCode, egress.ExitIP)
-			link := buildOrderItemLinkByProtocol(order, item, protocol, linkSettings, tag)
+			link := buildOrderItemLinkByProtocol(order, item, protocol, tag)
 			if strings.TrimSpace(link) == "" {
 				continue
 			}
@@ -483,45 +482,6 @@ func exportOrderProtocol(order model.Order) string {
 	return protocol
 }
 
-type exportLinkSettings struct {
-	VlessSecurity string
-	VlessSNI      string
-	VlessType     string
-	VlessPath     string
-	VlessHost     string
-}
-
-func (s *OrderService) loadExportLinkSettings() exportLinkSettings {
-	out := exportLinkSettings{
-		VlessSecurity: "tls",
-		VlessType:     "tcp",
-	}
-	rows := []model.Setting{}
-	if err := s.db.Where("key in ?", []string{"dedicated_vless_security", "dedicated_vless_sni", "dedicated_vless_type", "dedicated_vless_path", "dedicated_vless_host"}).Find(&rows).Error; err != nil {
-		return out
-	}
-	for _, row := range rows {
-		v := strings.TrimSpace(row.Value)
-		switch strings.TrimSpace(row.Key) {
-		case "dedicated_vless_security":
-			if v != "" {
-				out.VlessSecurity = v
-			}
-		case "dedicated_vless_sni":
-			out.VlessSNI = v
-		case "dedicated_vless_type":
-			if v != "" {
-				out.VlessType = v
-			}
-		case "dedicated_vless_path":
-			out.VlessPath = v
-		case "dedicated_vless_host":
-			out.VlessHost = v
-		}
-	}
-	return out
-}
-
 func dedicatedLinkTag(countryCode string, exitIP string) string {
 	country := countryNameCN(countryCode)
 	if strings.TrimSpace(country) == "" {
@@ -555,7 +515,7 @@ func dedicatedDomainCredentialLine(order model.Order, item model.OrderItem) stri
 	return fmt.Sprintf("%s:%d:%s:%s", host, port, strings.TrimSpace(item.Username), strings.TrimSpace(item.Password))
 }
 
-func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, protocol string, cfg exportLinkSettings, tag string) string {
+func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, protocol string, tag string) string {
 	if order.Mode != model.OrderModeDedicated {
 		auth := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s@%s:%d", item.Username, item.Password, item.IP, item.Port)))
 		return fmt.Sprintf("socks://%s?method=auto", auth)
@@ -599,31 +559,14 @@ func buildOrderItemLinkByProtocol(order model.Order, item model.OrderItem, proto
 		if port <= 0 {
 			return ""
 		}
-		security := strings.TrimSpace(cfg.VlessSecurity)
-		if security == "" {
-			security = "tls"
-		}
-		vType := strings.TrimSpace(cfg.VlessType)
-		if vType == "" {
-			vType = "tcp"
+		inbound := order.DedicatedInbound
+		if inbound != nil {
+			copyInbound := *inbound
+			fillDedicatedInboundDerivedFields(&copyInbound)
+			inbound = &copyInbound
 		}
 		params := url.Values{}
-		params.Set("encryption", "none")
-		params.Set("security", security)
-		params.Set("type", vType)
-		sni := strings.TrimSpace(cfg.VlessSNI)
-		if strings.EqualFold(security, "tls") && sni == "" {
-			sni = host
-		}
-		if sni != "" {
-			params.Set("sni", sni)
-		}
-		if strings.TrimSpace(cfg.VlessPath) != "" {
-			params.Set("path", strings.TrimSpace(cfg.VlessPath))
-		}
-		if strings.TrimSpace(cfg.VlessHost) != "" {
-			params.Set("host", strings.TrimSpace(cfg.VlessHost))
-		}
+		appendVlessLinkParams(params, inbound, host)
 		return fmt.Sprintf("vless://%s@%s:%d?%s#%s", uuid, host, port, params.Encode(), url.QueryEscape(remark))
 	case model.DedicatedFeatureShadowsocks:
 		if port <= 0 {
@@ -659,9 +602,12 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
 	isDedicated := strings.EqualFold(strings.TrimSpace(rows[0].Mode), model.OrderModeDedicated)
+	isMixedDedicated := isDedicated && strings.EqualFold(strings.TrimSpace(protocol), model.DedicatedFeatureMixed)
 	headers := []string{"链接", "二维码", "到期日", "订单号"}
-	if isDedicated {
+	if isMixedDedicated {
 		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "入口Socks5(Domain:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
+	} else if isDedicated {
+		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
 	} else if includeRaw {
 		headers = append([]string{"原始Socks5"}, headers...)
 	}
@@ -680,13 +626,19 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	orderNoCol := "D"
 	rawCol := ""
 	inboundCol := ""
-	if isDedicated {
+	if isMixedDedicated {
 		rawCol = "A"
 		inboundCol = "B"
 		linkCol = "C"
 		qrCol = "D"
 		expiresCol = "E"
 		orderNoCol = "F"
+	} else if isDedicated {
+		rawCol = "A"
+		linkCol = "B"
+		qrCol = "C"
+		expiresCol = "D"
+		orderNoCol = "E"
 	} else if includeRaw {
 		rawCol = "A"
 		linkCol = "B"
@@ -703,9 +655,11 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", qrCol, r), row.QRTag)
 			_ = f.SetCellStyle(sheet, fmt.Sprintf("%s%d", qrCol, r), fmt.Sprintf("%s%d", qrCol, r), qrTagStyle)
 		}
-		if isDedicated {
+		if isMixedDedicated {
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", inboundCol, r), row.DomainLine)
+		} else if isDedicated {
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
 		} else if includeRaw {
 			rawValue := row.RawSocks5
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), rawValue)
@@ -729,7 +683,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	if isDedicated || includeRaw {
 		_ = f.SetColWidth(sheet, "A", "A", 44)
 	}
-	if isDedicated {
+	if isMixedDedicated {
 		_ = f.SetColWidth(sheet, inboundCol, inboundCol, 44)
 	}
 	_ = f.SetColWidth(sheet, linkCol, linkCol, 72)

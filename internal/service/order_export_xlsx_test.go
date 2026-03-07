@@ -28,6 +28,11 @@ func TestBuildOrderItemLinksCarryChineseTag(t *testing.T) {
 		ID:   100,
 		Mode: model.OrderModeDedicated,
 		Port: 443,
+		DedicatedInbound: &model.DedicatedInbound{
+			Protocol:      model.DedicatedFeatureVless,
+			VlessSecurity: "tls",
+			VlessType:     "tcp",
+		},
 		DedicatedIngress: &model.DedicatedIngress{
 			Domain:      "line.example.com",
 			IngressPort: 443,
@@ -38,26 +43,25 @@ func TestBuildOrderItemLinksCarryChineseTag(t *testing.T) {
 		Password:  "pass01",
 		VmessUUID: "11111111-2222-3333-4444-555555555555",
 	}
-	cfg := exportLinkSettings{VlessSecurity: "tls", VlessType: "tcp"}
 	tag := "美国-1.2.3.4"
 	encodedTag := url.QueryEscape(tag)
 
-	socks := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureMixed, cfg, tag)
+	socks := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureMixed, tag)
 	if !strings.Contains(socks, "#"+encodedTag) {
 		t.Fatalf("socks link should contain encoded tag, got: %s", socks)
 	}
 
-	vless := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureVless, cfg, tag)
+	vless := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureVless, tag)
 	if !strings.Contains(vless, "#"+encodedTag) {
 		t.Fatalf("vless link should contain encoded tag, got: %s", vless)
 	}
 
-	ss := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureShadowsocks, cfg, tag)
+	ss := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureShadowsocks, tag)
 	if !strings.Contains(ss, "#"+encodedTag) {
 		t.Fatalf("shadowsocks link should contain encoded tag, got: %s", ss)
 	}
 
-	vmess := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureVmess, cfg, tag)
+	vmess := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureVmess, tag)
 	if !strings.HasPrefix(vmess, "vmess://") {
 		t.Fatalf("unexpected vmess link: %s", vmess)
 	}
@@ -133,14 +137,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 	if len(headers) == 0 {
 		t.Fatalf("expected header row")
 	}
-	wantHeaders := []string{
-		"Socks5 出口(IP:Port:User:Pass)",
-		"入口Socks5(Domain:Port:User:Pass)",
-		"专线链接",
-		"二维码",
-		"到期日",
-		"订单号",
-	}
+	wantHeaders := []string{"Socks5 出口(IP:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
 	for i, expected := range wantHeaders {
 		if i >= len(headers[0]) {
 			t.Fatalf("missing header at position %d", i+1)
@@ -158,22 +155,14 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("expected bigger qr row height, got %.2f", rowHeight)
 	}
 
-	inbound, err := book.GetCellValue(sheet, "B2")
-	if err != nil {
-		t.Fatalf("get inbound cell failed: %v", err)
-	}
-	if strings.TrimSpace(inbound) != "line.example.com:443:user01:pass01" {
-		t.Fatalf("unexpected inbound cell: %q", inbound)
-	}
-
-	qrTag, err := book.GetCellValue(sheet, "D2")
+	qrTag, err := book.GetCellValue(sheet, "C2")
 	if err != nil {
 		t.Fatalf("get qr tag cell failed: %v", err)
 	}
 	if strings.TrimSpace(qrTag) != "美国-1.2.3.4" {
 		t.Fatalf("unexpected qr tag cell: %q", qrTag)
 	}
-	styleID, err := book.GetCellStyle(sheet, "D2")
+	styleID, err := book.GetCellStyle(sheet, "C2")
 	if err != nil {
 		t.Fatalf("get qr tag style failed: %v", err)
 	}
@@ -191,7 +180,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("qr tag should be top aligned, got: %q", style.Alignment.Vertical)
 	}
 
-	orderNo, err := book.GetCellValue(sheet, "F2")
+	orderNo, err := book.GetCellValue(sheet, "E2")
 	if err != nil {
 		t.Fatalf("get order_no cell failed: %v", err)
 	}
@@ -199,15 +188,15 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("unexpected order_no cell: %q", orderNo)
 	}
 
-	linkValue, err := book.GetCellValue(sheet, "C2")
+	linkValue, err := book.GetCellValue(sheet, "B2")
 	if err != nil {
 		t.Fatalf("get link cell failed: %v", err)
 	}
-	if strings.Contains(linkValue, "line.example.com:443:user01:pass01") {
-		t.Fatalf("link cell should not merge socks5 outbound text, got: %q", linkValue)
+	if !strings.Contains(linkValue, "security=tls") {
+		t.Fatalf("unexpected link cell: %q", linkValue)
 	}
 
-	pics, err := book.GetPictures(sheet, "D2")
+	pics, err := book.GetPictures(sheet, "C2")
 	if err != nil {
 		t.Fatalf("get pictures failed: %v", err)
 	}
@@ -224,18 +213,18 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 	}
 }
 
-func TestBuildOrdersXLSXDedicatedAlwaysSeparatesOutboundColumn(t *testing.T) {
+func TestBuildOrdersXLSXDedicatedMixedIncludesInboundColumn(t *testing.T) {
 	rows := []xlsxExportRow{
 		{
 			Mode:       model.OrderModeDedicated,
 			OrderNo:    "OD260227000002",
 			DomainLine: "line2.example.com:443:user02:pass02",
-			Link:       "vmess://test-payload",
+			Link:       "socks://test-payload",
 			RawSocks5:  "10.0.0.9:1080:user02:pass02",
 			ExpiresAt:  time.Date(2026, 3, 1, 10, 11, 12, 0, time.UTC),
 		},
 	}
-	body, err := buildOrdersXLSX(rows, model.DedicatedFeatureVmess, false)
+	body, err := buildOrdersXLSX(rows, model.DedicatedFeatureMixed, false)
 	if err != nil {
 		t.Fatalf("buildOrdersXLSX failed: %v", err)
 	}
@@ -271,7 +260,44 @@ func TestBuildOrdersXLSXDedicatedAlwaysSeparatesOutboundColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get C2 failed: %v", err)
 	}
-	if strings.TrimSpace(link) != "vmess://test-payload" {
+	if strings.TrimSpace(link) != "socks://test-payload" {
 		t.Fatalf("unexpected C2 value: %q", link)
+	}
+}
+
+func TestBuildOrderItemLinkByProtocolVlessReality(t *testing.T) {
+	order := model.Order{
+		ID:   101,
+		Mode: model.OrderModeDedicated,
+		Port: 443,
+		DedicatedInbound: &model.DedicatedInbound{
+			Protocol:             model.DedicatedFeatureVless,
+			VlessSecurity:        "reality",
+			VlessFlow:            "xtls-rprx-vision",
+			VlessType:            "tcp",
+			VlessSNI:             "www.tesla.com",
+			VlessFingerprint:     "chrome",
+			RealityTarget:        "www.tesla.com:443",
+			RealityPrivateKey:    "k0d_DrM8TU4v7a0Vh3lTcrQ7xjJ7Qm4-EtaVB0Wk4gs",
+			RealityShortIDs:      "bb09,959e240f",
+			RealitySpiderX:       "/",
+			RealityMLDSA65Verify: "verify-key",
+		},
+		DedicatedIngress: &model.DedicatedIngress{Domain: "line.example.com", IngressPort: 443},
+	}
+	item := model.OrderItem{VmessUUID: "11111111-2222-3333-4444-555555555555"}
+
+	link := buildOrderItemLinkByProtocol(order, item, model.DedicatedFeatureVless, "美国-1.2.3.4")
+	if !strings.HasPrefix(link, "vless://11111111-2222-3333-4444-555555555555@line.example.com:443?") {
+		t.Fatalf("unexpected vless reality link: %s", link)
+	}
+	if !strings.Contains(link, "security=reality") || !strings.Contains(link, "flow=xtls-rprx-vision") {
+		t.Fatalf("expected reality security and flow, got: %s", link)
+	}
+	if !strings.Contains(link, "pbk=") || !strings.Contains(link, "sid=bb09") || !strings.Contains(link, "spx=%2F") {
+		t.Fatalf("expected reality share params, got: %s", link)
+	}
+	if !strings.Contains(link, "fp=chrome") || !strings.Contains(link, "pqv=verify-key") {
+		t.Fatalf("expected fingerprint and pqv, got: %s", link)
 	}
 }

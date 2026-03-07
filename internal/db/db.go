@@ -55,6 +55,9 @@ func Open(path string) (*gorm.DB, error) {
 	if err := migrateDedicatedEntryToInboundIngress(database); err != nil {
 		return nil, err
 	}
+	if err := migrateDedicatedVlessInboundSettings(database); err != nil {
+		return nil, err
+	}
 	return database, nil
 }
 
@@ -266,6 +269,66 @@ func migrateDedicatedEntryToInboundIngress(database *gorm.DB) error {
 
 		return nil
 	})
+}
+
+func migrateDedicatedVlessInboundSettings(database *gorm.DB) error {
+	const migrationKey = "migration_dedicated_vless_inbound_settings_v1"
+	marker := model.Setting{}
+	if err := database.First(&marker, "key = ?", migrationKey).Error; err == nil {
+		return nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	settings := map[string]string{}
+	rows := []model.Setting{}
+	if err := database.Where("key in ?", []string{
+		"dedicated_vless_security",
+		"dedicated_vless_sni",
+		"dedicated_vless_type",
+		"dedicated_vless_path",
+		"dedicated_vless_host",
+	}).Find(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		settings[row.Key] = strings.TrimSpace(row.Value)
+	}
+	if len(settings) == 0 {
+		return database.Save(&model.Setting{Key: migrationKey, Value: "done", UpdatedAt: time.Now()}).Error
+	}
+
+	updates := map[string]interface{}{}
+	legacySecurity := strings.ToLower(strings.TrimSpace(settings["dedicated_vless_security"]))
+	if legacySecurity == "none" {
+		updates["vless_security"] = "none"
+	}
+	if v := strings.TrimSpace(settings["dedicated_vless_sni"]); v != "" {
+		updates["vless_sni"] = v
+	}
+	if v := strings.TrimSpace(settings["dedicated_vless_type"]); v != "" {
+		updates["vless_type"] = v
+	}
+	if v := strings.TrimSpace(settings["dedicated_vless_path"]); v != "" {
+		updates["vless_path"] = v
+	}
+	if v := strings.TrimSpace(settings["dedicated_vless_host"]); v != "" {
+		updates["vless_host"] = v
+	}
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now()
+		if err := database.Model(&model.DedicatedInbound{}).
+			Where("protocol = ?", model.DedicatedFeatureVless).
+			Where("coalesce(vless_security, '') = ''").
+			Where("coalesce(vless_sni, '') = ''").
+			Where("coalesce(vless_type, '') = ''").
+			Where("coalesce(vless_host, '') = ''").
+			Where("coalesce(vless_path, '') = ''").
+			Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+	return database.Save(&model.Setting{Key: migrationKey, Value: "done", UpdatedAt: time.Now()}).Error
 }
 
 func splitFeatureList(raw string) []string {

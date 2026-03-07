@@ -61,6 +61,28 @@ export interface DedicatedInbound {
   priority: number
   enabled: boolean
   notes: string
+  vless_security?: string
+  vless_flow?: string
+  vless_type?: string
+  vless_sni?: string
+  vless_host?: string
+  vless_path?: string
+  vless_fingerprint?: string
+  vless_tls_cert_file?: string
+  vless_tls_key_file?: string
+  reality_show?: boolean
+  reality_target?: string
+  reality_server_names?: string
+  reality_private_key?: string
+  reality_public_key?: string
+  reality_short_ids?: string
+  reality_spider_x?: string
+  reality_xver?: number
+  reality_max_time_diff?: number
+  reality_min_client_ver?: string
+  reality_max_client_ver?: string
+  reality_mldsa65_seed?: string
+  reality_mldsa65_verify?: string
 }
 
 export interface DedicatedIngress {

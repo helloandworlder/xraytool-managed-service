@@ -159,6 +159,27 @@ export const usePanelStore = defineStore('panel', {
 			priority: number
 			enabled: boolean
 			notes?: string
+			vless_security?: string
+			vless_flow?: string
+			vless_type?: string
+			vless_sni?: string
+			vless_host?: string
+			vless_path?: string
+			vless_fingerprint?: string
+			vless_tls_cert_file?: string
+			vless_tls_key_file?: string
+			reality_show?: boolean
+			reality_target?: string
+			reality_server_names?: string
+			reality_private_key?: string
+			reality_short_ids?: string
+			reality_spider_x?: string
+			reality_xver?: number
+			reality_max_time_diff?: number
+			reality_min_client_ver?: string
+			reality_max_client_ver?: string
+			reality_mldsa65_seed?: string
+			reality_mldsa65_verify?: string
 		}) {
 			await http.post('/api/orders/dedicated-inbounds', payload)
 			await this.loadDedicatedInbounds()
@@ -171,10 +192,39 @@ export const usePanelStore = defineStore('panel', {
 			priority: number
 			enabled: boolean
 			notes?: string
+			vless_security?: string
+			vless_flow?: string
+			vless_type?: string
+			vless_sni?: string
+			vless_host?: string
+			vless_path?: string
+			vless_fingerprint?: string
+			vless_tls_cert_file?: string
+			vless_tls_key_file?: string
+			reality_show?: boolean
+			reality_target?: string
+			reality_server_names?: string
+			reality_private_key?: string
+			reality_short_ids?: string
+			reality_spider_x?: string
+			reality_xver?: number
+			reality_max_time_diff?: number
+			reality_min_client_ver?: string
+			reality_max_client_ver?: string
+			reality_mldsa65_seed?: string
+			reality_mldsa65_verify?: string
 		}) {
 			await http.put(`/api/orders/dedicated-inbounds/${id}`, payload)
 			await this.loadDedicatedInbounds()
 			this.setNotice('Inbound已更新')
+		},
+		async validateDedicatedInbound(payload: Record<string, any>) {
+			const res = await http.post('/api/orders/dedicated-inbounds/validate', payload)
+			return res.data as { ok: boolean; inbound: DedicatedInbound }
+		},
+		async generateRealityKeyPair() {
+			const res = await http.post('/api/orders/dedicated-inbounds/reality-keypair', {})
+			return res.data as { ok: boolean; private_key: string; public_key: string }
 		},
 		async toggleDedicatedInbound(id: number, enabled: boolean) {
 			await http.post(`/api/orders/dedicated-inbounds/${id}/toggle`, { enabled })
@@ -358,6 +408,10 @@ export const usePanelStore = defineStore('panel', {
     async loadOrderDetail(orderID: number) {
       const res = await http.get(`/api/orders/${orderID}`)
       this.selectedOrder = res.data
+    },
+    async copyOrderLinks(orderID: number) {
+      const res = await http.get(`/api/orders/${orderID}/copy-links`, { responseType: 'text' })
+      return String(res.data || '')
     },
     async createOrder(payload: Record<string, unknown>) {
 		const res = await http.post('/api/orders', payload, { timeout: 120000 })

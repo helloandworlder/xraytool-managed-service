@@ -111,15 +111,37 @@ type DedicatedEntry struct {
 }
 
 type DedicatedInbound struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	Name       string    `gorm:"size:128" json:"name"`
-	Protocol   string    `gorm:"size:32;not null;index" json:"protocol"`
-	ListenPort int       `gorm:"not null;index" json:"listen_port"`
-	Priority   int       `gorm:"not null;default:100;index" json:"priority"`
-	Enabled    bool      `gorm:"default:true;index" json:"enabled"`
-	Notes      string    `gorm:"size:255" json:"notes"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID                   uint      `gorm:"primaryKey" json:"id"`
+	Name                 string    `gorm:"size:128" json:"name"`
+	Protocol             string    `gorm:"size:32;not null;index" json:"protocol"`
+	ListenPort           int       `gorm:"not null;index" json:"listen_port"`
+	Priority             int       `gorm:"not null;default:100;index" json:"priority"`
+	Enabled              bool      `gorm:"default:true;index" json:"enabled"`
+	Notes                string    `gorm:"size:255" json:"notes"`
+	VlessSecurity        string    `gorm:"size:32" json:"vless_security,omitempty"`
+	VlessFlow            string    `gorm:"size:64" json:"vless_flow,omitempty"`
+	VlessType            string    `gorm:"size:32" json:"vless_type,omitempty"`
+	VlessSNI             string    `gorm:"size:255" json:"vless_sni,omitempty"`
+	VlessHost            string    `gorm:"size:255" json:"vless_host,omitempty"`
+	VlessPath            string    `gorm:"size:255" json:"vless_path,omitempty"`
+	VlessFingerprint     string    `gorm:"size:64" json:"vless_fingerprint,omitempty"`
+	VlessTLSCertFile     string    `gorm:"size:255" json:"vless_tls_cert_file,omitempty"`
+	VlessTLSKeyFile      string    `gorm:"size:255" json:"vless_tls_key_file,omitempty"`
+	RealityShow          bool      `json:"reality_show,omitempty"`
+	RealityTarget        string    `gorm:"size:255" json:"reality_target,omitempty"`
+	RealityServerNames   string    `gorm:"type:text" json:"reality_server_names,omitempty"`
+	RealityPrivateKey    string    `gorm:"size:255" json:"reality_private_key,omitempty"`
+	RealityPublicKey     string    `gorm:"-" json:"reality_public_key,omitempty"`
+	RealityShortIDs      string    `gorm:"type:text" json:"reality_short_ids,omitempty"`
+	RealitySpiderX       string    `gorm:"size:255" json:"reality_spider_x,omitempty"`
+	RealityXver          int       `json:"reality_xver,omitempty"`
+	RealityMaxTimeDiff   int       `json:"reality_max_time_diff,omitempty"`
+	RealityMinClientVer  string    `gorm:"size:32" json:"reality_min_client_ver,omitempty"`
+	RealityMaxClientVer  string    `gorm:"size:32" json:"reality_max_client_ver,omitempty"`
+	RealityMLDSA65Seed   string    `gorm:"size:255" json:"reality_mldsa65_seed,omitempty"`
+	RealityMLDSA65Verify string    `gorm:"size:255" json:"reality_mldsa65_verify,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 
 	Ingresses []DedicatedIngress `json:"ingresses,omitempty"`
 	Orders    []Order            `json:"orders,omitempty"`

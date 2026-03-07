@@ -474,37 +474,56 @@ func isNotFoundErr(err error) bool {
 
 func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 	type activeRow struct {
-		ItemID          uint
-		IP              string
-		Port            int
-		Username        string
-		Password        string
-		VmessUUID       string
-		Managed         bool
-		OrderMode       string
-		OrderProtocol   string
-		OutboundType    string
-		ForwardAddress  string
-		ForwardPort     int
-		ForwardUsername string
-		ForwardPassword string
+		ItemID             uint
+		DedicatedInboundID uint
+		IP                 string
+		Port               int
+		Username           string
+		Password           string
+		VmessUUID          string
+		Managed            bool
+		OrderMode          string
+		OrderProtocol      string
+		OutboundType       string
+		ForwardAddress     string
+		ForwardPort        int
+		ForwardUsername    string
+		ForwardPassword    string
 	}
 
 	var rows []activeRow
 	err := m.db.WithContext(ctx).
 		Table("order_items oi").
-		Select("oi.id as item_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, o.dedicated_protocol as order_protocol, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password").
+		Select("oi.id as item_id, o.dedicated_inbound_id as dedicated_inbound_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, o.dedicated_protocol as order_protocol, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password").
 		Joins("join orders o on o.id = oi.order_id").
 		Where("oi.status = ? and o.status = ? and o.expires_at > ?", model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
 		Scan(&rows).Error
 	if err != nil {
 		return err
 	}
+	inboundIDs := make([]uint, 0)
+	for _, row := range rows {
+		if row.DedicatedInboundID > 0 {
+			inboundIDs = append(inboundIDs, row.DedicatedInboundID)
+		}
+	}
+	inboundIDs = uniqueUintIDs(inboundIDs)
+	dedicatedInboundsByID := map[uint]model.DedicatedInbound{}
+	if len(inboundIDs) > 0 {
+		inboundRows := []model.DedicatedInbound{}
+		if err := m.db.WithContext(ctx).Where("id in ?", inboundIDs).Find(&inboundRows).Error; err != nil {
+			return err
+		}
+		for _, row := range inboundRows {
+			dedicatedInboundsByID[row.ID] = row
+		}
+	}
 
 	legacyMixedAccountsByPort := map[int]map[string]string{}
 	dedicatedMixedAccountsByPort := map[int]map[string]string{}
 	vmessClientsByPort := map[int]map[string]string{}
 	vlessClientsByPort := map[int]map[string]string{}
+	vlessInboundByPort := map[int]model.DedicatedInbound{}
 	ssClientsByPort := map[int]map[string]string{}
 	type managedItem struct {
 		itemID          uint
@@ -546,6 +565,9 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 						vlessClientsByPort[row.Port] = map[string]string{}
 					}
 					vlessClientsByPort[row.Port][row.Username] = strings.TrimSpace(row.VmessUUID)
+					if inbound, ok := dedicatedInboundsByID[row.DedicatedInboundID]; ok {
+						vlessInboundByPort[row.Port] = inbound
+					}
 					inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureVless, row.Port))
 				}
 			case model.DedicatedFeatureShadowsocks:
@@ -689,6 +711,7 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 	sort.Ints(vlessPorts)
 	for _, p := range vlessPorts {
 		clientsMap := vlessClientsByPort[p]
+		inboundCfg := vlessInboundByPort[p]
 		users := make([]string, 0, len(clientsMap))
 		for u := range clientsMap {
 			users = append(users, u)
@@ -696,12 +719,20 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		sort.Strings(users)
 		clients := make([]map[string]interface{}, 0, len(users))
 		for _, user := range users {
-			clients = append(clients, map[string]interface{}{
+			client := map[string]interface{}{
 				"id":         clientsMap[user],
 				"level":      0,
 				"email":      user,
 				"decryption": "none",
-			})
+			}
+			if flow := strings.TrimSpace(inboundCfg.VlessFlow); flow != "" {
+				client["flow"] = flow
+			}
+			clients = append(clients, client)
+		}
+		streamSettings, err := buildVlessStreamSettings(&inboundCfg)
+		if err != nil {
+			return err
 		}
 		inbounds = append(inbounds, map[string]interface{}{
 			"tag":      dedicatedInboundTag(model.DedicatedFeatureVless, p),
@@ -712,6 +743,7 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 				"clients":    clients,
 				"decryption": "none",
 			},
+			"streamSettings": streamSettings,
 		})
 	}
 

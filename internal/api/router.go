@@ -118,6 +118,8 @@ func (a *API) Router() *gin.Engine {
 	secure.DELETE("/orders/dedicated-entries/:id", a.deleteDedicatedEntry)
 	secure.POST("/orders/dedicated-entries/:id/toggle", a.toggleDedicatedEntry)
 	secure.GET("/orders/dedicated-inbounds", a.listDedicatedInbounds)
+	secure.POST("/orders/dedicated-inbounds/validate", a.validateDedicatedInbound)
+	secure.POST("/orders/dedicated-inbounds/reality-keypair", a.generateRealityKeyPair)
 	secure.POST("/orders/dedicated-inbounds", a.createDedicatedInbound)
 	secure.PUT("/orders/dedicated-inbounds/:id", a.updateDedicatedInbound)
 	secure.DELETE("/orders/dedicated-inbounds/:id", a.deleteDedicatedInbound)
@@ -163,6 +165,7 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/orders/batch/test", a.batchTestOrders)
 	secure.POST("/orders/batch/export", a.batchExportOrders)
 	secure.GET("/orders/:id/export", a.exportOrder)
+	secure.GET("/orders/:id/copy-links", a.copyOrderLinks)
 	secure.POST("/orders/:id/test", a.testOrder)
 	secure.POST("/orders/:id/test/stream", a.testOrderStream)
 	secure.POST("/orders/import/preview", a.previewImport)
@@ -689,6 +692,33 @@ func (a *API) createDedicatedInbound(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, row)
+}
+
+func (a *API) validateDedicatedInbound(c *gin.Context) {
+	var req service.DedicatedInboundInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	row, err := service.ValidateDedicatedInboundInput(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "inbound": row})
+}
+
+func (a *API) generateRealityKeyPair(c *gin.Context) {
+	privateKey, publicKey, err := service.GenerateRealityKeyPair()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ok":          true,
+		"private_key": privateKey,
+		"public_key":  publicKey,
+	})
 }
 
 func (a *API) updateDedicatedInbound(c *gin.Context) {
@@ -2057,6 +2087,19 @@ func (a *API) exportOrder(c *gin.Context) {
 		return
 	}
 	setAttachmentFilename(c, filename)
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
+}
+
+func (a *API) copyOrderLinks(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	text, err := a.orders.CopyOrderLinkLines(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
 }
 

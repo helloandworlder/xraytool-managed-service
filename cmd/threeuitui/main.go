@@ -269,6 +269,7 @@ func main() {
 	var quickDays int
 	var renewAllDays int
 	var renewExpiredDays int
+	var renewUpcomingDays int
 	var exportVmessXLSX bool
 	var exportPath string
 
@@ -289,6 +290,9 @@ func main() {
 				if renewExpiredDays > 0 {
 					return errors.New("use only one of --renew-all-days or --renew-expired-days")
 				}
+				if renewUpcomingDays > 0 {
+					return errors.New("use only one of --renew-all-days, --renew-expired-days or --renew-upcoming-days")
+				}
 				if strings.TrimSpace(target) == "" {
 					return errors.New("--target is required when --renew-all-days is set")
 				}
@@ -301,10 +305,25 @@ func main() {
 				if exportVmessXLSX {
 					return errors.New("use only one of --renew-all-days, --renew-expired-days, --export-vmess-xlsx")
 				}
+				if renewUpcomingDays > 0 {
+					return errors.New("use only one of --renew-all-days, --renew-expired-days or --renew-upcoming-days")
+				}
 				if strings.TrimSpace(target) == "" {
 					return errors.New("--target is required when --renew-expired-days is set")
 				}
 				summary, err := runDirectRenewExpired(logger, strings.TrimSpace(target), time.Duration(timeoutSec)*time.Second, renewExpiredDays)
+				fmt.Println(summary)
+				return err
+			}
+
+			if renewUpcomingDays > 0 {
+				if exportVmessXLSX {
+					return errors.New("use only one of --renew-upcoming-days or --export-vmess-xlsx")
+				}
+				if strings.TrimSpace(target) == "" {
+					return errors.New("--target is required when --renew-upcoming-days is set")
+				}
+				summary, err := runDirectRenewUpcoming(logger, strings.TrimSpace(target), time.Duration(timeoutSec)*time.Second, renewUpcomingDays)
 				fmt.Println(summary)
 				return err
 			}
@@ -337,6 +356,7 @@ func main() {
 	root.Flags().IntVar(&quickDays, "quick-days", 30, "Default renew days for quick today-expired renew")
 	root.Flags().IntVar(&renewAllDays, "renew-all-days", 0, "Non-interactive: renew ALL clients with expiry by N days")
 	root.Flags().IntVar(&renewExpiredDays, "renew-expired-days", 0, "Non-interactive: renew ONLY expired clients by N days")
+	root.Flags().IntVar(&renewUpcomingDays, "renew-upcoming-days", 0, "Non-interactive: renew unexpired clients expiring within N days by N days")
 	root.Flags().BoolVar(&exportVmessXLSX, "export-vmess-xlsx", false, "Non-interactive: export VMESS dedicated lines to XLSX (Chinese headers)")
 	root.Flags().StringVar(&exportPath, "export-path", "", "Output path for --export-vmess-xlsx")
 
@@ -1417,6 +1437,67 @@ func runDirectRenewExpired(logger *zap.Logger, targetLine string, timeout time.D
 		fmt.Printf("[%d/%d] OK %s\n", done, total, req.RecordKey)
 	})
 	summary := fmt.Sprintf("Loaded=%d Expired=%d RenewDays=%d Updated=%d Failed=%d", len(records), len(targets), renewDays, result.Updated, result.Failed)
+	if result.Failed > 0 {
+		maxErr := len(result.Errors)
+		if maxErr > 10 {
+			maxErr = 10
+		}
+		summary = summary + "\nErrors:\n- " + strings.Join(result.Errors[:maxErr], "\n- ")
+		if len(result.Errors) > maxErr {
+			summary = summary + fmt.Sprintf("\n...and %d more", len(result.Errors)-maxErr)
+		}
+		return summary, fmt.Errorf("renew finished with %d failures", result.Failed)
+	}
+	return summary, nil
+}
+
+func runDirectRenewUpcoming(logger *zap.Logger, targetLine string, timeout time.Duration, renewDays int) (string, error) {
+	ep, err := parseTargetLine(targetLine)
+	if err != nil {
+		return "", err
+	}
+	client, err := newThreeXUIClient(ep, timeout, logger)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := client.Login(ctx); err != nil {
+		return "", err
+	}
+	inbounds, err := client.GetInbounds(ctx)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := client.GetConfig(ctx)
+	if err != nil {
+		logger.Warn("getConfig failed, continue with empty config", zap.Error(err))
+		cfg = map[string]any{}
+	}
+	records := buildRecords(inbounds, cfg, client.ep.PanelHost)
+	now := time.Now().UnixMilli()
+	windowEnd := now + int64(renewDays)*dayMillis
+	targets := make([]*clientRecord, 0)
+	for _, rec := range records {
+		if rec.ExpiryTime <= now {
+			continue
+		}
+		if rec.ExpiryTime > 0 && rec.ExpiryTime <= windowEnd {
+			targets = append(targets, rec)
+		}
+	}
+	if len(targets) == 0 {
+		return fmt.Sprintf("Loaded clients=%d, upcomingWithin%dd=0", len(records), renewDays), nil
+	}
+	fmt.Printf("Start renew upcoming-only: loaded=%d upcomingWithin%dd=%d renewDays=%d\n", len(records), renewDays, len(targets), renewDays)
+	result := executeRenew(client, buildRenewRequests(targets), renewDays, timeout, logger, func(done, total int, req renewRequest, err error) {
+		if err != nil {
+			fmt.Printf("[%d/%d] FAIL %s -> %v\n", done, total, req.RecordKey, err)
+			return
+		}
+		fmt.Printf("[%d/%d] OK %s\n", done, total, req.RecordKey)
+	})
+	summary := fmt.Sprintf("Loaded=%d UpcomingWithin%dd=%d RenewDays=%d Updated=%d Failed=%d", len(records), renewDays, len(targets), renewDays, result.Updated, result.Failed)
 	if result.Failed > 0 {
 		maxErr := len(result.Errors)
 		if maxErr > 10 {

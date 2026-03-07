@@ -88,22 +88,43 @@ const dedicatedForm = reactive({
 	enabled: true,
 	notes: ''
 })
-const dedicatedInboundForm = reactive({
-	name: '',
-	protocol: 'mixed',
-	listen_port: 1080,
-	priority: 100,
-	enabled: true,
-	notes: ''
-})
+function createDedicatedInboundDefaults() {
+	return {
+		name: '',
+		protocol: 'mixed',
+		listen_port: 1080,
+		priority: 100,
+		enabled: true,
+		notes: '',
+		vless_security: 'none',
+		vless_flow: '',
+		vless_type: 'tcp',
+		vless_sni: '',
+		vless_host: '',
+		vless_path: '',
+		vless_fingerprint: 'chrome',
+		vless_tls_cert_file: '',
+		vless_tls_key_file: '',
+		reality_show: false,
+		reality_target: '',
+		reality_server_names: '',
+		reality_private_key: '',
+		reality_public_key: '',
+		reality_short_ids: '',
+		reality_spider_x: '/',
+		reality_xver: 0,
+		reality_max_time_diff: 0,
+		reality_min_client_ver: '',
+		reality_max_client_ver: '',
+		reality_mldsa65_seed: '',
+		reality_mldsa65_verify: ''
+	}
+}
+
+const dedicatedInboundForm = reactive(createDedicatedInboundDefaults())
 const dedicatedInboundEditForm = reactive({
 	id: 0,
-	name: '',
-	protocol: 'mixed',
-	listen_port: 1080,
-	priority: 100,
-	enabled: true,
-	notes: ''
+	...createDedicatedInboundDefaults()
 })
 const dedicatedIngressForm = reactive({
 	dedicated_inbound_id: 0,
@@ -181,6 +202,7 @@ const streamTestOrderID = ref<number>(0)
 const streamMeta = reactive({ total: 0, sampled: 0, sample_percent: 100, success: 0, failed: 0 })
 const streamRows = ref<Array<{ item_id: number; status: string; detail: string }>>([])
 const exportingOrderID = ref<number | null>(null)
+const copyingLinksOrderID = ref<number | null>(null)
 const exportCount = ref<number>(0)
 const exportFormat = ref<'txt' | 'xlsx'>('xlsx')
 const exportIncludeRawSocks5 = ref(false)
@@ -393,6 +415,130 @@ const dedicatedProtocolOptions = [
 	{ label: 'Vless', value: 'vless' },
 	{ label: 'Shadowsocks', value: 'shadowsocks' }
 ]
+const dedicatedVlessSecurityOptions = [
+	{ label: 'None', value: 'none' },
+	{ label: 'TLS', value: 'tls' },
+	{ label: 'REALITY', value: 'reality' }
+]
+
+const dedicatedInboundCreateIsVless = computed(() => dedicatedInboundForm.protocol === 'vless')
+const dedicatedInboundEditIsVless = computed(() => dedicatedInboundEditForm.protocol === 'vless')
+const dedicatedInboundCreateUsesTLS = computed(() => dedicatedInboundCreateIsVless.value && dedicatedInboundForm.vless_security === 'tls')
+const dedicatedInboundEditUsesTLS = computed(() => dedicatedInboundEditIsVless.value && dedicatedInboundEditForm.vless_security === 'tls')
+const dedicatedInboundCreateUsesReality = computed(() => dedicatedInboundCreateIsVless.value && dedicatedInboundForm.vless_security === 'reality')
+const dedicatedInboundEditUsesReality = computed(() => dedicatedInboundEditIsVless.value && dedicatedInboundEditForm.vless_security === 'reality')
+
+function resetDedicatedInboundVlessFields(form: ReturnType<typeof createDedicatedInboundDefaults>) {
+	form.vless_security = 'none'
+	form.vless_flow = ''
+	form.vless_type = 'tcp'
+	form.vless_sni = ''
+	form.vless_host = ''
+	form.vless_path = ''
+	form.vless_fingerprint = 'chrome'
+	form.vless_tls_cert_file = ''
+	form.vless_tls_key_file = ''
+	form.reality_show = false
+	form.reality_target = ''
+	form.reality_server_names = ''
+	form.reality_private_key = ''
+	form.reality_public_key = ''
+	form.reality_short_ids = ''
+	form.reality_spider_x = '/'
+	form.reality_xver = 0
+	form.reality_max_time_diff = 0
+	form.reality_min_client_ver = ''
+	form.reality_max_client_ver = ''
+	form.reality_mldsa65_seed = ''
+	form.reality_mldsa65_verify = ''
+}
+
+function applyDedicatedInboundRow(target: typeof dedicatedInboundEditForm, row: Record<string, any>) {
+	target.name = String(row.name || '')
+	target.protocol = String(row.protocol || 'mixed')
+	target.listen_port = Number(row.listen_port || 0)
+	target.priority = Number(row.priority || 100)
+	target.enabled = Boolean(row.enabled)
+	target.notes = String(row.notes || '')
+	target.vless_security = String(row.vless_security || 'none')
+	target.vless_flow = String(row.vless_flow || '')
+	target.vless_type = String(row.vless_type || 'tcp')
+	target.vless_sni = String(row.vless_sni || '')
+	target.vless_host = String(row.vless_host || '')
+	target.vless_path = String(row.vless_path || '')
+	target.vless_fingerprint = String(row.vless_fingerprint || 'chrome')
+	target.vless_tls_cert_file = String(row.vless_tls_cert_file || '')
+	target.vless_tls_key_file = String(row.vless_tls_key_file || '')
+	target.reality_show = Boolean(row.reality_show)
+	target.reality_target = String(row.reality_target || '')
+	target.reality_server_names = String(row.reality_server_names || '')
+	target.reality_private_key = String(row.reality_private_key || '')
+	target.reality_public_key = String(row.reality_public_key || '')
+	target.reality_short_ids = String(row.reality_short_ids || '')
+	target.reality_spider_x = String(row.reality_spider_x || '/')
+	target.reality_xver = Number(row.reality_xver || 0)
+	target.reality_max_time_diff = Number(row.reality_max_time_diff || 0)
+	target.reality_min_client_ver = String(row.reality_min_client_ver || '')
+	target.reality_max_client_ver = String(row.reality_max_client_ver || '')
+	target.reality_mldsa65_seed = String(row.reality_mldsa65_seed || '')
+	target.reality_mldsa65_verify = String(row.reality_mldsa65_verify || '')
+	if (target.protocol !== 'vless') {
+		resetDedicatedInboundVlessFields(target as ReturnType<typeof createDedicatedInboundDefaults>)
+	}
+}
+
+function buildDedicatedInboundPayload(form: typeof dedicatedInboundForm | typeof dedicatedInboundEditForm) {
+	return {
+		name: form.name,
+		protocol: form.protocol,
+		listen_port: Number(form.listen_port),
+		priority: Number(form.priority),
+		enabled: form.enabled,
+		notes: form.notes,
+		vless_security: form.protocol === 'vless' ? String(form.vless_security || 'none') : '',
+		vless_flow: form.protocol === 'vless' ? form.vless_flow : '',
+		vless_type: form.protocol === 'vless' ? String(form.vless_type || 'tcp') : '',
+		vless_sni: form.protocol === 'vless' ? form.vless_sni : '',
+		vless_host: form.protocol === 'vless' ? form.vless_host : '',
+		vless_path: form.protocol === 'vless' ? form.vless_path : '',
+		vless_fingerprint: form.protocol === 'vless' ? form.vless_fingerprint : '',
+		vless_tls_cert_file: form.protocol === 'vless' ? form.vless_tls_cert_file : '',
+		vless_tls_key_file: form.protocol === 'vless' ? form.vless_tls_key_file : '',
+		reality_show: form.protocol === 'vless' ? form.reality_show : false,
+		reality_target: form.protocol === 'vless' ? form.reality_target : '',
+		reality_server_names: form.protocol === 'vless' ? form.reality_server_names : '',
+		reality_private_key: form.protocol === 'vless' ? form.reality_private_key : '',
+		reality_short_ids: form.protocol === 'vless' ? form.reality_short_ids : '',
+		reality_spider_x: form.protocol === 'vless' ? form.reality_spider_x : '',
+		reality_xver: form.protocol === 'vless' ? Number(form.reality_xver || 0) : 0,
+		reality_max_time_diff: form.protocol === 'vless' ? Number(form.reality_max_time_diff || 0) : 0,
+		reality_min_client_ver: form.protocol === 'vless' ? form.reality_min_client_ver : '',
+		reality_max_client_ver: form.protocol === 'vless' ? form.reality_max_client_ver : '',
+		reality_mldsa65_seed: form.protocol === 'vless' ? form.reality_mldsa65_seed : '',
+		reality_mldsa65_verify: form.protocol === 'vless' ? form.reality_mldsa65_verify : ''
+	}
+}
+
+async function fillRealityKeyPair(form: typeof dedicatedInboundForm | typeof dedicatedInboundEditForm) {
+	try {
+		const res = await panel.generateRealityKeyPair()
+		form.reality_private_key = String(res.private_key || '')
+		form.reality_public_key = String(res.public_key || '')
+		message.success('REALITY 密钥已生成')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function validateDedicatedInboundConfig(form: typeof dedicatedInboundForm | typeof dedicatedInboundEditForm) {
+	try {
+		const res = await panel.validateDedicatedInbound(buildDedicatedInboundPayload(form))
+		applyDedicatedInboundRow(form as typeof dedicatedInboundEditForm, res.inbound as Record<string, any>)
+		message.success('Inbound 参数校验通过')
+	} catch (err) {
+		panel.setError(err)
+	}
+}
 
 const filteredDedicatedInboundsForCreate = computed(() =>
 	enabledDedicatedInbounds.value.filter((row) => String(row.protocol || '') === String(orderForm.dedicated_protocol || 'mixed'))
@@ -1377,6 +1523,32 @@ async function copyOrderLines(order: Order) {
 	message.success('发货内容已复制')
 }
 
+function copyLinksLabel(order: Order) {
+	if (order.is_group_head) return '批量复制链接'
+	return '复制链接'
+}
+
+async function copyOrderLinks(order: Order) {
+	if (String(order.mode || '') !== 'dedicated') {
+		message.warning('仅专线订单支持复制链接')
+		return
+	}
+	try {
+		copyingLinksOrderID.value = Number(order.id)
+		const lines = await panel.copyOrderLinks(Number(order.id))
+		if (!String(lines || '').trim()) {
+			message.warning('当前订单没有可复制的链接')
+			return
+		}
+		await navigator.clipboard.writeText(lines)
+		message.success(order.is_group_head ? '整组链接已复制' : '链接已复制')
+	} catch (err) {
+		panel.setError(err)
+	} finally {
+		copyingLinksOrderID.value = null
+	}
+}
+
 async function previewImport() {
 	if (previewingImport.value) return
   try {
@@ -1499,12 +1671,7 @@ function resetDedicatedForm() {
 }
 
 function resetDedicatedInboundForm() {
-	dedicatedInboundForm.name = ''
-	dedicatedInboundForm.protocol = 'mixed'
-	dedicatedInboundForm.listen_port = 1080
-	dedicatedInboundForm.priority = 100
-	dedicatedInboundForm.enabled = true
-	dedicatedInboundForm.notes = ''
+	applyDedicatedInboundRow(dedicatedInboundForm as typeof dedicatedInboundEditForm, createDedicatedInboundDefaults() as Record<string, any>)
 }
 
 function resetDedicatedIngressForm() {
@@ -1553,14 +1720,7 @@ async function createDedicatedEntry() {
 
 async function createDedicatedInbound() {
 	try {
-		await panel.createDedicatedInbound({
-			name: dedicatedInboundForm.name,
-			protocol: dedicatedInboundForm.protocol,
-			listen_port: Number(dedicatedInboundForm.listen_port),
-			priority: Number(dedicatedInboundForm.priority),
-			enabled: dedicatedInboundForm.enabled,
-			notes: dedicatedInboundForm.notes
-		})
+		await panel.createDedicatedInbound(buildDedicatedInboundPayload(dedicatedInboundForm))
 		if (!dedicatedIngressForm.dedicated_inbound_id && enabledDedicatedInbounds.value.length > 0) {
 			dedicatedIngressForm.dedicated_inbound_id = Number(enabledDedicatedInbounds.value[0]?.id || 0)
 		}
@@ -1597,25 +1757,13 @@ async function createDedicatedIngress() {
 
 function openDedicatedInboundEdit(row: any) {
 	dedicatedInboundEditForm.id = Number(row.id)
-	dedicatedInboundEditForm.name = String(row.name || '')
-	dedicatedInboundEditForm.protocol = String(row.protocol || 'mixed')
-	dedicatedInboundEditForm.listen_port = Number(row.listen_port || 0)
-	dedicatedInboundEditForm.priority = Number(row.priority || 100)
-	dedicatedInboundEditForm.enabled = Boolean(row.enabled)
-	dedicatedInboundEditForm.notes = String(row.notes || '')
+	applyDedicatedInboundRow(dedicatedInboundEditForm, row as Record<string, any>)
 	dedicatedInboundEditOpen.value = true
 }
 
 async function saveDedicatedInboundEdit() {
 	try {
-		await panel.updateDedicatedInbound(Number(dedicatedInboundEditForm.id), {
-			name: dedicatedInboundEditForm.name,
-			protocol: dedicatedInboundEditForm.protocol,
-			listen_port: Number(dedicatedInboundEditForm.listen_port),
-			priority: Number(dedicatedInboundEditForm.priority),
-			enabled: dedicatedInboundEditForm.enabled,
-			notes: dedicatedInboundEditForm.notes
-		})
+		await panel.updateDedicatedInbound(Number(dedicatedInboundEditForm.id), buildDedicatedInboundPayload(dedicatedInboundEditForm))
 		dedicatedInboundEditOpen.value = false
 		message.success('Inbound已更新')
 	} catch (err) {
@@ -2256,11 +2404,6 @@ async function saveSettings() {
 			bark_base_url: panel.settings.bark_base_url || '',
 			bark_device_key: panel.settings.bark_device_key || '',
 			bark_group: panel.settings.bark_group || 'xraytool',
-			dedicated_vless_security: panel.settings.dedicated_vless_security || 'tls',
-			dedicated_vless_sni: panel.settings.dedicated_vless_sni || '',
-			dedicated_vless_type: panel.settings.dedicated_vless_type || 'tcp',
-			dedicated_vless_path: panel.settings.dedicated_vless_path || '',
-			dedicated_vless_host: panel.settings.dedicated_vless_host || '',
 			residential_name_prefix: panel.settings.residential_name_prefix || '家宽-Socks5'
 		})
 		message.success('设置已保存')
@@ -2834,6 +2977,7 @@ function downloadBlobFile(data: Blob, filename: string) {
 					  <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
 					  <a-button size="small" @click="openOrderEditSmart(record)">{{ record.is_group_head ? '组编辑' : '编辑' }}</a-button>
 					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
+					  <a-button v-if="record.mode === 'dedicated'" size="small" :loading="copyingLinksOrderID===record.id" @click="copyOrderLinks(record)">{{ copyLinksLabel(record) }}</a-button>
 					  <a-button size="small" :disabled="record.mode === 'dedicated'" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
 					  <a-dropdown>
 						<a-button size="small">更多</a-button>
@@ -2922,6 +3066,7 @@ function downloadBlobFile(data: Blob, filename: string) {
 					<a-space :size="4" wrap>
 					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
 					  <a-button size="small" @click="copyOrderLines(record)">复制发货</a-button>
+					  <a-button v-if="record.mode === 'dedicated'" size="small" :loading="copyingLinksOrderID===record.id" @click="copyOrderLinks(record)">{{ copyLinksLabel(record) }}</a-button>
 					  <a-button v-if="isResidentialMode(record.mode)" size="small" @click="resetOrderCredentials(record.id)">刷新凭据</a-button>
 					  <a-button size="small" danger @click="removeOrder(record.id)">删除</a-button>
 					</a-space>
@@ -3107,16 +3252,10 @@ function downloadBlobFile(data: Blob, filename: string) {
             </a-card>
 
 			<a-card :bordered="false" title="设置-专线" class="max-w-4xl mb-3">
-			  <a-row :gutter="12">
-				<a-col :xs="24" :md="12"><a-form-item label="VLESS Security"><a-input v-model:value="panel.settings.dedicated_vless_security" placeholder="tls / none" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="VLESS SNI"><a-input v-model:value="panel.settings.dedicated_vless_sni" placeholder="如 edge.example.com" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="VLESS Type"><a-input v-model:value="panel.settings.dedicated_vless_type" placeholder="tcp/ws/grpc" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="VLESS Host"><a-input v-model:value="panel.settings.dedicated_vless_host" placeholder="可选 Host" /></a-form-item></a-col>
-				<a-col :xs="24"><a-form-item label="VLESS Path"><a-input v-model:value="panel.settings.dedicated_vless_path" placeholder="可选 /path" /></a-form-item></a-col>
-			  </a-row>
+			  <a-alert type="info" show-icon class="mb-3" message="VLESS 的 Security / TLS / REALITY 已迁移到每个 Inbound 单独配置。" />
 			  <a-space>
 				<a-button @click="openDedicatedManager">管理 Inbound / Ingress</a-button>
-				<span class="text-xs text-slate-500">专线入口管理已迁移到设置中心</span>
+				<span class="text-xs text-slate-500">在 VLESS Inbound 中可分别配置 none / tls / reality、flow、SNI、ShortID、公私钥等参数</span>
 			  </a-space>
 			</a-card>
 
@@ -3231,17 +3370,58 @@ function downloadBlobFile(data: Blob, filename: string) {
 	<a-drawer v-model:open="dedicatedManagerOpen" title="专线 Inbound / Ingress 管理" width="1180" :destroy-on-close="false">
 	  <a-row :gutter="12">
 		<a-col :xs="24" :lg="12">
-		  <a-card size="small" title="新增 Inbound（协议 + 本机监听端口）">
-			<a-space direction="vertical" style="width:100%">
-			  <a-input v-model:value="dedicatedInboundForm.name" placeholder="Inbound名称，如 us-mixed-a" />
-			  <a-select v-model:value="dedicatedInboundForm.protocol" style="width:100%" placeholder="协议">
-				<a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">{{ opt.value }}</a-select-option>
-			  </a-select>
-			  <a-input-number v-model:value="dedicatedInboundForm.listen_port" :min="1" :max="65535" style="width:100%" placeholder="本机监听端口" />
-			  <a-input-number v-model:value="dedicatedInboundForm.priority" :min="1" :max="999" style="width:100%" placeholder="优先级(越小越高)" />
-			  <a-input v-model:value="dedicatedInboundForm.notes" placeholder="备注" />
-			  <a-space>
-				<a-switch :checked="dedicatedInboundForm.enabled" @change="(v:boolean)=>dedicatedInboundForm.enabled=v" />
+			  <a-card size="small" title="新增 Inbound（协议 + 本机监听端口）">
+				<a-space direction="vertical" style="width:100%">
+				  <a-input v-model:value="dedicatedInboundForm.name" placeholder="Inbound名称，如 us-mixed-a" />
+				  <a-select v-model:value="dedicatedInboundForm.protocol" style="width:100%" placeholder="协议">
+					<a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">{{ opt.value }}</a-select-option>
+				  </a-select>
+				  <a-input-number v-model:value="dedicatedInboundForm.listen_port" :min="1" :max="65535" style="width:100%" placeholder="本机监听端口" />
+				  <a-input-number v-model:value="dedicatedInboundForm.priority" :min="1" :max="999" style="width:100%" placeholder="优先级(越小越高)" />
+				  <template v-if="dedicatedInboundCreateIsVless">
+					<a-select v-model:value="dedicatedInboundForm.vless_security" style="width:100%" placeholder="VLESS 安全">
+					  <a-select-option v-for="opt in dedicatedVlessSecurityOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-select-option>
+					</a-select>
+					<a-input v-model:value="dedicatedInboundForm.vless_flow" placeholder="Flow，可选，如 xtls-rprx-vision" />
+					<a-input v-model:value="dedicatedInboundForm.vless_type" placeholder="传输类型，如 tcp / ws / grpc / xhttp" />
+					<a-input v-model:value="dedicatedInboundForm.vless_sni" placeholder="SNI，可选" />
+					<a-input v-model:value="dedicatedInboundForm.vless_fingerprint" placeholder="uTLS 指纹，如 chrome" />
+					<a-input v-model:value="dedicatedInboundForm.vless_host" placeholder="Host，可选；ws/xhttp/httpupgrade 常用" />
+					<a-input v-model:value="dedicatedInboundForm.vless_path" placeholder="Path / ServiceName，可选" />
+					<template v-if="dedicatedInboundCreateUsesTLS">
+					  <a-input v-model:value="dedicatedInboundForm.vless_tls_cert_file" placeholder="TLS 证书文件路径，如 /etc/xray/cert.pem" />
+					  <a-input v-model:value="dedicatedInboundForm.vless_tls_key_file" placeholder="TLS 私钥文件路径，如 /etc/xray/key.pem" />
+					</template>
+					<template v-if="dedicatedInboundCreateUsesReality">
+					  <a-space style="width:100%">
+						<a-switch :checked="dedicatedInboundForm.reality_show" @change="(v:boolean)=>dedicatedInboundForm.reality_show=v" />
+						<span class="text-xs text-slate-500">REALITY 调试输出</span>
+					  </a-space>
+					  <a-space>
+						<a-button size="small" @click="fillRealityKeyPair(dedicatedInboundForm)">自动生成密钥</a-button>
+						<a-button size="small" @click="validateDedicatedInboundConfig(dedicatedInboundForm)">校验参数</a-button>
+					  </a-space>
+					  <a-input v-model:value="dedicatedInboundForm.reality_target" placeholder="Target，如 www.tesla.com:443" />
+					  <a-input v-model:value="dedicatedInboundForm.reality_server_names" placeholder="Server Names，逗号分隔；留空默认取 SNI" />
+					  <a-input v-model:value="dedicatedInboundForm.reality_private_key" placeholder="REALITY 私钥（x25519）" />
+					  <a-input :value="dedicatedInboundForm.reality_public_key" readonly placeholder="公钥会由私钥自动生成" />
+					  <a-input v-model:value="dedicatedInboundForm.reality_short_ids" placeholder="Short IDs，逗号分隔" />
+					  <a-input v-model:value="dedicatedInboundForm.reality_spider_x" placeholder="SpiderX，可选，如 /" />
+					  <a-space style="width:100%">
+						<a-input-number v-model:value="dedicatedInboundForm.reality_xver" :min="0" :max="2" style="width:100%" placeholder="Xver" />
+						<a-input-number v-model:value="dedicatedInboundForm.reality_max_time_diff" :min="0" style="width:100%" placeholder="Max Time Diff(ms)" />
+					  </a-space>
+					  <a-space style="width:100%">
+						<a-input v-model:value="dedicatedInboundForm.reality_min_client_ver" placeholder="Min Client Ver，可选" />
+						<a-input v-model:value="dedicatedInboundForm.reality_max_client_ver" placeholder="Max Client Ver，可选" />
+					  </a-space>
+					  <a-input v-model:value="dedicatedInboundForm.reality_mldsa65_seed" placeholder="mldsa65 Seed，可选" />
+					  <a-input v-model:value="dedicatedInboundForm.reality_mldsa65_verify" placeholder="mldsa65 Verify，可选" />
+					</template>
+				  </template>
+				  <a-input v-model:value="dedicatedInboundForm.notes" placeholder="备注" />
+				  <a-space>
+					<a-switch :checked="dedicatedInboundForm.enabled" @change="(v:boolean)=>dedicatedInboundForm.enabled=v" />
 				<span class="text-xs text-slate-500">启用</span>
 			  </a-space>
 			  <a-space>
@@ -3290,7 +3470,12 @@ function downloadBlobFile(data: Blob, filename: string) {
 				  <span class="font-mono text-xs">{{ record.name || '-' }}</span>
 				</template>
 			  </a-table-column>
-			  <a-table-column title="协议" data-index="protocol" key="protocol" width="100" />
+			  <a-table-column title="协议" key="protocol" width="180">
+				<template #default="{ record }">
+				  <span>{{ record.protocol }}</span>
+				  <span v-if="record.protocol === 'vless'" class="text-xs text-slate-500"> / {{ record.vless_security || 'none' }}</span>
+				</template>
+			  </a-table-column>
 			  <a-table-column title="监听" key="listen_port" width="100">
 				<template #default="{ record }">:{{ record.listen_port }}</template>
 			  </a-table-column>
@@ -3426,11 +3611,12 @@ function downloadBlobFile(data: Blob, filename: string) {
         <div class="mb-2 flex items-center justify-between">
           <div class="font-semibold">订单条目 ({{ panel.selectedOrder.items.length }})</div>
           <a-space>
-            <a-input-number v-model:value="exportCount" :min="0" :max="panel.selectedOrder.items.length" size="small" />
-            <a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
-            <a-button size="small" :loading="exportingOrderID===panel.selectedOrder.id" @click="exportOrder(panel.selectedOrder.id)">提取导出</a-button>
-            <a-button size="small" @click="copyOrderLines(panel.selectedOrder)">复制发货内容</a-button>
-          </a-space>
+				<a-input-number v-model:value="exportCount" :min="0" :max="panel.selectedOrder.items.length" size="small" />
+				<a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
+				<a-button size="small" :loading="exportingOrderID===panel.selectedOrder.id" @click="exportOrder(panel.selectedOrder.id)">提取导出</a-button>
+				<a-button v-if="panel.selectedOrder.mode === 'dedicated'" size="small" :loading="copyingLinksOrderID===panel.selectedOrder.id" @click="copyOrderLinks(panel.selectedOrder)">{{ copyLinksLabel(panel.selectedOrder) }}</a-button>
+				<a-button size="small" @click="copyOrderLines(panel.selectedOrder)">复制发货内容</a-button>
+			  </a-space>
         </div>
 
         <a-table
@@ -3568,6 +3754,55 @@ function downloadBlobFile(data: Blob, filename: string) {
 		</a-form-item>
 		<a-form-item label="监听端口"><a-input-number v-model:value="dedicatedInboundEditForm.listen_port" :min="1" :max="65535" style="width:100%" /></a-form-item>
 		<a-form-item label="优先级"><a-input-number v-model:value="dedicatedInboundEditForm.priority" :min="1" :max="999" style="width:100%" /></a-form-item>
+		<template v-if="dedicatedInboundEditIsVless">
+		  <a-form-item label="VLESS 安全">
+			<a-select v-model:value="dedicatedInboundEditForm.vless_security" style="width:100%">
+			  <a-select-option v-for="opt in dedicatedVlessSecurityOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</a-select-option>
+			</a-select>
+		  </a-form-item>
+		  <a-form-item label="Flow"><a-input v-model:value="dedicatedInboundEditForm.vless_flow" /></a-form-item>
+		  <a-form-item label="传输类型"><a-input v-model:value="dedicatedInboundEditForm.vless_type" placeholder="tcp / ws / grpc / xhttp" /></a-form-item>
+		  <a-form-item label="SNI"><a-input v-model:value="dedicatedInboundEditForm.vless_sni" /></a-form-item>
+		  <a-form-item label="uTLS 指纹"><a-input v-model:value="dedicatedInboundEditForm.vless_fingerprint" placeholder="chrome" /></a-form-item>
+		  <a-form-item label="Host"><a-input v-model:value="dedicatedInboundEditForm.vless_host" /></a-form-item>
+		  <a-form-item label="Path / ServiceName"><a-input v-model:value="dedicatedInboundEditForm.vless_path" /></a-form-item>
+		  <template v-if="dedicatedInboundEditUsesTLS">
+			<a-form-item label="TLS 证书文件"><a-input v-model:value="dedicatedInboundEditForm.vless_tls_cert_file" /></a-form-item>
+			<a-form-item label="TLS 私钥文件"><a-input v-model:value="dedicatedInboundEditForm.vless_tls_key_file" /></a-form-item>
+		  </template>
+		  <template v-if="dedicatedInboundEditUsesReality">
+			<a-form-item>
+			  <a-switch :checked="dedicatedInboundEditForm.reality_show" @change="(v:boolean)=>dedicatedInboundEditForm.reality_show=v" />
+			  <span class="ml-2 text-xs text-slate-500">REALITY 调试输出</span>
+			</a-form-item>
+			<a-form-item>
+			  <a-space>
+				<a-button size="small" @click="fillRealityKeyPair(dedicatedInboundEditForm)">自动生成密钥</a-button>
+				<a-button size="small" @click="validateDedicatedInboundConfig(dedicatedInboundEditForm)">校验参数</a-button>
+			  </a-space>
+			</a-form-item>
+			<a-form-item label="Target"><a-input v-model:value="dedicatedInboundEditForm.reality_target" /></a-form-item>
+			<a-form-item label="Server Names"><a-input v-model:value="dedicatedInboundEditForm.reality_server_names" placeholder="逗号分隔；留空默认取 SNI" /></a-form-item>
+			<a-form-item label="私钥"><a-input v-model:value="dedicatedInboundEditForm.reality_private_key" /></a-form-item>
+			<a-form-item label="公钥"><a-input :value="dedicatedInboundEditForm.reality_public_key" readonly /></a-form-item>
+			<a-form-item label="Short IDs"><a-input v-model:value="dedicatedInboundEditForm.reality_short_ids" placeholder="逗号分隔" /></a-form-item>
+			<a-form-item label="SpiderX"><a-input v-model:value="dedicatedInboundEditForm.reality_spider_x" /></a-form-item>
+			<a-form-item label="Xver / Max Time Diff(ms)">
+			  <a-space style="width:100%">
+				<a-input-number v-model:value="dedicatedInboundEditForm.reality_xver" :min="0" :max="2" style="width:100%" />
+				<a-input-number v-model:value="dedicatedInboundEditForm.reality_max_time_diff" :min="0" style="width:100%" />
+			  </a-space>
+			</a-form-item>
+			<a-form-item label="客户端版本限制">
+			  <a-space style="width:100%">
+				<a-input v-model:value="dedicatedInboundEditForm.reality_min_client_ver" placeholder="Min" />
+				<a-input v-model:value="dedicatedInboundEditForm.reality_max_client_ver" placeholder="Max" />
+			  </a-space>
+			</a-form-item>
+			<a-form-item label="mldsa65 Seed"><a-input v-model:value="dedicatedInboundEditForm.reality_mldsa65_seed" /></a-form-item>
+			<a-form-item label="mldsa65 Verify"><a-input v-model:value="dedicatedInboundEditForm.reality_mldsa65_verify" /></a-form-item>
+		  </template>
+		</template>
 		<a-form-item label="备注"><a-input v-model:value="dedicatedInboundEditForm.notes" /></a-form-item>
 		<a-form-item>
 		  <a-switch :checked="dedicatedInboundEditForm.enabled" @change="(v:boolean)=>dedicatedInboundEditForm.enabled=v" />

@@ -819,36 +819,33 @@ func (s *OrderService) ExportOrderLines(orderID uint) (string, error) {
 	return lines, err
 }
 
+func (s *OrderService) CopyOrderLinkLines(orderID uint) (string, error) {
+	var order model.Order
+	if err := s.db.Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").First(&order, orderID).Error; err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+		return "", errors.New("only dedicated order supports copy links")
+	}
+	ctx, err := s.loadDedicatedExportContext(order)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(ctx.buildLinkLines(false), "\n"), nil
+}
+
 func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOptions) (string, string, error) {
 	var order model.Order
 	if err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").First(&order, orderID).Error; err != nil {
 		return "", "", err
 	}
-
-	ordersForExport := []model.Order{order}
-	if order.IsGroupHead {
-		children := []model.Order{}
-		if err := s.db.Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Where("parent_order_id = ?", order.ID).Order("sequence_no asc, id asc").Find(&children).Error; err != nil {
-			return "", "", err
-		}
-		if len(children) > 0 {
-			ordersForExport = children
-		}
+	ctx, err := s.loadDedicatedExportContext(order)
+	if err != nil && !strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+		ctx = dedicatedExportContext{baseOrder: order}
+	} else if err != nil {
+		return "", "", err
 	}
-
-	itemsByOrder := map[uint][]model.OrderItem{}
-	items := make([]model.OrderItem, 0)
-	for _, oneOrder := range ordersForExport {
-		orderItems := []model.OrderItem{}
-		if err := s.db.Where("order_id = ? and status = ?", oneOrder.ID, model.OrderItemStatusActive).Order("id asc").Find(&orderItems).Error; err != nil {
-			return "", "", err
-		}
-		itemsByOrder[oneOrder.ID] = orderItems
-		items = append(items, orderItems...)
-	}
-	if len(items) == 0 {
-		return "", "", errors.New("no active items")
-	}
+	items := ctx.items
 
 	canShuffle := opts.Shuffle && !strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated)
 	if canShuffle {
@@ -866,33 +863,7 @@ func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOp
 
 	lines := make([]string, 0, len(items)+4)
 	if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
-		linkCfg := s.loadExportLinkSettings()
-		itemIDs := make([]uint, 0, len(items))
-		for _, item := range items {
-			itemIDs = append(itemIDs, item.ID)
-		}
-		egressByItem := map[uint]model.DedicatedEgress{}
-		if len(itemIDs) > 0 {
-			egressRows := []model.DedicatedEgress{}
-			if err := s.db.Where("order_item_id in ?", itemIDs).Find(&egressRows).Error; err == nil {
-				for _, row := range egressRows {
-					egressByItem[row.OrderItemID] = row
-				}
-			}
-		}
-		for _, oneOrder := range ordersForExport {
-			for _, item := range itemsByOrder[oneOrder.ID] {
-				egress := egressByItem[item.ID]
-				tag := dedicatedLinkTag(egress.CountryCode, egress.ExitIP)
-				domainLine := dedicatedDomainCredentialLine(oneOrder, item)
-				socksLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureMixed, linkCfg, tag)
-				vlessLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureVless, linkCfg, tag)
-				vmessLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureVmess, linkCfg, tag)
-				ssLink := buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureShadowsocks, linkCfg, tag)
-				parts := []string{domainLine, socksLink, vlessLink, vmessLink, ssLink}
-				lines = append(lines, strings.Join(parts, "; ")+";")
-			}
-		}
+		lines = ctx.buildLinkLines(true)
 		if opts.Count > 0 && opts.Count < len(lines) {
 			lines = lines[:opts.Count]
 		}
@@ -902,6 +873,78 @@ func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOp
 		lines = append(lines, fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password))
 	}
 	return strings.Join(lines, "\n"), s.exportFilename(order, items), nil
+}
+
+type dedicatedExportContext struct {
+	baseOrder       model.Order
+	ordersForExport []model.Order
+	itemsByOrder    map[uint][]model.OrderItem
+	items           []model.OrderItem
+	egressByItem    map[uint]model.DedicatedEgress
+}
+
+func (s *OrderService) loadDedicatedExportContext(order model.Order) (dedicatedExportContext, error) {
+	ctx := dedicatedExportContext{
+		baseOrder:       order,
+		ordersForExport: []model.Order{order},
+		itemsByOrder:    map[uint][]model.OrderItem{},
+		egressByItem:    map[uint]model.DedicatedEgress{},
+	}
+	if order.IsGroupHead {
+		children := []model.Order{}
+		if err := s.db.Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Where("parent_order_id = ?", order.ID).Order("sequence_no asc, id asc").Find(&children).Error; err != nil {
+			return ctx, err
+		}
+		if len(children) > 0 {
+			ctx.ordersForExport = children
+		}
+	}
+	for _, oneOrder := range ctx.ordersForExport {
+		orderItems := []model.OrderItem{}
+		if err := s.db.Where("order_id = ? and status = ?", oneOrder.ID, model.OrderItemStatusActive).Order("id asc").Find(&orderItems).Error; err != nil {
+			return ctx, err
+		}
+		ctx.itemsByOrder[oneOrder.ID] = orderItems
+		ctx.items = append(ctx.items, orderItems...)
+	}
+	if len(ctx.items) == 0 {
+		return ctx, errors.New("no active items")
+	}
+	itemIDs := make([]uint, 0, len(ctx.items))
+	for _, item := range ctx.items {
+		itemIDs = append(itemIDs, item.ID)
+	}
+	if len(itemIDs) > 0 {
+		egressRows := []model.DedicatedEgress{}
+		if err := s.db.Where("order_item_id in ?", itemIDs).Find(&egressRows).Error; err == nil {
+			for _, row := range egressRows {
+				ctx.egressByItem[row.OrderItemID] = row
+			}
+		}
+	}
+	return ctx, nil
+}
+
+func (ctx dedicatedExportContext) buildLinkLines(includeDomain bool) []string {
+	lines := make([]string, 0, len(ctx.items))
+	for _, oneOrder := range ctx.ordersForExport {
+		for _, item := range ctx.itemsByOrder[oneOrder.ID] {
+			egress := ctx.egressByItem[item.ID]
+			tag := dedicatedLinkTag(egress.CountryCode, egress.ExitIP)
+			parts := make([]string, 0, 5)
+			if includeDomain {
+				parts = append(parts, dedicatedDomainCredentialLine(oneOrder, item))
+			}
+			parts = append(parts,
+				buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureMixed, tag),
+				buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureVless, tag),
+				buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureVmess, tag),
+				buildOrderItemLinkByProtocol(oneOrder, item, model.DedicatedFeatureShadowsocks, tag),
+			)
+			lines = append(lines, strings.Join(parts, "; ")+";")
+		}
+	}
+	return lines
 }
 
 func (s *OrderService) TestOrder(orderID uint) (map[uint]string, error) {

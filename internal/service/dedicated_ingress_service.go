@@ -16,12 +16,33 @@ type DedicatedIngressService struct {
 }
 
 type DedicatedInboundInput struct {
-	Name       string `json:"name"`
-	Protocol   string `json:"protocol"`
-	ListenPort int    `json:"listen_port"`
-	Priority   int    `json:"priority"`
-	Enabled    *bool  `json:"enabled"`
-	Notes      string `json:"notes"`
+	Name                 string `json:"name"`
+	Protocol             string `json:"protocol"`
+	ListenPort           int    `json:"listen_port"`
+	Priority             int    `json:"priority"`
+	Enabled              *bool  `json:"enabled"`
+	Notes                string `json:"notes"`
+	VlessSecurity        string `json:"vless_security"`
+	VlessFlow            string `json:"vless_flow"`
+	VlessType            string `json:"vless_type"`
+	VlessSNI             string `json:"vless_sni"`
+	VlessHost            string `json:"vless_host"`
+	VlessPath            string `json:"vless_path"`
+	VlessFingerprint     string `json:"vless_fingerprint"`
+	VlessTLSCertFile     string `json:"vless_tls_cert_file"`
+	VlessTLSKeyFile      string `json:"vless_tls_key_file"`
+	RealityShow          *bool  `json:"reality_show"`
+	RealityTarget        string `json:"reality_target"`
+	RealityServerNames   string `json:"reality_server_names"`
+	RealityPrivateKey    string `json:"reality_private_key"`
+	RealityShortIDs      string `json:"reality_short_ids"`
+	RealitySpiderX       string `json:"reality_spider_x"`
+	RealityXver          int    `json:"reality_xver"`
+	RealityMaxTimeDiff   int    `json:"reality_max_time_diff"`
+	RealityMinClientVer  string `json:"reality_min_client_ver"`
+	RealityMaxClientVer  string `json:"reality_max_client_ver"`
+	RealityMLDSA65Seed   string `json:"reality_mldsa65_seed"`
+	RealityMLDSA65Verify string `json:"reality_mldsa65_verify"`
 }
 
 type DedicatedIngressInput struct {
@@ -47,6 +68,7 @@ func (s *DedicatedIngressService) ListInbounds() ([]model.DedicatedInbound, erro
 	}).Order("enabled desc, priority asc, id asc").Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	fillDedicatedInboundDerivedFieldsForList(rows)
 	return rows, nil
 }
 
@@ -73,6 +95,7 @@ func (s *DedicatedIngressService) CreateInbound(in DedicatedInboundInput) (*mode
 	if err := s.db.Create(&row).Error; err != nil {
 		return nil, err
 	}
+	fillDedicatedInboundDerivedFields(&row)
 	return &row, nil
 }
 
@@ -105,13 +128,34 @@ func (s *DedicatedIngressService) UpdateInbound(id uint, in DedicatedInboundInpu
 		return nil, errors.New("protocol + listen_port already exists")
 	}
 	updates := map[string]interface{}{
-		"name":        row.Name,
-		"protocol":    row.Protocol,
-		"listen_port": row.ListenPort,
-		"priority":    row.Priority,
-		"enabled":     row.Enabled,
-		"notes":       row.Notes,
-		"updated_at":  time.Now(),
+		"name":                   row.Name,
+		"protocol":               row.Protocol,
+		"listen_port":            row.ListenPort,
+		"priority":               row.Priority,
+		"enabled":                row.Enabled,
+		"notes":                  row.Notes,
+		"vless_security":         row.VlessSecurity,
+		"vless_flow":             row.VlessFlow,
+		"vless_type":             row.VlessType,
+		"vless_sni":              row.VlessSNI,
+		"vless_host":             row.VlessHost,
+		"vless_path":             row.VlessPath,
+		"vless_fingerprint":      row.VlessFingerprint,
+		"vless_tls_cert_file":    row.VlessTLSCertFile,
+		"vless_tls_key_file":     row.VlessTLSKeyFile,
+		"reality_show":           row.RealityShow,
+		"reality_target":         row.RealityTarget,
+		"reality_server_names":   row.RealityServerNames,
+		"reality_private_key":    row.RealityPrivateKey,
+		"reality_short_ids":      row.RealityShortIDs,
+		"reality_spider_x":       row.RealitySpiderX,
+		"reality_xver":           row.RealityXver,
+		"reality_max_time_diff":  row.RealityMaxTimeDiff,
+		"reality_min_client_ver": row.RealityMinClientVer,
+		"reality_max_client_ver": row.RealityMaxClientVer,
+		"reality_mldsa65_seed":   row.RealityMLDSA65Seed,
+		"reality_mldsa65_verify": row.RealityMLDSA65Verify,
+		"updated_at":             time.Now(),
 	}
 	if err := s.db.Model(&model.DedicatedInbound{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return nil, err
@@ -119,6 +163,7 @@ func (s *DedicatedIngressService) UpdateInbound(id uint, in DedicatedInboundInpu
 	if err := s.db.First(&base, id).Error; err != nil {
 		return nil, err
 	}
+	fillDedicatedInboundDerivedFields(&base)
 	return &base, nil
 }
 
@@ -273,14 +318,39 @@ func normalizeDedicatedInboundInput(in DedicatedInboundInput) (model.DedicatedIn
 	if name == "" {
 		name = strings.ToUpper(protocol) + "-" + fmt.Sprintf("%d", in.ListenPort)
 	}
-	return model.DedicatedInbound{
-		Name:       name,
-		Protocol:   protocol,
-		ListenPort: in.ListenPort,
-		Priority:   in.Priority,
-		Enabled:    enabled,
-		Notes:      strings.TrimSpace(in.Notes),
-	}, nil
+	row := model.DedicatedInbound{
+		Name:                 name,
+		Protocol:             protocol,
+		ListenPort:           in.ListenPort,
+		Priority:             in.Priority,
+		Enabled:              enabled,
+		Notes:                strings.TrimSpace(in.Notes),
+		VlessSecurity:        in.VlessSecurity,
+		VlessFlow:            in.VlessFlow,
+		VlessType:            in.VlessType,
+		VlessSNI:             in.VlessSNI,
+		VlessHost:            in.VlessHost,
+		VlessPath:            in.VlessPath,
+		VlessFingerprint:     in.VlessFingerprint,
+		VlessTLSCertFile:     in.VlessTLSCertFile,
+		VlessTLSKeyFile:      in.VlessTLSKeyFile,
+		RealityShow:          in.RealityShow != nil && *in.RealityShow,
+		RealityTarget:        in.RealityTarget,
+		RealityServerNames:   in.RealityServerNames,
+		RealityPrivateKey:    in.RealityPrivateKey,
+		RealityShortIDs:      in.RealityShortIDs,
+		RealitySpiderX:       in.RealitySpiderX,
+		RealityXver:          in.RealityXver,
+		RealityMaxTimeDiff:   in.RealityMaxTimeDiff,
+		RealityMinClientVer:  in.RealityMinClientVer,
+		RealityMaxClientVer:  in.RealityMaxClientVer,
+		RealityMLDSA65Seed:   in.RealityMLDSA65Seed,
+		RealityMLDSA65Verify: in.RealityMLDSA65Verify,
+	}
+	if err := normalizeDedicatedVlessInbound(&row); err != nil {
+		return model.DedicatedInbound{}, err
+	}
+	return row, nil
 }
 
 func (s *DedicatedIngressService) normalizeDedicatedIngressInput(in DedicatedIngressInput) (model.DedicatedIngress, error) {
