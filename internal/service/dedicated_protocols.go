@@ -278,6 +278,14 @@ func parseDedicatedCredentialLinesForProtocol(lines string, protocol string) ([]
 			continue
 		}
 		if protocol == model.DedicatedFeatureVmess || protocol == model.DedicatedFeatureVless {
+			if strings.Contains(raw, ":") {
+				row, err := parseDedicatedCredentialLines(raw)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, row[0])
+				continue
+			}
 			out = append(out, DedicatedCredentialLine{UUID: raw})
 			continue
 		}
