@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and follows the repository release tags.
 
 ## [Unreleased]
 
+## [v0.1.36] - 2026-03-15
+
+### Changed
+
+- Release workflow now only builds and publishes `linux/amd64` artifacts.
+
+## [v0.1.35] - 2026-03-15
+
 ### Added
 
 - GitHub Release CI that can build Linux `amd64` and `arm64` artifacts from either tag pushes or manual workflow dispatch.
@@ -17,7 +25,7 @@ The format is based on Keep a Changelog and follows the repository release tags.
 
 - Dedicated ingress route selection no longer falls back to unrelated route types when no matching enabled ingress line exists.
 - VLESS dedicated links are now generated from inbound-derived share parameters instead of a lossy compatibility string.
-- Release workflow now uploads workflow artifacts and `checksums.txt`, can generate GitHub Releases from manual runs, and only builds `linux/amd64`.
+- Release workflow now uploads workflow artifacts and `checksums.txt`, and can generate GitHub Releases from manual runs.
 
 ## [v0.1.34] - 2026-03-13
 
