@@ -91,6 +91,7 @@ esac
 
 TMP_DIR="$(mktemp -d "${PROJECT_ROOT}/.tmp-e2e.XXXXXX")"
 TMP_DIR_REL="$(basename "$TMP_DIR")"
+DIST_DIR="${TMP_DIR}/dist"
 cleanup() {
   rm -rf "$TMP_DIR"
 }
@@ -101,25 +102,19 @@ CI=true pnpm --dir "${PROJECT_ROOT}/frontend" install --frozen-lockfile
 CI=true pnpm --dir "${PROJECT_ROOT}/frontend" run build
 
 echo "==> building Linux binaries for ${ORB_GOARCH} (cgo-enabled container)"
+mkdir -p "${DIST_DIR}"
 docker run --rm --platform "linux/${ORB_GOARCH}" \
   -v "${PROJECT_ROOT}:/work" \
   -w /work \
   golang:1.26-bookworm \
-  bash -lc "/usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/xraytool' ./cmd/xraytool && /usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/xraytoolctl' ./cmd/xtoolctl"
+  bash -lc "/usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/dist/xraytool-linux-${ORB_GOARCH}' ./cmd/xraytool && /usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/dist/xraytoolctl-linux-${ORB_GOARCH}' ./cmd/xtoolctl"
 
 echo "==> packaging local release tarball"
-mkdir -p "${TMP_DIR}/release"
-cp "${TMP_DIR}/xraytool" "${TMP_DIR}/release/xraytool"
-cp "${TMP_DIR}/xraytoolctl" "${TMP_DIR}/release/xraytoolctl"
-cp -R "${PROJECT_ROOT}/deploy" "${TMP_DIR}/release/deploy"
-cp -R "${PROJECT_ROOT}/web/dist" "${TMP_DIR}/release/web-dist"
-cp "${PROJECT_ROOT}/.env.example" "${TMP_DIR}/release/.env.example"
-cp "${PROJECT_ROOT}/README.md" "${TMP_DIR}/release/README.md"
-COPYFILE_DISABLE=1 tar -C "${TMP_DIR}" -czf "${TMP_DIR}/xraytool-linux-${ORB_GOARCH}.tar.gz" release
+DIST_DIR="${DIST_DIR}" bash "${PROJECT_ROOT}/scripts/package_release.sh" "${ORB_GOARCH}"
 
 echo "==> installing service inside Orb machine"
 orb -u root env \
-  XTOOL_PACKAGE_PATH="${TMP_DIR}/xraytool-linux-${ORB_GOARCH}.tar.gz" \
+  XTOOL_PACKAGE_PATH="${DIST_DIR}/xraytool-linux-${ORB_GOARCH}.tar.gz" \
   bash "${INSTALLER}" \
   --non-interactive \
   --install-dir "${INSTALL_DIR}" \

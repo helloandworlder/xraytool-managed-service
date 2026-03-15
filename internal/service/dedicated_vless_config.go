@@ -478,3 +478,14 @@ func appendVlessLinkParams(params url.Values, row *model.DedicatedInbound, host 
 		}
 	}
 }
+
+func FillDedicatedInboundDerivedFieldsForShare(row *model.DedicatedInbound) {
+	if row == nil {
+		return
+	}
+	fillDedicatedInboundDerivedFields(row)
+}
+
+func AppendVlessLinkParamsForShare(params url.Values, row *model.DedicatedInbound, host string) {
+	appendVlessLinkParams(params, row, host)
+}

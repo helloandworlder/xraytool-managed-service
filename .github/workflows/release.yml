@@ -1,13 +1,37 @@
-name: Release Build
+name: Release CI
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, for example v0.2.0'
+        required: true
+        type: string
+      draft:
+        description: 'Create release as draft'
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: 'Mark release as prerelease'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref_name || github.event.inputs.version }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.26.0'
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10.28.2'
 
 jobs:
   build:
@@ -19,25 +43,46 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version: ${{ env.GO_VERSION }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.28.2
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${{ github.event.inputs.version }}"
+            version="${version#refs/tags/}"
+            if [[ "${version}" != v* ]]; then
+              version="v${version}"
+            fi
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          echo "tag_name=${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_name=XrayTool ${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run backend tests
+        run: go test ./...
 
       - name: Build frontend
         working-directory: frontend
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
+
+      - name: Build backend binaries locally
+        run: go build ./...
 
       - name: Build binaries
         run: |
@@ -46,7 +91,7 @@ jobs:
             set -euo pipefail
             apt-get update
             apt-get install -y ca-certificates curl gcc gcc-aarch64-linux-gnu
-            curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz -o /tmp/go.tgz
+            curl -fsSL https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz -o /tmp/go.tgz
             tar -C /usr/local -xzf /tmp/go.tgz
             export PATH=/usr/local/go/bin:$PATH
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytool-linux-amd64 ./cmd/xraytool
@@ -58,22 +103,55 @@ jobs:
       - name: Package release bundles
         run: |
           for arch in amd64 arm64; do
-            workdir="$(mktemp -d)"
-            mkdir -p "${workdir}/release"
-            cp "dist/xraytool-linux-${arch}" "${workdir}/release/xraytool"
-            cp "dist/xraytoolctl-linux-${arch}" "${workdir}/release/xraytoolctl"
-            cp -R deploy "${workdir}/release/deploy"
-            cp -R web/dist "${workdir}/release/web-dist"
-            cp .env.example "${workdir}/release/.env.example"
-            cp README.md "${workdir}/release/README.md"
-            tar -C "${workdir}" -czf "dist/xraytool-linux-${arch}.tar.gz" release
-            rm -rf "${workdir}"
+            bash scripts/package_release.sh "${arch}"
           done
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum \
+            xraytool-linux-amd64 \
+            xraytoolctl-linux-amd64 \
+            xraytool-linux-amd64.tar.gz \
+            xraytool-linux-arm64 \
+            xraytoolctl-linux-arm64 \
+            xraytool-linux-arm64.tar.gz \
+            > checksums.txt
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xraytool-release-${{ steps.meta.outputs.tag_name }}
+          path: |
+            dist/xraytool-linux-amd64
+            dist/xraytoolctl-linux-amd64
+            dist/xraytool-linux-amd64.tar.gz
+            dist/xraytool-linux-arm64
+            dist/xraytoolctl-linux-arm64
+            dist/xraytool-linux-arm64.tar.gz
+            dist/checksums.txt
+
+      - name: Create git tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "${{ steps.meta.outputs.tag_name }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.meta.outputs.tag_name }} already exists"
+          else
+            git tag "${{ steps.meta.outputs.tag_name }}" "${GITHUB_SHA}"
+            git push origin "${{ steps.meta.outputs.tag_name }}"
+          fi
+
       - name: Publish GitHub release assets
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_name }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft == 'true' || false }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease == 'true' || false }}
+          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
           files: |
             dist/xraytool-linux-amd64
             dist/xraytoolctl-linux-amd64
@@ -81,3 +159,6 @@ jobs:
             dist/xraytool-linux-arm64
             dist/xraytoolctl-linux-arm64
             dist/xraytool-linux-arm64.tar.gz
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

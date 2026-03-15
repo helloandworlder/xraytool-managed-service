@@ -843,11 +843,13 @@ func (a *API) toggleDedicatedIngress(c *gin.Context) {
 }
 
 type dedicatedIngressLineResponse struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	RouteType   string `json:"routeType"`
-	IngressHost string `json:"ingressHost"`
-	IngressPort int    `json:"ingressPort"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	RouteType          string `json:"routeType"`
+	IngressHost        string `json:"ingressHost"`
+	IngressPort        int    `json:"ingressPort"`
+	DedicatedInboundID uint   `json:"dedicatedInboundId"`
+	Protocol           string `json:"protocol"`
 }
 
 type dedicatedRuntimeRequest struct {
@@ -877,27 +879,23 @@ func (a *API) listDedicatedIngressLines(c *gin.Context) {
 	}
 
 	items := make([]dedicatedIngressLineResponse, 0)
-	fallback := make([]dedicatedIngressLineResponse, 0)
 	for _, row := range rows {
 		if !row.Enabled || strings.TrimSpace(row.Domain) == "" || row.IngressPort <= 0 {
 			continue
 		}
 		inferred := inferDedicatedRouteTypeCompat(row)
 		item := dedicatedIngressLineResponse{
-			ID:          strconv.FormatUint(uint64(row.ID), 10),
-			Name:        strings.TrimSpace(row.Name),
-			RouteType:   inferred,
-			IngressHost: strings.TrimSpace(row.Domain),
-			IngressPort: row.IngressPort,
+			ID:                 strconv.FormatUint(uint64(row.ID), 10),
+			Name:               strings.TrimSpace(row.Name),
+			RouteType:          inferred,
+			IngressHost:        strings.TrimSpace(row.Domain),
+			IngressPort:        row.IngressPort,
+			DedicatedInboundID: row.DedicatedInboundID,
+			Protocol:           strings.ToUpper(strings.TrimSpace(row.DedicatedInbound.Protocol)),
 		}
-		fallback = append(fallback, item)
 		if inferred == routeType {
 			items = append(items, item)
 		}
-	}
-
-	if len(items) == 0 {
-		items = fallback
 	}
 
 	c.JSON(http.StatusOK, gin.H{"items": items})
@@ -1034,7 +1032,11 @@ func (a *API) handleDedicatedRuntime(c *gin.Context, requireOrderItem bool) {
 		}
 	}
 
-	links := buildDedicatedLinksCompat(protocol, ingress.Domain, ingress.IngressPort, req.Username, req.Password, vmessUUID)
+	links, err := buildDedicatedLinksCompat(protocol, ingress, req.Username, req.Password, vmessUUID)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
 	if len(links) == 0 {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate dedicated links"})
 		return
@@ -1098,7 +1100,7 @@ func (a *API) pickDedicatedIngress(routeType string, ingressLineID string) (mode
 		}
 	}
 	if len(matched) == 0 {
-		matched = enabled
+		return model.DedicatedIngress{}, fmt.Errorf("no enabled dedicated ingress lines available for routeType %s", routeType)
 	}
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].Priority == matched[j].Priority {
@@ -1156,51 +1158,66 @@ func inferDedicatedRouteTypeCompat(row model.DedicatedIngress) string {
 	return "SHORT_VIDEO"
 }
 
-func buildDedicatedLinksCompat(protocol string, host string, port int, username string, password string, vmessUUID string) []string {
+func buildDedicatedLinksCompat(protocol string, ingress model.DedicatedIngress, username string, password string, vmessUUID string) ([]string, error) {
+	host := strings.TrimSpace(ingress.Domain)
+	port := ingress.IngressPort
+	if host == "" || port <= 0 {
+		return nil, errors.New("dedicated ingress host/port is invalid")
+	}
 	uuid := strings.TrimSpace(vmessUUID)
 	if !dedicatedUUIDRegexCompat.MatchString(uuid) {
 		uuid = deriveDedicatedProtocolUUIDCompat("compat", username, password, host, port, protocol)
 	}
-	vless := fmt.Sprintf("vless://%s@%s:%d?type=tcp&security=none#xraytool-vless", url.QueryEscape(uuid), host, port)
-	vmessPayload, _ := json.Marshal(map[string]string{
-		"v":    "2",
-		"ps":   "xraytool-vmess",
-		"add":  host,
-		"port": strconv.Itoa(port),
-		"id":   uuid,
-		"aid":  "0",
-		"net":  "tcp",
-		"type": "none",
-		"host": "",
-		"path": "",
-		"tls":  "",
-	})
-	vmess := "vmess://" + base64.StdEncoding.EncodeToString(vmessPayload)
-	ssCredential := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("chacha20-ietf-poly1305:%s", password)))
-	ss := fmt.Sprintf("ss://%s@%s:%d#xraytool-ss", ssCredential, host, port)
-	socks := fmt.Sprintf("socks5://%s:%s@%s:%d#xraytool-mixed", url.QueryEscape(username), url.QueryEscape(password), host, port)
+	inbound := ingress.DedicatedInbound
+	if inbound.ID > 0 {
+		copyInbound := inbound
+		service.FillDedicatedInboundDerivedFieldsForShare(&copyInbound)
+		inbound = copyInbound
+	}
+	if inbound.ID > 0 {
+		inboundProtocol, err := normalizeDedicatedProtocolCompat(inbound.Protocol)
+		if err == nil && inboundProtocol != protocol {
+			return nil, fmt.Errorf(
+				"ingress %s uses protocol %s, but request expects %s",
+				strings.TrimSpace(ingress.Name),
+				inboundProtocol,
+				protocol,
+			)
+		}
+	}
 
-	all := map[string]string{
-		"VMESS":        vmess,
-		"VLESS":        vless,
-		"SHADOWSOCKS":  ss,
-		"SOCKS5_MIXED": socks,
+	switch protocol {
+	case "VLESS":
+		params := url.Values{}
+		service.AppendVlessLinkParamsForShare(params, &inbound, host)
+		return []string{
+			fmt.Sprintf("vless://%s@%s:%d?%s#xraytool-vless", url.QueryEscape(uuid), host, port, params.Encode()),
+		}, nil
+	case "VMESS":
+		vmessPayload, _ := json.Marshal(map[string]string{
+			"v":    "2",
+			"ps":   "xraytool-vmess",
+			"add":  host,
+			"port": strconv.Itoa(port),
+			"id":   uuid,
+			"aid":  "0",
+			"net":  "tcp",
+			"type": "none",
+			"host": "",
+			"path": "",
+			"tls":  "",
+		})
+		return []string{"vmess://" + base64.StdEncoding.EncodeToString(vmessPayload)}, nil
+	case "SHADOWSOCKS":
+		ssCredential := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("chacha20-ietf-poly1305:%s", password)))
+		return []string{fmt.Sprintf("ss://%s@%s:%d#xraytool-ss", ssCredential, host, port)}, nil
+	case "SOCKS5_MIXED":
+		return []string{
+			fmt.Sprintf("socks5://%s:%s@%s:%d#xraytool-mixed", url.QueryEscape(username), url.QueryEscape(password), host, port),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported protocol %s", protocol)
 	}
-	order := []string{protocol, "VMESS", "VLESS", "SHADOWSOCKS", "SOCKS5_MIXED"}
-	out := make([]string, 0, 4)
-	seen := map[string]struct{}{}
-	for _, key := range order {
-		value := strings.TrimSpace(all[key])
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func deriveDedicatedProtocolUUIDCompat(resourceCode string, username string, password string, host string, port int, protocol string) string {

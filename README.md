@@ -187,6 +187,50 @@ sudo bash public-install.sh --help
 - 调用 `deploy/public-install.sh` 完成 systemd 安装
 - 验证 `systemctl` 服务状态、`/healthz`、登录 API
 
+## Release CI/CD
+
+GitHub Actions 已支持自动构建 Linux release 资产。
+
+### 通过 tag 自动发版
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+触发后会自动：
+
+- 运行后端测试 `go test ./...`
+- 构建前端 `frontend -> web/dist`
+- 交叉编译 Linux `amd64 / arm64`
+- 打包 release tar.gz
+- 生成 `checksums.txt`
+- 发布到 GitHub Releases
+
+### 手动发版
+
+打开 GitHub Actions 里的 `Release CI` 工作流，填写：
+
+- `version`：例如 `v0.2.0`
+- `draft`：是否先发草稿
+- `prerelease`：是否标记预发布
+
+手动触发时，工作流会自动创建对应 tag 并发布 release。
+
+### Release 产物
+
+- `xraytool-linux-amd64`
+- `xraytoolctl-linux-amd64`
+- `xraytool-linux-amd64.tar.gz`
+- `xraytool-linux-arm64`
+- `xraytoolctl-linux-arm64`
+- `xraytool-linux-arm64.tar.gz`
+- `checksums.txt`
+
+详细变更记录见：
+
+- `CHANGELOG.md`
+
 ## 线上升级与回归
 
 ### 一键线上升级（保留端口/账号/Xray API 端口）
