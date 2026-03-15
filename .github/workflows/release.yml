@@ -90,21 +90,16 @@ jobs:
           docker run --rm -v "$PWD":/src -w /src debian:bullseye bash -lc '
             set -euo pipefail
             apt-get update
-            apt-get install -y ca-certificates curl gcc gcc-aarch64-linux-gnu
+            apt-get install -y ca-certificates curl gcc
             curl -fsSL https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz -o /tmp/go.tgz
             tar -C /usr/local -xzf /tmp/go.tgz
             export PATH=/usr/local/go/bin:$PATH
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytool-linux-amd64 ./cmd/xraytool
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
-            CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o dist/xraytool-linux-arm64 ./cmd/xraytool
-            CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o dist/xraytoolctl-linux-arm64 ./cmd/xtoolctl
           '
 
       - name: Package release bundles
-        run: |
-          for arch in amd64 arm64; do
-            bash scripts/package_release.sh "${arch}"
-          done
+        run: bash scripts/package_release.sh amd64
 
       - name: Generate checksums
         run: |
@@ -113,9 +108,6 @@ jobs:
             xraytool-linux-amd64 \
             xraytoolctl-linux-amd64 \
             xraytool-linux-amd64.tar.gz \
-            xraytool-linux-arm64 \
-            xraytoolctl-linux-arm64 \
-            xraytool-linux-arm64.tar.gz \
             > checksums.txt
 
       - name: Upload workflow artifacts
@@ -126,9 +118,6 @@ jobs:
             dist/xraytool-linux-amd64
             dist/xraytoolctl-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
-            dist/xraytool-linux-arm64
-            dist/xraytoolctl-linux-arm64
-            dist/xraytool-linux-arm64.tar.gz
             dist/checksums.txt
 
       - name: Create git tag for manual release
@@ -156,9 +145,6 @@ jobs:
             dist/xraytool-linux-amd64
             dist/xraytoolctl-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
-            dist/xraytool-linux-arm64
-            dist/xraytoolctl-linux-arm64
-            dist/xraytool-linux-arm64.tar.gz
             dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -17,7 +17,7 @@ The format is based on Keep a Changelog and follows the repository release tags.
 
 - Dedicated ingress route selection no longer falls back to unrelated route types when no matching enabled ingress line exists.
 - VLESS dedicated links are now generated from inbound-derived share parameters instead of a lossy compatibility string.
-- Release workflow now uploads workflow artifacts and `checksums.txt`, and can generate GitHub Releases from manual runs.
+- Release workflow now uploads workflow artifacts and `checksums.txt`, can generate GitHub Releases from manual runs, and only builds `linux/amd64`.
 
 ## [v0.1.34] - 2026-03-13
 
@@ -29,4 +29,3 @@ The format is based on Keep a Changelog and follows the repository release tags.
 ### Fixed
 
 - Managed rebuild restart coalescing for runtime stability.
-

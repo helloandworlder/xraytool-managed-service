@@ -202,7 +202,7 @@ git push origin v0.2.0
 
 - 运行后端测试 `go test ./...`
 - 构建前端 `frontend -> web/dist`
-- 交叉编译 Linux `amd64 / arm64`
+- 编译 Linux `amd64`
 - 打包 release tar.gz
 - 生成 `checksums.txt`
 - 发布到 GitHub Releases
@@ -222,9 +222,6 @@ git push origin v0.2.0
 - `xraytool-linux-amd64`
 - `xraytoolctl-linux-amd64`
 - `xraytool-linux-amd64.tar.gz`
-- `xraytool-linux-arm64`
-- `xraytoolctl-linux-arm64`
-- `xraytool-linux-arm64.tar.gz`
 - `checksums.txt`
 
 详细变更记录见：
