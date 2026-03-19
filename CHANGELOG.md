@@ -6,7 +6,7 @@ The format is based on Keep a Changelog and follows the repository release tags.
 
 ## [Unreleased]
 
-## [v0.1.37] - 2026-03-19
+## [v1.1.1] - 2026-03-19
 
 ### Added
 
