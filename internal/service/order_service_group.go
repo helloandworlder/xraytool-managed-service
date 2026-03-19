@@ -70,6 +70,9 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 	}
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.ensureCustomerDedicatedEgressUniqueTx(tx, in.CustomerID, egressRows, nil); err != nil {
+			return err
+		}
 		if err := tx.Create(head).Error; err != nil {
 			return err
 		}
@@ -937,6 +940,46 @@ func buildEgressMatchKey(address string, port int, username string, password str
 	return fmt.Sprintf("%s:%d:%s:%s", strings.TrimSpace(address), port, strings.TrimSpace(username), strings.TrimSpace(password))
 }
 
+func (s *OrderService) ensureCustomerDedicatedEgressUniqueTx(tx *gorm.DB, customerID uint, rows []DedicatedEgressLine, excludeOrderIDs []uint) error {
+	if customerID == 0 || len(rows) == 0 {
+		return nil
+	}
+
+	seen := map[string]DedicatedEgressLine{}
+	for _, row := range rows {
+		key := buildEgressMatchKey(row.Address, row.Port, row.Username, row.Password)
+		if prev, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate dedicated line in request: %s:%d:%s", prev.Address, prev.Port, prev.Username)
+		}
+		seen[key] = row
+	}
+
+	type usedRow struct {
+		Address  string
+		Port     int
+		Username string
+		Password string
+	}
+	used := []usedRow{}
+	q := tx.Table("dedicated_egresses de").
+		Select("de.address, de.port, de.username, de.password").
+		Joins("join orders o on o.id = de.order_id").
+		Where("o.customer_id = ? and o.mode = ? and o.status = ? and o.expires_at > ?", customerID, model.OrderModeDedicated, model.OrderStatusActive, time.Now())
+	if len(excludeOrderIDs) > 0 {
+		q = q.Where("o.id not in ?", uniqueUintIDs(excludeOrderIDs))
+	}
+	if err := q.Scan(&used).Error; err != nil {
+		return err
+	}
+	for _, row := range used {
+		key := buildEgressMatchKey(row.Address, row.Port, row.Username, row.Password)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("dedicated line already used by current customer: %s:%d:%s", row.Address, row.Port, row.Username)
+		}
+	}
+	return nil
+}
+
 func (s *OrderService) loadGroupChildrenByIDsTx(tx *gorm.DB, headID uint, childIDs []uint) ([]model.Order, error) {
 	ids := uniqueUintIDs(childIDs)
 	if len(ids) == 0 {
@@ -954,13 +997,19 @@ func (s *OrderService) loadGroupChildrenByIDsTx(tx *gorm.DB, headID uint, childI
 }
 
 func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, children []model.Order, lines string, now time.Time) error {
-	_ = head
 	egRows, err := parseDedicatedEgressLines(lines)
 	if err != nil {
 		return err
 	}
 	if len(egRows) != len(children) {
 		return fmt.Errorf("lines count %d not equal child orders %d", len(egRows), len(children))
+	}
+	excludeOrderIDs := make([]uint, 0, len(children))
+	for _, child := range children {
+		excludeOrderIDs = append(excludeOrderIDs, child.ID)
+	}
+	if err := s.ensureCustomerDedicatedEgressUniqueTx(tx, head.CustomerID, egRows, excludeOrderIDs); err != nil {
+		return err
 	}
 	for i, child := range children {
 		if len(child.Items) == 0 {

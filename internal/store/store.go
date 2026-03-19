@@ -23,7 +23,7 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func (s *Store) EnsureDefaultSettings(defaultPort int, barkBase string) error {
+func (s *Store) EnsureDefaultSettings(defaultPort int, barkBase string, extraDefaults map[string]string) error {
 	defaults := map[string]string{
 		"default_inbound_port":     strconv.Itoa(defaultPort),
 		"default_inbound_listen":   "0.0.0.0",
@@ -38,6 +38,9 @@ func (s *Store) EnsureDefaultSettings(defaultPort int, barkBase string) error {
 		"dedicated_vless_path":     "",
 		"dedicated_vless_host":     "",
 		"residential_name_prefix":  "家宽-Socks5",
+	}
+	for k, v := range extraDefaults {
+		defaults[k] = v
 	}
 	now := time.Now()
 	for k, v := range defaults {

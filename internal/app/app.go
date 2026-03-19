@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,7 +40,14 @@ func Run() error {
 	}
 
 	st := store.New(database)
-	if err := st.EnsureDefaultSettings(cfg.DefaultInboundPort, cfg.BarkBaseURLFallback); err != nil {
+	if err := st.EnsureDefaultSettings(cfg.DefaultInboundPort, cfg.BarkBaseURLFallback, map[string]string{
+		"gosealight_telemetry_enabled":          strconv.FormatBool(cfg.GoSeaTelemetry.Enabled),
+		"gosealight_base_url":                   cfg.GoSeaTelemetry.BaseURL,
+		"gosealight_node_id":                    cfg.GoSeaTelemetry.NodeID,
+		"gosealight_node_username":              cfg.GoSeaTelemetry.Username,
+		"gosealight_node_password":              cfg.GoSeaTelemetry.Password,
+		"gosealight_telemetry_interval_seconds": strconv.Itoa(cfg.GoSeaTelemetry.IntervalSeconds),
+	}); err != nil {
 		return err
 	}
 	hash, err := auth.HashPassword(cfg.DefaultAdminPass)
@@ -73,8 +81,9 @@ func Run() error {
 	forwardSvc := service.NewForwardOutboundService(database)
 	barkSvc := service.NewBarkService(database)
 	runtimeSvc := service.NewRuntimeStatsService(database, xrayManager)
+	telemetrySvc := service.NewGoSeaLightTelemetryService(st, runtimeSvc, cfg.GoSeaTelemetry, logger)
 	backupSvc := service.NewBackupService(cfg, database, logger)
-	scheduler := service.NewScheduler(database, orderSvc, barkSvc, logger, cfg.SchedulerInterval)
+	scheduler := service.NewScheduler(database, orderSvc, barkSvc, telemetrySvc, logger, cfg.SchedulerInterval)
 
 	engine := api.New(database, st, orderSvc, singboxSvc, nodeSvc, forwardSvc, hostSvc, backupSvc, barkSvc, runtimeSvc, cfg, logger).Router()
 	if err := ensureListenAddrAvailable(cfg.ListenAddr); err != nil {

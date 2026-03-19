@@ -97,6 +97,8 @@ type outboundInfo struct {
 	Protocol string
 	Address  string
 	Port     int
+	User     string
+	Pass     string
 }
 
 type clientRecord struct {
@@ -271,7 +273,9 @@ func main() {
 	var renewExpiredDays int
 	var renewUpcomingDays int
 	var exportVmessXLSX bool
+	var exportSocksTXT bool
 	var exportPath string
+	var exportIPPattern string
 
 	root := &cobra.Command{
 		Use:   "threeuitui",
@@ -284,8 +288,8 @@ func main() {
 			defer func() { _ = logger.Sync() }()
 
 			if renewAllDays > 0 {
-				if exportVmessXLSX {
-					return errors.New("use only one of --renew-all-days, --renew-expired-days, --export-vmess-xlsx")
+				if exportVmessXLSX || exportSocksTXT {
+					return errors.New("use only one of --renew-all-days, --renew-expired-days, --export-vmess-xlsx, --export-socks-txt")
 				}
 				if renewExpiredDays > 0 {
 					return errors.New("use only one of --renew-all-days or --renew-expired-days")
@@ -302,8 +306,8 @@ func main() {
 			}
 
 			if renewExpiredDays > 0 {
-				if exportVmessXLSX {
-					return errors.New("use only one of --renew-all-days, --renew-expired-days, --export-vmess-xlsx")
+				if exportVmessXLSX || exportSocksTXT {
+					return errors.New("use only one of --renew-all-days, --renew-expired-days, --export-vmess-xlsx, --export-socks-txt")
 				}
 				if renewUpcomingDays > 0 {
 					return errors.New("use only one of --renew-all-days, --renew-expired-days or --renew-upcoming-days")
@@ -317,8 +321,8 @@ func main() {
 			}
 
 			if renewUpcomingDays > 0 {
-				if exportVmessXLSX {
-					return errors.New("use only one of --renew-upcoming-days or --export-vmess-xlsx")
+				if exportVmessXLSX || exportSocksTXT {
+					return errors.New("use only one of --renew-upcoming-days, --export-vmess-xlsx or --export-socks-txt")
 				}
 				if strings.TrimSpace(target) == "" {
 					return errors.New("--target is required when --renew-upcoming-days is set")
@@ -329,6 +333,9 @@ func main() {
 			}
 
 			if exportVmessXLSX {
+				if exportSocksTXT {
+					return errors.New("use only one of --export-vmess-xlsx or --export-socks-txt")
+				}
 				if strings.TrimSpace(target) == "" {
 					return errors.New("--target is required when --export-vmess-xlsx is set")
 				}
@@ -337,6 +344,23 @@ func main() {
 					outPath = filepath.Join(".", fmt.Sprintf("3xui-vmess-export-%s.xlsx", time.Now().Format("20060102-150405")))
 				}
 				summary, err := runDirectExportVmess(logger, strings.TrimSpace(target), time.Duration(timeoutSec)*time.Second, outPath)
+				fmt.Println(summary)
+				return err
+			}
+
+			if exportSocksTXT {
+				if strings.TrimSpace(target) == "" {
+					return errors.New("--target is required when --export-socks-txt is set")
+				}
+				if strings.TrimSpace(exportIPPattern) == "" {
+					return errors.New("--ip-pattern is required when --export-socks-txt is set")
+				}
+				outPath := strings.TrimSpace(exportPath)
+				if outPath == "" {
+					safePattern := sanitizeFilePart(exportIPPattern)
+					outPath = filepath.Join(".", fmt.Sprintf("3xui-socks-export-%s-%s.txt", safePattern, time.Now().Format("20060102-150405")))
+				}
+				summary, err := runDirectExportSocks(logger, strings.TrimSpace(target), time.Duration(timeoutSec)*time.Second, strings.TrimSpace(exportIPPattern), outPath)
 				fmt.Println(summary)
 				return err
 			}
@@ -350,7 +374,7 @@ func main() {
 		},
 	}
 
-	root.Flags().StringVar(&target, "target", "", "Target line: <url-with-basepath> <username> <password> [2fa]")
+	root.Flags().StringVar(&target, "target", "", "Target line: <url-with-basepath> <username> <password> [2fa=123456]")
 	root.Flags().IntVar(&timeoutSec, "timeout", 20, "HTTP timeout seconds")
 	root.Flags().StringVar(&logPath, "log", "./threeui-tui.log", "zap log file path")
 	root.Flags().IntVar(&quickDays, "quick-days", 30, "Default renew days for quick today-expired renew")
@@ -358,7 +382,9 @@ func main() {
 	root.Flags().IntVar(&renewExpiredDays, "renew-expired-days", 0, "Non-interactive: renew ONLY expired clients by N days")
 	root.Flags().IntVar(&renewUpcomingDays, "renew-upcoming-days", 0, "Non-interactive: renew unexpired clients expiring within N days by N days")
 	root.Flags().BoolVar(&exportVmessXLSX, "export-vmess-xlsx", false, "Non-interactive: export VMESS dedicated lines to XLSX (Chinese headers)")
-	root.Flags().StringVar(&exportPath, "export-path", "", "Output path for --export-vmess-xlsx")
+	root.Flags().BoolVar(&exportSocksTXT, "export-socks-txt", false, "Non-interactive: export matched SOCKS outbounds to txt as IP:Port:User:Pass")
+	root.Flags().StringVar(&exportPath, "export-path", "", "Output path for export file (--export-vmess-xlsx or --export-socks-txt)")
+	root.Flags().StringVar(&exportIPPattern, "ip-pattern", "", "Wildcard IP pattern for --export-socks-txt, e.g. 38.248.206.*")
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -375,7 +401,7 @@ func newLogger(path string) (*zap.Logger, error) {
 
 func newModel(logger *zap.Logger, initialTarget string, timeout time.Duration, quickDays int) model {
 	ti := textinput.New()
-	ti.Placeholder = "http://host:port/basepath user pass [2fa]"
+	ti.Placeholder = "http://host:port/basepath user pass [2fa=123456]"
 	ti.Focus()
 	ti.CharLimit = 500
 	ti.Width = 100
@@ -1550,6 +1576,39 @@ func runDirectExportVmess(logger *zap.Logger, targetLine string, timeout time.Du
 	return fmt.Sprintf("Loaded=%d VMESS=%d Path=%s", len(records), len(rows), abs), nil
 }
 
+func runDirectExportSocks(logger *zap.Logger, targetLine string, timeout time.Duration, ipPattern, outPath string) (string, error) {
+	ep, err := parseTargetLine(targetLine)
+	if err != nil {
+		return "", err
+	}
+	client, err := newThreeXUIClient(ep, timeout, logger)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := client.Login(ctx); err != nil {
+		return "", err
+	}
+	cfg, err := client.GetConfig(ctx)
+	if err != nil {
+		return "", err
+	}
+	outbounds := parseOutbounds(cfg)
+	lines := buildSocksExportLines(outbounds, ipPattern)
+	if len(lines) == 0 {
+		return fmt.Sprintf("Matched=0 Pattern=%s", ipPattern), nil
+	}
+	if err := exportLines(outPath, lines); err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(outPath)
+	if err != nil {
+		abs = outPath
+	}
+	return fmt.Sprintf("Matched=%d Pattern=%s Path=%s", len(lines), ipPattern, abs), nil
+}
+
 func exportCmd(path string, rows []exportRow) tea.Cmd {
 	return func() tea.Msg {
 		if err := exportXLSX(path, rows); err != nil {
@@ -1566,16 +1625,18 @@ func exportCmd(path string, rows []exportRow) tea.Cmd {
 func parseTargetLine(line string) (endpointConfig, error) {
 	parts := strings.Fields(strings.TrimSpace(line))
 	if len(parts) < 3 {
-		return endpointConfig{}, errors.New("target must be: <url-with-basepath> <username> <password> [2fa]")
+		return endpointConfig{}, errors.New("target must be: <url-with-basepath> <username> <password> [2fa=123456]")
 	}
 	rawURL := strings.TrimSpace(parts[0])
 	username := strings.TrimSpace(parts[1])
 	password := strings.TrimSpace(parts[2])
 	twoFA := ""
 	if len(parts) >= 4 {
-		twoFA = strings.TrimSpace(parts[3])
-		twoFA = strings.TrimPrefix(twoFA, "2fa=")
-		twoFA = strings.TrimPrefix(twoFA, "2FA=")
+		extra := strings.TrimSpace(parts[3])
+		lowerExtra := strings.ToLower(extra)
+		if strings.HasPrefix(lowerExtra, "2fa=") {
+			twoFA = strings.TrimSpace(extra[4:])
+		}
 	}
 
 	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
@@ -1647,7 +1708,7 @@ func (c *threeXUIClient) Login(ctx context.Context) error {
 		}
 		low := strings.ToLower(msg.Msg)
 		if strings.Contains(low, "two-factor") && strings.TrimSpace(c.ep.TwoFA) == "" {
-			return fmt.Errorf("%s (hint: panel may require 2FA, append code as 4th field: <url> <user> <pass> <2fa>)", msg.Msg)
+			return fmt.Errorf("%s (hint: panel may require 2FA, append code as 4th field: <url> <user> <pass> <2fa=123456>)", msg.Msg)
 		}
 		return errors.New(msg.Msg)
 	}
@@ -1916,6 +1977,13 @@ func parseOutbounds(cfg map[string]any) map[string]outboundInfo {
 				if sv, ok := servers[0].(map[string]any); ok {
 					info.Address = toString(sv["address"])
 					info.Port = int(toInt64(sv["port"]))
+					users, _ := sv["users"].([]any)
+					if len(users) > 0 {
+						if userObj, ok := users[0].(map[string]any); ok {
+							info.User = toString(userObj["user"])
+							info.Pass = toString(userObj["pass"])
+						}
+					}
 				}
 			}
 		}
@@ -2274,6 +2342,79 @@ func exportXLSX(path string, rows []exportRow) error {
 	}
 
 	return f.SaveAs(path)
+}
+
+func buildSocksExportLines(outbounds map[string]outboundInfo, ipPattern string) []string {
+	pattern := strings.TrimSpace(ipPattern)
+	unique := map[string]struct{}{}
+	lines := make([]string, 0)
+	for _, info := range outbounds {
+		if !strings.EqualFold(info.Protocol, "socks") {
+			continue
+		}
+		if info.Address == "" || info.Port <= 0 {
+			continue
+		}
+		if !matchIPPattern(pattern, info.Address) {
+			continue
+		}
+		line := fmt.Sprintf("%s:%d:%s:%s", info.Address, info.Port, info.User, info.Pass)
+		if _, ok := unique[line]; ok {
+			continue
+		}
+		unique[line] = struct{}{}
+		lines = append(lines, line)
+	}
+	sort.Strings(lines)
+	return lines
+}
+
+func exportLines(path string, lines []string) error {
+	content := strings.Join(lines, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func matchIPPattern(pattern, ip string) bool {
+	pattern = strings.TrimSpace(pattern)
+	ip = strings.TrimSpace(ip)
+	if pattern == "" {
+		return true
+	}
+	ok, err := filepath.Match(pattern, ip)
+	if err != nil {
+		return ip == pattern
+	}
+	return ok
+}
+
+func sanitizeFilePart(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "all"
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		switch r {
+		case '.', '-', '_':
+			b.WriteRune(r)
+		case '*':
+			b.WriteString("star")
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._-")
+	if out == "" {
+		return "export"
+	}
+	return out
 }
 
 func prefixToken(s string) string {

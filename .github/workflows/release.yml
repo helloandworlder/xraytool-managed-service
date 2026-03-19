@@ -71,6 +71,8 @@ jobs:
           fi
           echo "tag_name=${version}" >> "${GITHUB_OUTPUT}"
           echo "release_name=XrayTool ${version}" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
       - name: Run backend tests
         run: go test ./...
@@ -82,7 +84,9 @@ jobs:
           pnpm run build
 
       - name: Build backend binaries locally
-        run: go build ./...
+        run: |
+          LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.short_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
+          go build -ldflags "$LDFLAGS" ./...
 
       - name: Build binaries
         run: |
@@ -94,8 +98,9 @@ jobs:
             curl -fsSL https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz -o /tmp/go.tgz
             tar -C /usr/local -xzf /tmp/go.tgz
             export PATH=/usr/local/go/bin:$PATH
-            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytool-linux-amd64 ./cmd/xraytool
-            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
+            LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.short_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
+            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xraytool-linux-amd64 ./cmd/xraytool
+            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
           '
 
       - name: Package release bundles

@@ -24,6 +24,16 @@ type Config struct {
 	XrayCommandTag      string
 	SchedulerInterval   time.Duration
 	BarkBaseURLFallback string
+	GoSeaTelemetry      GoSeaTelemetryConfig
+}
+
+type GoSeaTelemetryConfig struct {
+	Enabled         bool
+	BaseURL         string
+	NodeID          string
+	Username        string
+	Password        string
+	IntervalSeconds int
 }
 
 func Load() Config {
@@ -47,6 +57,14 @@ func Load() Config {
 		XrayCommandTag:      "api",
 		SchedulerInterval:   time.Duration(getEnvInt("XTOOL_SCHEDULER_SECONDS", 30)) * time.Second,
 		BarkBaseURLFallback: getEnv("XTOOL_BARK_BASE_URL", ""),
+		GoSeaTelemetry: GoSeaTelemetryConfig{
+			Enabled:         getEnvBool("XTOOL_GOSEALIGHT_TELEMETRY_ENABLED", false),
+			BaseURL:         getEnv("XTOOL_GOSEALIGHT_BASE_URL", ""),
+			NodeID:          getEnv("XTOOL_GOSEALIGHT_NODE_ID", ""),
+			Username:        getEnv("XTOOL_GOSEALIGHT_NODE_USERNAME", ""),
+			Password:        getEnv("XTOOL_GOSEALIGHT_NODE_PASSWORD", ""),
+			IntervalSeconds: getEnvInt("XTOOL_GOSEALIGHT_TELEMETRY_INTERVAL_SECONDS", 60),
+		},
 	}
 }
 

@@ -137,7 +137,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 	if len(headers) == 0 {
 		t.Fatalf("expected header row")
 	}
-	wantHeaders := []string{"Socks5 出口(IP:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
+	wantHeaders := []string{"Vless 链接", "二维码", "到期时间", "订单号"}
 	for i, expected := range wantHeaders {
 		if i >= len(headers[0]) {
 			t.Fatalf("missing header at position %d", i+1)
@@ -155,14 +155,14 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("expected bigger qr row height, got %.2f", rowHeight)
 	}
 
-	qrTag, err := book.GetCellValue(sheet, "C2")
+	qrTag, err := book.GetCellValue(sheet, "B2")
 	if err != nil {
 		t.Fatalf("get qr tag cell failed: %v", err)
 	}
 	if strings.TrimSpace(qrTag) != "美国-1.2.3.4" {
 		t.Fatalf("unexpected qr tag cell: %q", qrTag)
 	}
-	styleID, err := book.GetCellStyle(sheet, "C2")
+	styleID, err := book.GetCellStyle(sheet, "B2")
 	if err != nil {
 		t.Fatalf("get qr tag style failed: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("qr tag should be top aligned, got: %q", style.Alignment.Vertical)
 	}
 
-	orderNo, err := book.GetCellValue(sheet, "E2")
+	orderNo, err := book.GetCellValue(sheet, "D2")
 	if err != nil {
 		t.Fatalf("get order_no cell failed: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("unexpected order_no cell: %q", orderNo)
 	}
 
-	linkValue, err := book.GetCellValue(sheet, "B2")
+	linkValue, err := book.GetCellValue(sheet, "A2")
 	if err != nil {
 		t.Fatalf("get link cell failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 		t.Fatalf("unexpected link cell: %q", linkValue)
 	}
 
-	pics, err := book.GetPictures(sheet, "C2")
+	pics, err := book.GetPictures(sheet, "B2")
 	if err != nil {
 		t.Fatalf("get pictures failed: %v", err)
 	}
@@ -216,12 +216,10 @@ func TestBuildOrdersXLSXDedicatedHeadersAndQRCodeCell(t *testing.T) {
 func TestBuildOrdersXLSXDedicatedMixedIncludesInboundColumn(t *testing.T) {
 	rows := []xlsxExportRow{
 		{
-			Mode:       model.OrderModeDedicated,
-			OrderNo:    "OD260227000002",
-			DomainLine: "line2.example.com:443:user02:pass02",
-			Link:       "socks://test-payload",
-			RawSocks5:  "10.0.0.9:1080:user02:pass02",
-			ExpiresAt:  time.Date(2026, 3, 1, 10, 11, 12, 0, time.UTC),
+			Mode:      model.OrderModeDedicated,
+			OrderNo:   "OD260227000002",
+			Link:      "socks://test-payload",
+			ExpiresAt: time.Date(2026, 3, 1, 10, 11, 12, 0, time.UTC),
 		},
 	}
 	body, err := buildOrdersXLSX(rows, model.DedicatedFeatureMixed, false)
@@ -239,29 +237,15 @@ func TestBuildOrdersXLSXDedicatedMixedIncludesInboundColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get A1 failed: %v", err)
 	}
-	if strings.TrimSpace(head) != "Socks5 出口(IP:Port:User:Pass)" {
+	if strings.TrimSpace(head) != "专线链接" {
 		t.Fatalf("unexpected A1 header: %q", head)
 	}
-	raw, err := book.GetCellValue(sheet, "A2")
+	link, err := book.GetCellValue(sheet, "A2")
 	if err != nil {
 		t.Fatalf("get A2 failed: %v", err)
 	}
-	if strings.TrimSpace(raw) != "10.0.0.9:1080:user02:pass02" {
-		t.Fatalf("unexpected A2 value: %q", raw)
-	}
-	inbound, err := book.GetCellValue(sheet, "B2")
-	if err != nil {
-		t.Fatalf("get B2 failed: %v", err)
-	}
-	if strings.TrimSpace(inbound) != "line2.example.com:443:user02:pass02" {
-		t.Fatalf("unexpected B2 value: %q", inbound)
-	}
-	link, err := book.GetCellValue(sheet, "C2")
-	if err != nil {
-		t.Fatalf("get C2 failed: %v", err)
-	}
 	if strings.TrimSpace(link) != "socks://test-payload" {
-		t.Fatalf("unexpected C2 value: %q", link)
+		t.Fatalf("unexpected A2 value: %q", link)
 	}
 }
 

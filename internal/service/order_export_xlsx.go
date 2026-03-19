@@ -67,7 +67,7 @@ func (s *OrderService) ExportOrderXLSX(orderID uint, opts ExportOrderOptions) ([
 	if err != nil {
 		return nil, "", err
 	}
-	filename := exportArtifactName(rows, protocol) + ".xlsx"
+	filename := exportArtifactFilename(rows, protocol, "xlsx")
 	return body, filename, nil
 }
 
@@ -84,7 +84,7 @@ func (s *OrderService) ExportOrderArtifact(orderID uint, opts ExportOrderOptions
 	if err != nil {
 		return nil, "", "", err
 	}
-	filename := exportArtifactName(rows, protocol) + ".xlsx"
+	filename := exportArtifactFilename(rows, protocol, "xlsx")
 	return body, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil
 }
 
@@ -107,7 +107,7 @@ func (s *OrderService) BatchExportArtifact(orderIDs []uint, opts XLSXExportOptio
 			if err != nil {
 				return nil, "", "", err
 			}
-			filename := exportArtifactName(one, one[0].Protocol) + ".xlsx"
+			filename := exportArtifactFilename(one, one[0].Protocol, "xlsx")
 			return body, filename, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", nil
 		}
 	}
@@ -115,7 +115,7 @@ func (s *OrderService) BatchExportArtifact(orderIDs []uint, opts XLSXExportOptio
 	if err != nil {
 		return nil, "", "", err
 	}
-	filename := fmt.Sprintf("batch-export-%s.zip", time.Now().Format("20060102-150405"))
+	filename := buildTimestampSKUFilename(time.Now(), "Batch", "zip")
 	return zipBody, filename, "application/zip", nil
 }
 
@@ -194,10 +194,6 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if orderNo == "" {
 				orderNo = buildOrderNo(order.CreatedAt, order.ID)
 			}
-			domainLine := ""
-			if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
-				domainLine = dedicatedDomainCredentialLine(order, item)
-			}
 			rawSocks := fmt.Sprintf("%s:%d:%s:%s", item.ForwardAddress, item.ForwardPort, item.ForwardUsername, item.ForwardPassword)
 			if strings.TrimSpace(item.ForwardAddress) == "" || item.ForwardPort <= 0 {
 				rawSocks = ""
@@ -215,7 +211,6 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 				DurationDays: cycleDays(order, now),
 				ExpiresAt:    order.ExpiresAt,
 				Link:         link,
-				DomainLine:   domainLine,
 				RawSocks5:    rawSocks,
 				QRTag:        tag,
 				QRCodeData:   qr,
@@ -308,7 +303,7 @@ func buildExportZip(groups map[string][]xlsxExportRow, includeRaw bool) ([]byte,
 			_ = zipWriter.Close()
 			return nil, err
 		}
-		name := exportArtifactName(rows, protocol) + ".xlsx"
+		name := exportArtifactFilename(rows, protocol, "xlsx")
 		file, err := zipWriter.Create(name)
 		if err != nil {
 			_ = zipWriter.Close()
@@ -325,52 +320,26 @@ func buildExportZip(groups map[string][]xlsxExportRow, includeRaw bool) ([]byte,
 	return buf.Bytes(), nil
 }
 
-func exportArtifactName(rows []xlsxExportRow, protocol string) string {
-	if len(rows) == 0 {
-		return "export"
-	}
-	row := rows[0]
-	customer := strings.TrimSpace(row.Customer)
-	if customer == "" {
-		customer = strings.TrimSpace(row.CustomerCode)
-	}
-	if customer == "" {
-		customer = "customer"
-	}
-	orderNo := strings.TrimSpace(row.OrderNo)
-	if orderNo == "" {
-		orderNo = buildOrderNo(time.Now(), row.GroupHeadID)
-	}
-	protocolLabel := exportProtocolLabel(protocol)
-	countryPart := exportCountryStatLabel(rows)
-	days := row.DurationDays
-	if days <= 0 {
-		days = 30
-	}
-	name := fmt.Sprintf("%s-%s-[%s]-[%s]-%d天", customer, orderNo, protocolLabel, countryPart, days)
-	return sanitizeFilename(name)
+func exportArtifactFilename(rows []xlsxExportRow, protocol string, ext string) string {
+	return buildTimestampSKUFilename(time.Now(), exportArtifactSKU(rows, protocol), ext)
 }
 
-func sanitizeFilename(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "export"
+func exportArtifactSKU(rows []xlsxExportRow, protocol string) string {
+	if len(rows) == 0 {
+		return "Export"
 	}
-	replacer := strings.NewReplacer(
-		"/", "-",
-		"\\", "-",
-		":", "-",
-		"*", "",
-		"?", "",
-		"\"", "",
-		"<", "",
-		">", "",
-	)
-	out := strings.TrimSpace(replacer.Replace(raw))
-	if out == "" {
-		return "export"
+	if strings.EqualFold(strings.TrimSpace(rows[0].Mode), model.OrderModeDedicated) {
+		return exportProtocolLabel(protocol)
 	}
-	return out
+	return "Home"
+}
+
+func buildTimestampSKUFilename(ts time.Time, sku string, ext string) string {
+	base := fmt.Sprintf("%s-%s", ts.Format("20060102-150405"), sanitizeFilenamePart(sku))
+	if strings.TrimSpace(ext) == "" {
+		return base
+	}
+	return base + "." + sanitizeFilenamePart(ext)
 }
 
 func exportProtocolLabel(protocol string) string {
@@ -380,7 +349,7 @@ func exportProtocolLabel(protocol string) string {
 	case model.DedicatedFeatureVless:
 		return "Vless"
 	case model.DedicatedFeatureShadowsocks:
-		return "Shadowsocks"
+		return "SS"
 	default:
 		return "Socks5"
 	}
@@ -591,6 +560,24 @@ func buildSingleProtocolQRCodeImage(link string, title string) ([]byte, error) {
 	return qrcode.Encode(link, qrcode.Medium, 420)
 }
 
+func buildDedicatedTXT(rows []xlsxExportRow, protocol string) string {
+	blocks := make([]string, 0, len(rows))
+	linkLabel := exportProtocolLabel(protocol) + " 链接"
+	if strings.EqualFold(strings.TrimSpace(protocol), model.DedicatedFeatureMixed) {
+		linkLabel = "专线链接"
+	}
+	for _, row := range rows {
+		block := []string{
+			fmt.Sprintf("订单号: %s", strings.TrimSpace(row.OrderNo)),
+			fmt.Sprintf("%s: %s", linkLabel, strings.TrimSpace(row.Link)),
+			fmt.Sprintf("二维码内容: %s", strings.TrimSpace(row.Link)),
+			fmt.Sprintf("到期时间: %s", row.ExpiresAt.Format("2006-01-02 15:04:05")),
+		}
+		blocks = append(blocks, strings.Join(block, "\n"))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
 func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]byte, error) {
 	_ = protocol
 	const qrRowHeight = 208.0
@@ -602,13 +589,15 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
 	isDedicated := strings.EqualFold(strings.TrimSpace(rows[0].Mode), model.OrderModeDedicated)
-	isMixedDedicated := isDedicated && strings.EqualFold(strings.TrimSpace(protocol), model.DedicatedFeatureMixed)
-	headers := []string{"链接", "二维码", "到期日", "订单号"}
-	if isMixedDedicated {
-		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "入口Socks5(Domain:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
-	} else if isDedicated {
-		headers = []string{"Socks5 出口(IP:Port:User:Pass)", "专线链接", "二维码", "到期日", "订单号"}
-	} else if includeRaw {
+	linkHeader := "链接"
+	if isDedicated {
+		linkHeader = exportProtocolLabel(protocol) + " 链接"
+		if strings.EqualFold(strings.TrimSpace(protocol), model.DedicatedFeatureMixed) {
+			linkHeader = "专线链接"
+		}
+	}
+	headers := []string{linkHeader, "二维码", "到期时间", "订单号"}
+	if !isDedicated && includeRaw {
 		headers = append([]string{"原始Socks5"}, headers...)
 	}
 	for i, title := range headers {
@@ -625,21 +614,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	expiresCol := "C"
 	orderNoCol := "D"
 	rawCol := ""
-	inboundCol := ""
-	if isMixedDedicated {
-		rawCol = "A"
-		inboundCol = "B"
-		linkCol = "C"
-		qrCol = "D"
-		expiresCol = "E"
-		orderNoCol = "F"
-	} else if isDedicated {
-		rawCol = "A"
-		linkCol = "B"
-		qrCol = "C"
-		expiresCol = "D"
-		orderNoCol = "E"
-	} else if includeRaw {
+	if !isDedicated && includeRaw {
 		rawCol = "A"
 		linkCol = "B"
 		qrCol = "C"
@@ -655,12 +630,7 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", qrCol, r), row.QRTag)
 			_ = f.SetCellStyle(sheet, fmt.Sprintf("%s%d", qrCol, r), fmt.Sprintf("%s%d", qrCol, r), qrTagStyle)
 		}
-		if isMixedDedicated {
-			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
-			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", inboundCol, r), row.DomainLine)
-		} else if isDedicated {
-			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
-		} else if includeRaw {
+		if !isDedicated && includeRaw {
 			rawValue := row.RawSocks5
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), rawValue)
 		}
@@ -680,11 +650,8 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 			})
 		}
 	}
-	if isDedicated || includeRaw {
+	if !isDedicated && includeRaw {
 		_ = f.SetColWidth(sheet, "A", "A", 44)
-	}
-	if isMixedDedicated {
-		_ = f.SetColWidth(sheet, inboundCol, inboundCol, 44)
 	}
 	_ = f.SetColWidth(sheet, linkCol, linkCol, 72)
 	_ = f.SetColWidth(sheet, qrCol, qrCol, qrColWidth)

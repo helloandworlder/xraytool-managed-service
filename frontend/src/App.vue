@@ -204,8 +204,13 @@ const streamRows = ref<Array<{ item_id: number; status: string; detail: string }
 const exportingOrderID = ref<number | null>(null)
 const copyingLinksOrderID = ref<number | null>(null)
 const exportCount = ref<number>(0)
-const exportFormat = ref<'txt' | 'xlsx'>('xlsx')
-const exportIncludeRawSocks5 = ref(false)
+const exportDialogOpen = ref(false)
+const exportDialogSubmitting = ref(false)
+const exportDialogFormat = ref<'txt' | 'xlsx'>('xlsx')
+const exportDialogResidentialTXTLayout = ref<'uri' | 'colon'>('uri')
+const exportDialogOrderID = ref<number | null>(null)
+const exportDialogOrderIDs = ref<number[]>([])
+const exportDialogContainsResidential = ref(false)
 const groupSocksModalOpen = ref(false)
 const groupCredModalOpen = ref(false)
 const groupGeoModalOpen = ref(false)
@@ -1346,14 +1351,7 @@ async function doBatchTest() {
 
 async function doBatchExport() {
 	if (panel.orderSelection.length === 0) return
-	try {
-		const res = await panel.batchExport(panel.orderSelection, exportFormat.value, exportIncludeRawSocks5.value)
-		const header = String(res.headers?.['content-disposition'] || '')
-		const filename = parseContentDispositionFilename(header, `orders-batch-${Date.now()}.${exportFormat.value === 'txt' ? 'txt' : 'zip'}`)
-		downloadBlobFile(res.data, filename)
-	} catch (err) {
-		panel.setError(err)
-	}
+	openExportDialog(panel.orderSelection)
 }
 
 async function doBatchDeactivate() {
@@ -1409,20 +1407,72 @@ async function doBatchActivate() {
 	})
 }
 
-async function exportOrder(orderID: number) {
+function openExportDialog(orderIDs: number[]) {
+	const ids = Array.from(new Set(orderIDs.map((id) => Number(id)).filter((id) => id > 0)))
+	if (ids.length === 0) return
+	const rows = panel.orders.filter((row) => ids.includes(Number(row.id)))
+	exportDialogOrderIDs.value = ids
+	exportDialogOrderID.value = ids.length === 1 ? ids[0] : null
+	exportDialogContainsResidential.value = rows.some((row) => isResidentialMode(String(row.mode || '')))
+	exportDialogFormat.value = 'xlsx'
+	exportDialogResidentialTXTLayout.value = 'uri'
+	exportDialogOpen.value = true
+}
+
+const exportDialogTitle = computed(() => {
+	if (exportDialogOrderIDs.value.length > 1) {
+		return `批量导出 ${exportDialogOrderIDs.value.length} 个订单`
+	}
+	if (exportDialogOrderID.value) {
+		return `导出订单 #${exportDialogOrderID.value}`
+	}
+	return '导出订单'
+})
+
+function closeExportDialog() {
+	if (exportDialogSubmitting.value) return
+	exportDialogOpen.value = false
+}
+
+async function submitExportDialog() {
+	if (exportDialogOrderIDs.value.length === 0) return
+	try {
+		exportDialogSubmitting.value = true
+		if (exportDialogOrderID.value && exportDialogOrderIDs.value.length === 1) {
+			await downloadOrderExport(exportDialogOrderID.value, exportDialogFormat.value, exportDialogResidentialTXTLayout.value)
+		} else {
+			const res = await panel.batchExport(
+				exportDialogOrderIDs.value,
+				exportDialogFormat.value,
+				exportDialogResidentialTXTLayout.value
+			)
+			const header = String(res.headers?.['content-disposition'] || '')
+			const fallbackExt = exportDialogFormat.value === 'txt' ? 'txt' : 'zip'
+			const filename = parseContentDispositionFilename(header, `orders-batch-${Date.now()}.${fallbackExt}`)
+			downloadBlobFile(res.data, filename)
+		}
+		exportDialogOpen.value = false
+	} catch (err) {
+		panel.setError(err)
+	} finally {
+		exportDialogSubmitting.value = false
+	}
+}
+
+async function downloadOrderExport(orderID: number, format: 'txt' | 'xlsx', residentialTXTLayout: 'uri' | 'colon') {
 	try {
 		exportingOrderID.value = orderID
 		const params = new URLSearchParams()
 		if (Number(exportCount.value) > 0) {
 			params.set('count', String(Number(exportCount.value)))
 		}
-		params.set('format', exportFormat.value)
-		params.set('include_raw_socks5', exportIncludeRawSocks5.value ? 'true' : 'false')
+		params.set('format', format)
+		params.set('residential_txt_layout', residentialTXTLayout)
 		params.set('shuffle', 'false')
 		const query = params.toString()
 		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'blob' })
 		const header = String(res.headers['content-disposition'] || '')
-		const ext = exportFormat.value === 'txt' ? 'txt' : 'xlsx'
+		const ext = format === 'txt' ? 'txt' : 'xlsx'
 		const filename = parseContentDispositionFilename(header, `order-${orderID}-export.${ext}`)
 		downloadBlobFile(res.data, filename)
 	} catch (err) {
@@ -1430,6 +1480,10 @@ async function exportOrder(orderID: number) {
 	} finally {
 		exportingOrderID.value = null
 	}
+}
+
+function exportOrder(orderID: number) {
+	openExportDialog([orderID])
 }
 
 async function testOrder(orderID: number) {
@@ -2404,6 +2458,12 @@ async function saveSettings() {
 			bark_base_url: panel.settings.bark_base_url || '',
 			bark_device_key: panel.settings.bark_device_key || '',
 			bark_group: panel.settings.bark_group || 'xraytool',
+			gosealight_telemetry_enabled: panel.settings.gosealight_telemetry_enabled === 'true' ? 'true' : 'false',
+			gosealight_base_url: panel.settings.gosealight_base_url || '',
+			gosealight_node_id: panel.settings.gosealight_node_id || '',
+			gosealight_node_username: panel.settings.gosealight_node_username || '',
+			gosealight_node_password: panel.settings.gosealight_node_password || '',
+			gosealight_telemetry_interval_seconds: panel.settings.gosealight_telemetry_interval_seconds || '60',
 			residential_name_prefix: panel.settings.residential_name_prefix || '家宽-Socks5'
 		})
 		message.success('设置已保存')
@@ -2904,10 +2964,6 @@ function downloadBlobFile(data: Blob, filename: string) {
 					<a-select-option value="expired">expired</a-select-option>
 					<a-select-option value="disabled">disabled</a-select-option>
 				  </a-select>
-				  <a-select v-model:value="exportFormat" size="small" style="width: 110px">
-					<a-select-option value="xlsx">导出XLSX</a-select-option>
-					<a-select-option value="txt">导出TXT</a-select-option>
-				  </a-select>
                   <span class="text-xs text-slate-500">已选 {{ panel.orderSelection.length }} 个</span>
                   <a-select v-model:value="testSamplePercent" size="small" style="width: 110px">
                     <a-select-option :value="100">测活100%</a-select-option>
@@ -2915,7 +2971,6 @@ function downloadBlobFile(data: Blob, filename: string) {
                     <a-select-option :value="5">测活5%</a-select-option>
                   </a-select>
 				  <a-input-number v-model:value="exportCount" :min="0" size="small" :placeholder="'导出条数(0=全部)'" />
-				  <a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
 				  <a-input-number v-model:value="batchMoreDays" :min="1" :max="365" size="small" />
 				  <a-button size="small" @click="batchMoreDays = 30">30天</a-button>
 				  <a-button size="small" @click="batchMoreDays = 60">60天</a-button>
@@ -3035,10 +3090,6 @@ function downloadBlobFile(data: Blob, filename: string) {
 					<a-select-option value="all">全部类型</a-select-option>
 					<a-select-option value="home">家宽</a-select-option>
 					<a-select-option value="dedicated">专线</a-select-option>
-				  </a-select>
-				  <a-select v-model:value="exportFormat" size="small" style="width: 110px">
-					<a-select-option value="xlsx">导出XLSX</a-select-option>
-					<a-select-option value="txt">导出TXT</a-select-option>
 				  </a-select>
 				</a-space>
 			  </template>
@@ -3250,6 +3301,22 @@ function downloadBlobFile(data: Blob, filename: string) {
                 </a-space>
               </div>
             </a-card>
+
+			<a-card :bordered="false" title="设置-GoSea Light Telemetry" class="max-w-4xl mb-3">
+			  <a-row :gutter="12">
+				<a-col :xs="24" :md="12">
+				  <a-form-item label="启用上报">
+					<a-switch :checked="panel.settings.gosealight_telemetry_enabled === 'true'" @change="(checked:boolean)=> panel.settings.gosealight_telemetry_enabled = checked ? 'true' : 'false'" />
+				  </a-form-item>
+				</a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="上报间隔(秒)"><a-input v-model:value="panel.settings.gosealight_telemetry_interval_seconds" placeholder="60" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="GoSea-Light 地址"><a-input v-model:value="panel.settings.gosealight_base_url" placeholder="http://127.0.0.1:3000" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="节点 ID"><a-input v-model:value="panel.settings.gosealight_node_id" placeholder="provider node id" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="节点用户名"><a-input v-model:value="panel.settings.gosealight_node_username" /></a-form-item></a-col>
+				<a-col :xs="24" :md="12"><a-form-item label="节点密码"><a-input-password v-model:value="panel.settings.gosealight_node_password" /></a-form-item></a-col>
+			  </a-row>
+			  <a-alert type="info" show-icon message="启用后会周期性向 GoSea-Light /api/nodes/telemetry/ingest 上报本机版本、能力、连接数、速度和 24h 流量。" />
+			</a-card>
 
 			<a-card :bordered="false" title="设置-专线" class="max-w-4xl mb-3">
 			  <a-alert type="info" show-icon class="mb-3" message="VLESS 的 Security / TLS / REALITY 已迁移到每个 Inbound 单独配置。" />
@@ -3609,10 +3676,9 @@ function downloadBlobFile(data: Blob, filename: string) {
         </a-descriptions>
 
         <div class="mb-2 flex items-center justify-between">
-          <div class="font-semibold">订单条目 ({{ panel.selectedOrder.items.length }})</div>
-          <a-space>
+		          <div class="font-semibold">订单条目 ({{ panel.selectedOrder.items.length }})</div>
+		          <a-space>
 				<a-input-number v-model:value="exportCount" :min="0" :max="panel.selectedOrder.items.length" size="small" />
-				<a-checkbox v-model:checked="exportIncludeRawSocks5" class="text-xs">附带原始Socks5</a-checkbox>
 				<a-button size="small" :loading="exportingOrderID===panel.selectedOrder.id" @click="exportOrder(panel.selectedOrder.id)">提取导出</a-button>
 				<a-button v-if="panel.selectedOrder.mode === 'dedicated'" size="small" :loading="copyingLinksOrderID===panel.selectedOrder.id" @click="copyOrderLinks(panel.selectedOrder)">{{ copyLinksLabel(panel.selectedOrder) }}</a-button>
 				<a-button size="small" @click="copyOrderLines(panel.selectedOrder)">复制发货内容</a-button>
@@ -3962,6 +4028,44 @@ function downloadBlobFile(data: Blob, filename: string) {
         <a-table-column title="详情" data-index="detail" key="detail" />
       </a-table>
     </a-modal>
+
+	<a-modal
+		v-model:open="exportDialogOpen"
+		:title="exportDialogTitle"
+		:confirm-loading="exportDialogSubmitting"
+		ok-text="开始下载"
+		cancel-text="取消"
+		@ok="submitExportDialog"
+		@cancel="closeExportDialog"
+	>
+	  <a-form layout="vertical">
+		<a-form-item label="导出格式">
+		  <a-radio-group v-model:value="exportDialogFormat">
+			<a-radio-button value="xlsx">XLSX</a-radio-button>
+			<a-radio-button value="txt">TXT</a-radio-button>
+		  </a-radio-group>
+		</a-form-item>
+		<a-form-item v-if="exportDialogContainsResidential && exportDialogFormat === 'txt'" label="家宽 TXT 格式">
+		  <a-radio-group v-model:value="exportDialogResidentialTXTLayout">
+			<a-radio value="uri">socks5://user:pass@ip:port</a-radio>
+			<a-radio value="colon">ip:port:user:pass</a-radio>
+		  </a-radio-group>
+		</a-form-item>
+		<a-alert
+			v-if="exportDialogFormat === 'xlsx'"
+			type="info"
+			show-icon
+			message="专线 XLSX 将包含订单号、协议链接、二维码和到期时间；不再附带原始 Socks5。"
+		/>
+		<a-alert
+			v-else
+			class="mt-2"
+			type="info"
+			show-icon
+			message="专线 TXT 将导出订单号、协议链接、二维码内容和到期时间；家宽 TXT 按上方格式输出。"
+		/>
+	  </a-form>
+	</a-modal>
   </div>
 </template>
 

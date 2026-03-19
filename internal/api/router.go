@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"xraytool/internal/auth"
+	"xraytool/internal/buildinfo"
 	"xraytool/internal/config"
 	"xraytool/internal/model"
 	"xraytool/internal/service"
@@ -72,6 +73,7 @@ func (a *API) Router() *gin.Engine {
 
 	api := r.Group("/api")
 	api.POST("/auth/login", a.handleLogin)
+	api.GET("/version", a.handleVersion)
 
 	secure := api.Group("/")
 	secure.Use(a.authMiddleware())
@@ -229,6 +231,16 @@ func (a *API) handleMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"admin_id": c.GetUint("admin_id"),
 		"username": c.GetString("username"),
+	})
+}
+
+func (a *API) handleVersion(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"version":         buildinfo.Version,
+		"commit":          buildinfo.Commit,
+		"build_time":      buildinfo.BuildTime,
+		"protocolVersion": buildinfo.ProtocolVersion,
+		"capabilities":    buildinfo.Capabilities(),
 	})
 }
 
@@ -2041,9 +2053,10 @@ func (a *API) batchTestOrders(c *gin.Context) {
 
 func (a *API) batchExportOrders(c *gin.Context) {
 	var req struct {
-		OrderIDs         []uint `json:"order_ids"`
-		Format           string `json:"format"`
-		IncludeRawSocks5 bool   `json:"include_raw_socks5"`
+		OrderIDs             []uint `json:"order_ids"`
+		Format               string `json:"format"`
+		IncludeRawSocks5     bool   `json:"include_raw_socks5"`
+		ResidentialTXTLayout string `json:"residential_txt_layout"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2070,12 +2083,12 @@ func (a *API) batchExportOrders(c *gin.Context) {
 		c.Data(http.StatusOK, contentType, data)
 		return
 	}
-	text, err := a.orders.BatchExport(req.OrderIDs)
+	text, filename, err := a.orders.BatchExport(req.OrderIDs, req.ResidentialTXTLayout)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	setAttachmentFilename(c, "batch-orders-export.txt")
+	setAttachmentFilename(c, filename)
 	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
 }
 
@@ -2088,6 +2101,7 @@ func (a *API) exportOrder(c *gin.Context) {
 	shuffle := strings.ToLower(strings.TrimSpace(c.DefaultQuery("shuffle", "false"))) == "true"
 	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "txt")))
 	includeRawSocks5 := strings.ToLower(strings.TrimSpace(c.DefaultQuery("include_raw_socks5", "false"))) == "true"
+	residentialTXTLayout := strings.TrimSpace(c.DefaultQuery("residential_txt_layout", ""))
 	if format == "xlsx" {
 		data, filename, contentType, err := a.orders.ExportOrderArtifact(id, service.ExportOrderOptions{Count: count, Shuffle: shuffle}, includeRawSocks5)
 		if err != nil {
@@ -2098,7 +2112,11 @@ func (a *API) exportOrder(c *gin.Context) {
 		c.Data(http.StatusOK, contentType, data)
 		return
 	}
-	text, filename, err := a.orders.ExportOrderLinesWithMeta(id, service.ExportOrderOptions{Count: count, Shuffle: shuffle})
+	text, filename, err := a.orders.ExportOrderLinesWithMeta(id, service.ExportOrderOptions{
+		Count:                count,
+		Shuffle:              shuffle,
+		ResidentialTXTLayout: residentialTXTLayout,
+	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -2480,24 +2498,30 @@ func (a *API) logMiddleware() gin.HandlerFunc {
 func sanitizeSettingsUpdate(in map[string]string) map[string]string {
 	out := map[string]string{}
 	allowed := map[string]struct{}{
-		"default_inbound_port":     {},
-		"bark_enabled":             {},
-		"bark_base_url":            {},
-		"bark_device_key":          {},
-		"bark_group":               {},
-		"dedicated_vless_security": {},
-		"dedicated_vless_sni":      {},
-		"dedicated_vless_type":     {},
-		"dedicated_vless_path":     {},
-		"dedicated_vless_host":     {},
-		"residential_name_prefix":  {},
+		"default_inbound_port":                  {},
+		"bark_enabled":                          {},
+		"bark_base_url":                         {},
+		"bark_device_key":                       {},
+		"bark_group":                            {},
+		"gosealight_telemetry_enabled":          {},
+		"gosealight_base_url":                   {},
+		"gosealight_node_id":                    {},
+		"gosealight_node_username":              {},
+		"gosealight_node_password":              {},
+		"gosealight_telemetry_interval_seconds": {},
+		"dedicated_vless_security":              {},
+		"dedicated_vless_sni":                   {},
+		"dedicated_vless_type":                  {},
+		"dedicated_vless_path":                  {},
+		"dedicated_vless_host":                  {},
+		"residential_name_prefix":               {},
 	}
 	for k, v := range in {
 		k = strings.TrimSpace(k)
 		if _, ok := allowed[k]; !ok {
 			continue
 		}
-		if k == "bark_enabled" {
+		if k == "bark_enabled" || k == "gosealight_telemetry_enabled" {
 			vv := strings.ToLower(strings.TrimSpace(v))
 			switch vv {
 			case "1", "true", "on", "yes":

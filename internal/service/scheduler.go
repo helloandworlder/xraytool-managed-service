@@ -12,15 +12,16 @@ import (
 )
 
 type Scheduler struct {
-	db       *gorm.DB
-	orders   *OrderService
-	bark     *BarkService
-	logger   *zap.Logger
-	interval time.Duration
+	db        *gorm.DB
+	orders    *OrderService
+	bark      *BarkService
+	telemetry *GoSeaLightTelemetryService
+	logger    *zap.Logger
+	interval  time.Duration
 }
 
-func NewScheduler(db *gorm.DB, orders *OrderService, bark *BarkService, logger *zap.Logger, interval time.Duration) *Scheduler {
-	return &Scheduler{db: db, orders: orders, bark: bark, logger: logger, interval: interval}
+func NewScheduler(db *gorm.DB, orders *OrderService, bark *BarkService, telemetry *GoSeaLightTelemetryService, logger *zap.Logger, interval time.Duration) *Scheduler {
+	return &Scheduler{db: db, orders: orders, bark: bark, telemetry: telemetry, logger: logger, interval: interval}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -39,6 +40,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 func (s *Scheduler) runOnce(ctx context.Context) {
+	if s.telemetry != nil {
+		s.telemetry.RunDue(ctx)
+	}
+
 	now := time.Now()
 	oneDayLater := now.Add(24 * time.Hour)
 

@@ -6,6 +6,19 @@ The format is based on Keep a Changelog and follows the repository release tags.
 
 ## [Unreleased]
 
+## [v0.1.37] - 2026-03-19
+
+### Added
+
+- GoSea-Light telemetry reporting with configurable node identity, scheduler push cadence, version/capability payloads, and route-level runtime stats.
+- Residential order regression coverage for public-IP selection, duplicate dedicated line rejection, and safer CPU sampling across Unix and fallback runtimes.
+- `threeuitui` SOCKS export support with `--export-socks-txt` and wildcard IP filtering for direct panel extraction workflows.
+
+### Changed
+
+- Release workflow now injects build version, commit, build time, and protocol metadata into shipped binaries.
+- Order export and frontend controls now support residential TXT layout selection and refreshed panel settings wiring.
+
 ## [v0.1.36] - 2026-03-15
 
 ### Changed

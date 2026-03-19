@@ -623,10 +623,16 @@ export const usePanelStore = defineStore('panel', {
       })
       return (res.data.results || []) as Array<{ id: number; success: boolean; result?: Record<string, string>; error?: string }>
     },
-    async batchExport(orderIDs: number[], format: 'txt' | 'xlsx' = 'xlsx', includeRawSocks5 = false) {
+    async batchExport(
+      orderIDs: number[],
+      format: 'txt' | 'xlsx' = 'xlsx',
+      residentialTXTLayout: 'uri' | 'colon' = 'uri',
+      includeRawSocks5 = false
+    ) {
       const res = await http.post('/api/orders/batch/export', {
 			order_ids: orderIDs,
 			format,
+			residential_txt_layout: residentialTXTLayout,
 			include_raw_socks5: includeRawSocks5
       }, {
 			responseType: 'blob'

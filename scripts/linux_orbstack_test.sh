@@ -13,6 +13,6 @@ echo "==> [Linux] Frontend pnpm build"
 docker run --rm -e CI=true -v "${ROOT_DIR}:/work/xraytool" -w /work/xraytool/frontend node:22-bookworm bash -lc "corepack enable && corepack prepare pnpm@10.28.2 --activate && pnpm install --frozen-lockfile && pnpm run build"
 
 echo "==> [Linux] API smoke test"
-docker run --rm -v "${ROOT_DIR}:/work/xraytool" -w /work/xraytool golang:1.24 bash -lc "export PATH=/usr/local/go/bin:\$PATH GOTOOLCHAIN=auto && apt-get update >/dev/null && apt-get install -y curl >/dev/null && go build -buildvcs=false -o xraytool ./cmd/xraytool && XTOOL_MANAGED_XRAY=false ./xraytool >/tmp/xraytool.log 2>&1 & pid=\$!; sleep 3; curl -sf http://127.0.0.1:18080/healthz; kill \$pid || true; wait \$pid || true"
+docker run --rm -v "${ROOT_DIR}:/work/xraytool" -w /work/xraytool golang:1.24 bash -lc "export PATH=/usr/local/go/bin:\$PATH GOTOOLCHAIN=auto && apt-get update >/dev/null && apt-get install -y curl >/dev/null && go build -buildvcs=false -o xraytool ./cmd/xraytool && XTOOL_MANAGED_XRAY=false ./xraytool >/tmp/xraytool.log 2>&1 & pid=\$!; sleep 3; curl -sf http://127.0.0.1:18080/healthz >/tmp/healthz.json; curl -sf http://127.0.0.1:18080/api/version >/tmp/version.json; grep -q '\"protocolVersion\":\"1\"' /tmp/version.json; grep -q '\"capabilities\"' /tmp/version.json; kill \$pid || true; wait \$pid || true"
 
 echo "==> Linux full suite passed"

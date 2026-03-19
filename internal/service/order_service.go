@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -79,8 +80,9 @@ type AllocationPreview struct {
 }
 
 type ExportOrderOptions struct {
-	Count   int
-	Shuffle bool
+	Count                int
+	Shuffle              bool
+	ResidentialTXTLayout string
 }
 
 type TestOrderStreamEvent struct {
@@ -801,17 +803,48 @@ func (s *OrderService) BatchTest(orderIDs []uint) []BatchTestResult {
 	return out
 }
 
-func (s *OrderService) BatchExport(orderIDs []uint) (string, error) {
-	parts := make([]string, 0, len(orderIDs)*2)
+const (
+	ResidentialTXTLayoutColon = "colon"
+	ResidentialTXTLayoutURI   = "uri"
+)
+
+func normalizeResidentialTXTLayout(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case ResidentialTXTLayoutURI, "socks5", "socks5_uri", "socks5-url":
+		return ResidentialTXTLayoutURI
+	default:
+		return ResidentialTXTLayoutColon
+	}
+}
+
+func (s *OrderService) BatchExport(orderIDs []uint, residentialTXTLayout string) (string, string, error) {
+	parts := make([]string, 0, len(orderIDs)*4)
+	skus := map[string]struct{}{}
 	for _, id := range orderIDs {
-		lines, _, err := s.ExportOrderLinesWithMeta(id, ExportOrderOptions{Shuffle: false})
+		lines, filename, err := s.ExportOrderLinesWithMeta(id, ExportOrderOptions{
+			Shuffle:              false,
+			ResidentialTXTLayout: residentialTXTLayout,
+		})
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		parts = append(parts, fmt.Sprintf("# Order %d", id))
+		parts = append(parts, fmt.Sprintf("# %s", filename))
 		parts = append(parts, lines)
 	}
-	return strings.Join(parts, "\n"), nil
+	for _, id := range orderIDs {
+		order := model.Order{}
+		if err := s.db.Select("id", "mode", "dedicated_protocol").First(&order, id).Error; err != nil {
+			continue
+		}
+		skus[exportSKUForOrder(order)] = struct{}{}
+	}
+	sku := "Batch"
+	if len(skus) == 1 {
+		for one := range skus {
+			sku = one
+		}
+	}
+	return strings.Join(parts, "\n\n"), buildTimestampSKUFilename(time.Now(), sku, "txt"), nil
 }
 
 func (s *OrderService) ExportOrderLines(orderID uint) (string, error) {
@@ -863,16 +896,20 @@ func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOp
 
 	lines := make([]string, 0, len(items)+4)
 	if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
-		lines = ctx.buildLinkLines(true)
-		if opts.Count > 0 && opts.Count < len(lines) {
-			lines = lines[:opts.Count]
+		rows, err := s.collectXLSXRows([]uint{orderID}, XLSXExportOptions{
+			Count:   opts.Count,
+			Shuffle: false,
+		})
+		if err != nil {
+			return "", "", err
 		}
-		return strings.Join(lines, "\n"), s.exportFilename(order, items), nil
+		return buildDedicatedTXT(rows, exportOrderProtocol(order)), buildTimestampSKUFilename(time.Now(), exportSKUForOrder(order), "txt"), nil
 	}
+	layout := normalizeResidentialTXTLayout(opts.ResidentialTXTLayout)
 	for _, item := range items {
-		lines = append(lines, fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password))
+		lines = append(lines, buildResidentialTXTLine(item, layout))
 	}
-	return strings.Join(lines, "\n"), s.exportFilename(order, items), nil
+	return strings.Join(lines, "\n"), buildTimestampSKUFilename(time.Now(), exportSKUForOrder(order), "txt"), nil
 }
 
 type dedicatedExportContext struct {
@@ -1204,8 +1241,9 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 		if err := s.db.Where("id in ? and enabled = 1", manualIDs[:quantity]).Find(&rows).Error; err != nil {
 			return nil, err
 		}
+		rows = filterUsableIPs(rows)
 		if len(rows) != quantity {
-			return nil, errors.New("some manual ips are invalid or disabled")
+			return nil, errors.New("some manual ips are invalid, disabled, or not usable public local addresses")
 		}
 		usedByCustomer, err := s.customerUsedIPSet(customerID, excludeOrderID)
 		if err != nil {
@@ -1224,7 +1262,7 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 		return nil, err
 	}
 	if len(all) == 0 {
-		return nil, errors.New("no enabled host ips")
+		return nil, errors.New("no enabled public host ips")
 	}
 
 	usedByCustomer, err := s.customerUsedIPSet(customerID, excludeOrderID)
@@ -1299,16 +1337,10 @@ func (s *OrderService) allocateIPs(customerID uint, quantity int, mode string, m
 
 func (s *OrderService) usableIPPool() ([]model.HostIP, error) {
 	var all []model.HostIP
-	if err := s.db.Where("enabled = 1 and is_local = 1 and is_public = 1").Find(&all).Error; err != nil {
+	if err := s.db.Where("enabled = 1 and is_local = 1").Find(&all).Error; err != nil {
 		return nil, err
 	}
 	all = filterUsableIPs(all)
-	if len(all) == 0 {
-		if err := s.db.Where("enabled = 1 and is_local = 1").Find(&all).Error; err != nil {
-			return nil, err
-		}
-		all = filterUsableIPs(all)
-	}
 	sort.Slice(all, func(i, j int) bool {
 		return lessIPString(all[i].IP, all[j].IP)
 	})
@@ -1380,40 +1412,22 @@ func buildOrderNo(ts time.Time, id uint) string {
 	return fmt.Sprintf("OD%s%06d", ts.Format("060102"), id)
 }
 
-func (s *OrderService) exportFilename(order model.Order, items []model.OrderItem) string {
-	customer := sanitizeFilenamePart(order.Customer.Code)
-	if customer == "" {
-		customer = sanitizeFilenamePart(order.Customer.Name)
+func exportSKUForOrder(order model.Order) string {
+	if strings.EqualFold(strings.TrimSpace(order.Mode), model.OrderModeDedicated) {
+		return exportProtocolLabel(order.DedicatedProtocol)
 	}
-	if customer == "" {
-		customer = fmt.Sprintf("customer-%d", order.CustomerID)
-	}
-	ipMask := "unknown"
-	if len(items) > 0 {
-		ipMask = maskIPv4(items[0].IP)
-	}
-	orderNo := strings.TrimSpace(order.OrderNo)
-	if orderNo == "" {
-		orderNo = buildOrderNo(order.CreatedAt, order.ID)
-	}
-	orderName := sanitizeFilenamePart(order.Name)
-	if orderName == "" {
-		orderName = orderNo
-	}
-	count := fmt.Sprintf("%d条", len(items))
-	return fmt.Sprintf("%s-%s-%s-%s-%s.txt", customer, orderNo, ipMask, orderName, count)
+	return "Home"
 }
 
-func maskIPv4(ip string) string {
-	parts := strings.Split(strings.TrimSpace(ip), ".")
-	if len(parts) == 4 {
-		return fmt.Sprintf("%s.%s.%s.*", parts[0], parts[1], parts[2])
+func buildResidentialTXTLine(item model.OrderItem, layout string) string {
+	if normalizeResidentialTXTLayout(layout) == ResidentialTXTLayoutURI {
+		return (&url.URL{
+			Scheme: "socks5",
+			User:   url.UserPassword(strings.TrimSpace(item.Username), strings.TrimSpace(item.Password)),
+			Host:   fmt.Sprintf("%s:%d", strings.TrimSpace(item.IP), item.Port),
+		}).String()
 	}
-	clean := strings.ReplaceAll(strings.TrimSpace(ip), ":", "-")
-	if clean == "" {
-		return "unknown"
-	}
-	return clean
+	return fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password)
 }
 
 func sanitizeFilenamePart(v string) string {
@@ -2001,6 +2015,9 @@ func isAlreadyExists(err error) bool {
 func filterUsableIPs(rows []model.HostIP) []model.HostIP {
 	out := make([]model.HostIP, 0, len(rows))
 	for _, row := range rows {
+		if !row.Enabled || !row.IsLocal || !row.IsPublic {
+			continue
+		}
 		ip := net.ParseIP(strings.TrimSpace(row.IP))
 		if ip == nil {
 			continue
