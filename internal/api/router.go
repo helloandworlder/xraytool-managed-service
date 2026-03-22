@@ -1454,39 +1454,43 @@ func (a *API) getOrder(c *gin.Context) {
 
 func (a *API) createOrder(c *gin.Context) {
 	var req struct {
-		CustomerID           uint   `json:"customer_id"`
-		Name                 string `json:"name"`
-		Quantity             int    `json:"quantity"`
-		DurationDay          int    `json:"duration_day"`
-		ExpiresAt            string `json:"expires_at"`
-		Mode                 string `json:"mode"`
-		Port                 int    `json:"port"`
-		ManualIPIDs          []uint `json:"manual_ip_ids"`
-		ForwardOutboundIDs   []uint `json:"forward_outbound_ids"`
-		DedicatedEntryID     uint   `json:"dedicated_entry_id"`
-		DedicatedInboundID   uint   `json:"dedicated_inbound_id"`
-		DedicatedIngressID   uint   `json:"dedicated_ingress_id"`
-		DedicatedProtocol    string `json:"dedicated_protocol"`
-		DedicatedEgressLines string `json:"dedicated_egress_lines"`
+		CustomerID                 uint   `json:"customer_id"`
+		Name                       string `json:"name"`
+		Quantity                   int    `json:"quantity"`
+		DurationDay                int    `json:"duration_day"`
+		ExpiresAt                  string `json:"expires_at"`
+		Mode                       string `json:"mode"`
+		Port                       int    `json:"port"`
+		ManualIPIDs                []uint `json:"manual_ip_ids"`
+		ResidentialCredentialMode  string `json:"residential_credential_mode"`
+		ResidentialCredentialLines string `json:"residential_credential_lines"`
+		ForwardOutboundIDs         []uint `json:"forward_outbound_ids"`
+		DedicatedEntryID           uint   `json:"dedicated_entry_id"`
+		DedicatedInboundID         uint   `json:"dedicated_inbound_id"`
+		DedicatedIngressID         uint   `json:"dedicated_ingress_id"`
+		DedicatedProtocol          string `json:"dedicated_protocol"`
+		DedicatedEgressLines       string `json:"dedicated_egress_lines"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	input := service.CreateOrderInput{
-		CustomerID:           req.CustomerID,
-		Name:                 req.Name,
-		Quantity:             req.Quantity,
-		DurationDay:          req.DurationDay,
-		Mode:                 req.Mode,
-		Port:                 req.Port,
-		ManualIPIDs:          req.ManualIPIDs,
-		ForwardOutboundIDs:   req.ForwardOutboundIDs,
-		DedicatedEntryID:     req.DedicatedEntryID,
-		DedicatedInboundID:   req.DedicatedInboundID,
-		DedicatedIngressID:   req.DedicatedIngressID,
-		DedicatedProtocol:    req.DedicatedProtocol,
-		DedicatedEgressLines: req.DedicatedEgressLines,
+		CustomerID:                 req.CustomerID,
+		Name:                       req.Name,
+		Quantity:                   req.Quantity,
+		DurationDay:                req.DurationDay,
+		Mode:                       req.Mode,
+		Port:                       req.Port,
+		ManualIPIDs:                req.ManualIPIDs,
+		ResidentialCredentialMode:  req.ResidentialCredentialMode,
+		ResidentialCredentialLines: req.ResidentialCredentialLines,
+		ForwardOutboundIDs:         req.ForwardOutboundIDs,
+		DedicatedEntryID:           req.DedicatedEntryID,
+		DedicatedInboundID:         req.DedicatedInboundID,
+		DedicatedIngressID:         req.DedicatedIngressID,
+		DedicatedProtocol:          req.DedicatedProtocol,
+		DedicatedEgressLines:       req.DedicatedEgressLines,
 	}
 	if strings.TrimSpace(req.ExpiresAt) != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -1583,6 +1587,8 @@ func (a *API) updateOrder(c *gin.Context) {
 		Port                           int    `json:"port"`
 		ExpiresAt                      string `json:"expires_at"`
 		ManualIPIDs                    []uint `json:"manual_ip_ids"`
+		ResidentialCredentialMode      string `json:"residential_credential_mode"`
+		ResidentialCredentialLines     string `json:"residential_credential_lines"`
 		ForwardOutboundIDs             []uint `json:"forward_outbound_ids"`
 		DedicatedEntryID               uint   `json:"dedicated_entry_id"`
 		DedicatedInboundID             uint   `json:"dedicated_inbound_id"`
@@ -1601,6 +1607,8 @@ func (a *API) updateOrder(c *gin.Context) {
 		Quantity:                       req.Quantity,
 		Port:                           req.Port,
 		ManualIPIDs:                    req.ManualIPIDs,
+		ResidentialCredentialMode:      req.ResidentialCredentialMode,
+		ResidentialCredentialLines:     req.ResidentialCredentialLines,
 		ForwardOutboundIDs:             req.ForwardOutboundIDs,
 		DedicatedEntryID:               req.DedicatedEntryID,
 		DedicatedInboundID:             req.DedicatedInboundID,

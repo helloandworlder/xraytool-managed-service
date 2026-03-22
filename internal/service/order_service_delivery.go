@@ -100,8 +100,12 @@ func (s *OrderService) RefreshResidentialCredentials(ctx context.Context, orderI
 			return err
 		}
 		for _, item := range items {
+			username, err := s.nextAvailableResidentialUsernameTx(tx)
+			if err != nil {
+				return err
+			}
 			if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
-				"username":   randomString(8),
+				"username":   username,
 				"password":   randomString(12),
 				"vmess_uuid": "",
 				"updated_at": now,

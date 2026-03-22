@@ -113,6 +113,117 @@ func TestCreateResidentialOrderUsesPublicHostIP(t *testing.T) {
 	}
 }
 
+func TestCreateResidentialOrderAcceptsCustomCredentials(t *testing.T) {
+	db := setupOrderServiceTestDB(t)
+	svc := NewOrderService(db, NewXrayManager(config.Config{}, db, zap.NewNop()), zap.NewNop())
+	seedManagedAccountForPort(t, db, residentialTestPort)
+
+	customer := model.Customer{Name: "home-custom", Code: "hc", Status: model.OrderStatusActive}
+	if err := db.Create(&customer).Error; err != nil {
+		t.Fatalf("create customer failed: %v", err)
+	}
+	for _, host := range []model.HostIP{
+		{IP: "203.0.113.11", IsPublic: true, IsLocal: true, Enabled: true},
+		{IP: "203.0.113.12", IsPublic: true, IsLocal: true, Enabled: true},
+	} {
+		if err := db.Create(&host).Error; err != nil {
+			t.Fatalf("create host ip %s failed: %v", host.IP, err)
+		}
+	}
+
+	order, err := svc.CreateOrder(context.Background(), CreateOrderInput{
+		CustomerID:                 customer.ID,
+		Name:                       "home-custom-order",
+		Mode:                       model.OrderModeAuto,
+		Quantity:                   2,
+		DurationDay:                30,
+		Port:                       residentialTestPort,
+		ResidentialCredentialMode:  ResidentialCredentialModeCustom,
+		ResidentialCredentialLines: "home-a:pass-a\nhome-b:pass-b",
+	})
+	if err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+	if len(order.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(order.Items))
+	}
+	got := map[string]string{}
+	for _, item := range order.Items {
+		got[item.Username] = item.Password
+	}
+	if got["home-a"] != "pass-a" || got["home-b"] != "pass-b" {
+		t.Fatalf("unexpected credentials: %#v", got)
+	}
+}
+
+func TestCreateResidentialOrderRejectsDuplicateCustomCredentials(t *testing.T) {
+	db := setupOrderServiceTestDB(t)
+	svc := NewOrderService(db, NewXrayManager(config.Config{}, db, zap.NewNop()), zap.NewNop())
+	seedManagedAccountForPort(t, db, residentialTestPort)
+
+	customer := model.Customer{Name: "home-dup", Code: "hd", Status: model.OrderStatusActive}
+	if err := db.Create(&customer).Error; err != nil {
+		t.Fatalf("create customer failed: %v", err)
+	}
+	for _, host := range []model.HostIP{
+		{IP: "203.0.113.21", IsPublic: true, IsLocal: true, Enabled: true},
+		{IP: "203.0.113.22", IsPublic: true, IsLocal: true, Enabled: true},
+	} {
+		if err := db.Create(&host).Error; err != nil {
+			t.Fatalf("create host ip %s failed: %v", host.IP, err)
+		}
+	}
+
+	_, err := svc.CreateOrder(context.Background(), CreateOrderInput{
+		CustomerID:                 customer.ID,
+		Name:                       "home-dup-order",
+		Mode:                       model.OrderModeAuto,
+		Quantity:                   2,
+		DurationDay:                30,
+		Port:                       residentialTestPort,
+		ResidentialCredentialMode:  ResidentialCredentialModeCustom,
+		ResidentialCredentialLines: "dup-user:pass-a\ndup-user:pass-b",
+	})
+	if err == nil {
+		t.Fatalf("expected duplicate custom credentials to fail")
+	}
+	if !strings.Contains(err.Error(), "duplicated in credential lines") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCreateResidentialOrderRejectsExistingCustomUsername(t *testing.T) {
+	db := setupOrderServiceTestDB(t)
+	svc := NewOrderService(db, NewXrayManager(config.Config{}, db, zap.NewNop()), zap.NewNop())
+	seedManagedAccountForPort(t, db, residentialTestPort)
+
+	customer := model.Customer{Name: "home-conflict", Code: "hf", Status: model.OrderStatusActive}
+	if err := db.Create(&customer).Error; err != nil {
+		t.Fatalf("create customer failed: %v", err)
+	}
+	host := model.HostIP{IP: "203.0.113.31", IsPublic: true, IsLocal: true, Enabled: true}
+	if err := db.Create(&host).Error; err != nil {
+		t.Fatalf("create host ip failed: %v", err)
+	}
+
+	_, err := svc.CreateOrder(context.Background(), CreateOrderInput{
+		CustomerID:                 customer.ID,
+		Name:                       "home-conflict-order",
+		Mode:                       model.OrderModeAuto,
+		Quantity:                   1,
+		DurationDay:                30,
+		Port:                       residentialTestPort,
+		ResidentialCredentialMode:  ResidentialCredentialModeCustom,
+		ResidentialCredentialLines: "seed-user:pass-a",
+	})
+	if err == nil {
+		t.Fatalf("expected existing username to fail")
+	}
+	if !strings.Contains(err.Error(), "already exists in database") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func seedManagedAccountForPort(t *testing.T, db *gorm.DB, port int) {
 	t.Helper()
 	now := time.Now()

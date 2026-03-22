@@ -37,6 +37,8 @@ const orderForm = reactive({
   mode: 'auto',
   port: 23457,
   manual_ip_ids: [] as number[],
+	residential_credential_mode: 'random',
+	residential_credential_lines: '',
 	forward_outbound_ids: [] as number[],
 	dedicated_entry_id: 0,
 	dedicated_inbound_id: 0,
@@ -186,6 +188,8 @@ const orderEditForm = reactive({
 	port: 23457,
 	expires_at: '',
 	manual_ip_ids: [] as number[],
+	residential_credential_mode: 'random',
+	residential_credential_lines: '',
 	forward_outbound_ids: [] as number[],
 	dedicated_entry_id: 0,
 	dedicated_inbound_id: 0,
@@ -883,6 +887,14 @@ function dedicatedLinesCount(lines: string): number {
 		.filter((row) => row.length > 0).length
 }
 
+function residentialCredentialLinesCount(lines: string): number {
+	if (!lines) return 0
+	return lines
+		.split('\n')
+		.map((row) => row.trim())
+		.filter((row) => row.length > 0).length
+}
+
 function dedicatedSummary(order: any) {
 	if (order.mode !== 'dedicated') return '-'
 	const ingress = order.dedicated_ingress
@@ -1048,15 +1060,20 @@ async function createOrder() {
 				message.warning('请粘贴至少 1 行 Socks5 上游')
 				return
 			}
+		} else if (orderForm.residential_credential_mode === 'custom' && residentialCredentialLinesCount(orderForm.residential_credential_lines) !== Number(orderForm.quantity || 0)) {
+			message.warning('指定凭据行数必须等于家宽数量')
+			return
 		}
-    const payload: Record<string, unknown> = {
-      customer_id: Number(orderForm.customer_id),
-      name: orderForm.name,
-      duration_day: Number(orderForm.duration_day),
-      expires_at: orderForm.expires_at ? new Date(orderForm.expires_at).toISOString() : '',
-      mode: orderForm.mode,
-      port: Number(orderForm.port),
-		manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v))
+		const payload: Record<string, unknown> = {
+			customer_id: Number(orderForm.customer_id),
+			name: orderForm.name,
+			duration_day: Number(orderForm.duration_day),
+			expires_at: orderForm.expires_at ? new Date(orderForm.expires_at).toISOString() : '',
+			mode: orderForm.mode,
+			port: Number(orderForm.port),
+			manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v)),
+			residential_credential_mode: orderForm.residential_credential_mode,
+			residential_credential_lines: orderForm.residential_credential_mode === 'custom' ? String(orderForm.residential_credential_lines || '') : ''
 		}
 		if (orderForm.mode === 'dedicated') {
 			payload.dedicated_entry_id = Number(orderForm.dedicated_entry_id)
@@ -1070,6 +1087,8 @@ async function createOrder() {
 		const result = await panel.createOrder(payload)
 		orderForm.name = ''
 		orderForm.expires_at = ''
+		orderForm.residential_credential_mode = 'random'
+		orderForm.residential_credential_lines = ''
 		if (orderForm.mode === 'dedicated') {
 			orderForm.dedicated_entry_id = 0
 			orderForm.dedicated_inbound_id = 0
@@ -1110,6 +1129,8 @@ function openOrderEdit(row: Order) {
 	orderEditForm.port = row.port
 	orderEditForm.expires_at = row.expires_at ? new Date(row.expires_at).toISOString().slice(0, 19) : ''
 	orderEditForm.manual_ip_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.host_ip_id || 0)).filter((v) => v > 0)))
+	orderEditForm.residential_credential_mode = 'random'
+	orderEditForm.residential_credential_lines = ''
 	orderEditForm.forward_outbound_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.socks_outbound_id || 0)).filter((v) => v > 0)))
 	orderEditForm.dedicated_entry_id = Number((row as any).dedicated_entry_id || 0)
 	orderEditForm.dedicated_inbound_id = Number((row as any).dedicated_inbound_id || 0)
@@ -1183,6 +1204,10 @@ async function saveOrderEdit() {
 			message.warning('请选择协议')
 			return
 		}
+		if (orderEditForm.mode !== 'dedicated' && orderEditForm.residential_credential_mode === 'custom' && residentialCredentialLinesCount(orderEditForm.residential_credential_lines) !== Number(orderEditForm.quantity || 0)) {
+			message.warning('指定凭据行数必须等于家宽数量')
+			return
+		}
 		const payload: Record<string, unknown> = {
 			name: orderEditForm.name,
 			port: Number(orderEditForm.port),
@@ -1207,6 +1232,8 @@ async function saveOrderEdit() {
 			}
 		} else {
 			payload.quantity = Number(orderEditForm.quantity)
+			payload.residential_credential_mode = orderEditForm.residential_credential_mode
+			payload.residential_credential_lines = orderEditForm.residential_credential_mode === 'custom' ? String(orderEditForm.residential_credential_lines || '') : ''
 		}
 		const result = await panel.updateOrder(orderEditForm.id, payload)
 		orderEditOpen.value = false
@@ -2904,14 +2931,36 @@ function downloadBlobFile(data: Blob, filename: string) {
                 </a-col>
               </a-row>
               <a-alert v-if="panel.allocationPreview" class="mt-2" type="info" show-icon :message="`可分配IP: ${panel.allocationPreview.available} / 池总量: ${panel.allocationPreview.pool_size} / 已被该客户占用: ${panel.allocationPreview.used_by_customer}`" />
-              <div v-if="orderForm.mode === 'manual'" class="mt-2">
-                <a-select v-model:value="orderForm.manual_ip_ids" mode="multiple" style="width: 100%" placeholder="选择手动IP">
-                  <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
-                </a-select>
-              </div>
-			  <div v-if="orderForm.mode === 'dedicated'" class="mt-2">
-				<a-space class="mb-2" wrap>
-				  <span class="text-xs text-slate-500">专线 Inbound/Ingress 请到 设置-专线 管理；先选协议再选入口</span>
+	              <div v-if="orderForm.mode === 'manual'" class="mt-2">
+	                <a-select v-model:value="orderForm.manual_ip_ids" mode="multiple" style="width: 100%" placeholder="选择手动IP">
+	                  <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
+	                </a-select>
+	              </div>
+	              <div v-if="orderForm.mode !== 'dedicated'" class="mt-2">
+	                <a-form-item label="家宽账号策略" class="mb-2">
+	                  <a-radio-group v-model:value="orderForm.residential_credential_mode">
+	                    <a-radio-button value="random">随机 User:Pass</a-radio-button>
+	                    <a-radio-button value="custom">指定 User:Pass</a-radio-button>
+	                  </a-radio-group>
+	                </a-form-item>
+	                <a-textarea
+	                  v-if="orderForm.residential_credential_mode === 'custom'"
+	                  v-model:value="orderForm.residential_credential_lines"
+	                  :rows="4"
+	                  placeholder="每行 user:pass；行数必须等于家宽数量"
+	                />
+	                <a-alert
+	                  class="mt-2"
+	                  type="info"
+	                  show-icon
+	                  :message="orderForm.residential_credential_mode === 'custom'
+	                    ? `已填写 ${residentialCredentialLinesCount(orderForm.residential_credential_lines)} 行；提交时会校验与数量一致，并校验用户名在数据库中唯一`
+	                    : '随机模式会自动生成全局唯一的家宽用户名，避免路由冲突'"
+	                />
+	              </div>
+				  <div v-if="orderForm.mode === 'dedicated'" class="mt-2">
+					<a-space class="mb-2" wrap>
+					  <span class="text-xs text-slate-500">专线 Inbound/Ingress 请到 设置-专线 管理；先选协议再选入口</span>
 				</a-space>
 				<a-select v-model:value="orderForm.dedicated_protocol" style="width:100%" placeholder="选择协议">
 				  <a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">
@@ -3731,15 +3780,27 @@ function downloadBlobFile(data: Blob, filename: string) {
         <a-form-item label="模式"><a-tag :color="modeColor(orderEditForm.mode)">{{ modeLabel(orderEditForm.mode) }}</a-tag></a-form-item>
         <a-form-item label="订单名称"><a-input v-model:value="orderEditForm.name" :disabled="isForwardDeprecatedOrderEdit" /></a-form-item>
         <a-form-item v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'" label="数量"><a-input-number v-model:value="orderEditForm.quantity" :min="1" style="width:100%" /></a-form-item>
-        <a-form-item v-if="orderEditForm.mode === 'manual'" label="手动IP绑定(可多选)">
-          <a-select v-model:value="orderEditForm.manual_ip_ids" mode="multiple" style="width:100%" placeholder="选择手动IP">
-            <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
-          </a-select>
-          <div class="mt-1 text-xs text-slate-500">若不调整数量，可留空保持原绑定；调整数量时建议明确选择。</div>
-        </a-form-item>
-        <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="废弃模式（只读）">
-          <a-alert type="warning" show-icon message="forward 模式已废弃：历史订单可查看，但不支持编辑。" />
-          <a-input class="mt-2" :value="`历史出口数量: ${orderEditForm.forward_outbound_ids.length}`" disabled />
+	        <a-form-item v-if="orderEditForm.mode === 'manual'" label="手动IP绑定(可多选)">
+	          <a-select v-model:value="orderEditForm.manual_ip_ids" mode="multiple" style="width:100%" placeholder="选择手动IP">
+	            <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
+	          </a-select>
+	          <div class="mt-1 text-xs text-slate-500">若不调整数量，可留空保持原绑定；调整数量时建议明确选择。</div>
+	        </a-form-item>
+	        <template v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'">
+	          <a-form-item label="家宽账号策略">
+	            <a-radio-group v-model:value="orderEditForm.residential_credential_mode">
+	              <a-radio-button value="random">保持现状/新增随机</a-radio-button>
+	              <a-radio-button value="custom">按顺序指定</a-radio-button>
+	            </a-radio-group>
+	          </a-form-item>
+	          <a-form-item v-if="orderEditForm.residential_credential_mode === 'custom'" label="指定家宽凭据">
+	            <a-textarea v-model:value="orderEditForm.residential_credential_lines" :rows="4" placeholder="每行 user:pass；行数必须等于最终数量" />
+	            <div class="mt-1 text-xs text-slate-500">保存时会按当前订单项顺序整体改写凭据，并校验用户名在数据库中唯一。</div>
+	          </a-form-item>
+	        </template>
+	        <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="废弃模式（只读）">
+	          <a-alert type="warning" show-icon message="forward 模式已废弃：历史订单可查看，但不支持编辑。" />
+	          <a-input class="mt-2" :value="`历史出口数量: ${orderEditForm.forward_outbound_ids.length}`" disabled />
         </a-form-item>
         <a-form-item v-else label="专线入口">
           <a-space class="mb-2" wrap>
