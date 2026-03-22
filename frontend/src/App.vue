@@ -34,10 +34,11 @@ const orderForm = reactive({
   quantity: 1,
   duration_day: 30,
   expires_at: '',
-  mode: 'auto',
-  port: 23457,
-  manual_ip_ids: [] as number[],
+	mode: 'auto',
+	port: 23457,
+	manual_ip_ids: [] as number[],
 	residential_credential_mode: 'random',
+	residential_credential_strategy: 'per_line',
 	residential_credential_lines: '',
 	forward_outbound_ids: [] as number[],
 	dedicated_entry_id: 0,
@@ -189,6 +190,7 @@ const orderEditForm = reactive({
 	expires_at: '',
 	manual_ip_ids: [] as number[],
 	residential_credential_mode: 'random',
+	residential_credential_strategy: 'per_line',
 	residential_credential_lines: '',
 	forward_outbound_ids: [] as number[],
 	dedicated_entry_id: 0,
@@ -892,7 +894,17 @@ function residentialCredentialLinesCount(lines: string): number {
 	return lines
 		.split('\n')
 		.map((row) => row.trim())
-		.filter((row) => row.length > 0).length
+			.filter((row) => row.length > 0).length
+}
+
+function expectedResidentialCredentialLinesCount(strategy: string, quantity: number): number {
+	return String(strategy || 'per_line') === 'shared' ? 1 : Number(quantity || 0)
+}
+
+function residentialCredentialPlaceholder(strategy: string, isEdit = false): string {
+	return String(strategy || 'per_line') === 'shared'
+		? '只填 1 行 user:pass；会复用到全部不同 IP'
+		: `每行 user:pass；行数必须等于${isEdit ? '最终' : '家宽'}数量`
 }
 
 function dedicatedSummary(order: any) {
@@ -1060,21 +1072,29 @@ async function createOrder() {
 				message.warning('请粘贴至少 1 行 Socks5 上游')
 				return
 			}
-		} else if (orderForm.residential_credential_mode === 'custom' && residentialCredentialLinesCount(orderForm.residential_credential_lines) !== Number(orderForm.quantity || 0)) {
-			message.warning('指定凭据行数必须等于家宽数量')
-			return
-		}
+			} else if (
+				orderForm.residential_credential_mode === 'custom' &&
+				residentialCredentialLinesCount(orderForm.residential_credential_lines) !== expectedResidentialCredentialLinesCount(orderForm.residential_credential_strategy, Number(orderForm.quantity || 0))
+			) {
+				message.warning(
+					orderForm.residential_credential_strategy === 'shared'
+						? '整单复用模式只需要填写 1 行 user:pass'
+						: '指定凭据行数必须等于家宽数量'
+				)
+				return
+			}
 		const payload: Record<string, unknown> = {
 			customer_id: Number(orderForm.customer_id),
 			name: orderForm.name,
 			duration_day: Number(orderForm.duration_day),
 			expires_at: orderForm.expires_at ? new Date(orderForm.expires_at).toISOString() : '',
 			mode: orderForm.mode,
-			port: Number(orderForm.port),
-			manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v)),
-			residential_credential_mode: orderForm.residential_credential_mode,
-			residential_credential_lines: orderForm.residential_credential_mode === 'custom' ? String(orderForm.residential_credential_lines || '') : ''
-		}
+				port: Number(orderForm.port),
+				manual_ip_ids: orderForm.manual_ip_ids.map((v) => Number(v)),
+				residential_credential_mode: orderForm.residential_credential_mode,
+				residential_credential_strategy: orderForm.residential_credential_strategy,
+				residential_credential_lines: orderForm.residential_credential_mode === 'custom' ? String(orderForm.residential_credential_lines || '') : ''
+			}
 		if (orderForm.mode === 'dedicated') {
 			payload.dedicated_entry_id = Number(orderForm.dedicated_entry_id)
 			payload.dedicated_inbound_id = Number(orderForm.dedicated_inbound_id)
@@ -1088,6 +1108,7 @@ async function createOrder() {
 		orderForm.name = ''
 		orderForm.expires_at = ''
 		orderForm.residential_credential_mode = 'random'
+		orderForm.residential_credential_strategy = 'per_line'
 		orderForm.residential_credential_lines = ''
 		if (orderForm.mode === 'dedicated') {
 			orderForm.dedicated_entry_id = 0
@@ -1130,6 +1151,7 @@ function openOrderEdit(row: Order) {
 	orderEditForm.expires_at = row.expires_at ? new Date(row.expires_at).toISOString().slice(0, 19) : ''
 	orderEditForm.manual_ip_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.host_ip_id || 0)).filter((v) => v > 0)))
 	orderEditForm.residential_credential_mode = 'random'
+	orderEditForm.residential_credential_strategy = 'per_line'
 	orderEditForm.residential_credential_lines = ''
 	orderEditForm.forward_outbound_ids = Array.from(new Set((row.items || []).map((item: any) => Number(item.socks_outbound_id || 0)).filter((v) => v > 0)))
 	orderEditForm.dedicated_entry_id = Number((row as any).dedicated_entry_id || 0)
@@ -1204,8 +1226,16 @@ async function saveOrderEdit() {
 			message.warning('请选择协议')
 			return
 		}
-		if (orderEditForm.mode !== 'dedicated' && orderEditForm.residential_credential_mode === 'custom' && residentialCredentialLinesCount(orderEditForm.residential_credential_lines) !== Number(orderEditForm.quantity || 0)) {
-			message.warning('指定凭据行数必须等于家宽数量')
+		if (
+			orderEditForm.mode !== 'dedicated' &&
+			orderEditForm.residential_credential_mode === 'custom' &&
+			residentialCredentialLinesCount(orderEditForm.residential_credential_lines) !== expectedResidentialCredentialLinesCount(orderEditForm.residential_credential_strategy, Number(orderEditForm.quantity || 0))
+		) {
+			message.warning(
+				orderEditForm.residential_credential_strategy === 'shared'
+					? '整单复用模式只需要填写 1 行 user:pass'
+					: '指定凭据行数必须等于家宽数量'
+			)
 			return
 		}
 		const payload: Record<string, unknown> = {
@@ -1230,11 +1260,12 @@ async function saveOrderEdit() {
 			if (orderEditForm.regenerate_dedicated_credentials) {
 				payload.regenerate_dedicated_credentials = true
 			}
-		} else {
-			payload.quantity = Number(orderEditForm.quantity)
-			payload.residential_credential_mode = orderEditForm.residential_credential_mode
-			payload.residential_credential_lines = orderEditForm.residential_credential_mode === 'custom' ? String(orderEditForm.residential_credential_lines || '') : ''
-		}
+			} else {
+				payload.quantity = Number(orderEditForm.quantity)
+				payload.residential_credential_mode = orderEditForm.residential_credential_mode
+				payload.residential_credential_strategy = orderEditForm.residential_credential_strategy
+				payload.residential_credential_lines = orderEditForm.residential_credential_mode === 'custom' ? String(orderEditForm.residential_credential_lines || '') : ''
+			}
 		const result = await panel.updateOrder(orderEditForm.id, payload)
 		orderEditOpen.value = false
 		message.success('订单已更新')
@@ -2936,28 +2967,37 @@ function downloadBlobFile(data: Blob, filename: string) {
 	                  <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
 	                </a-select>
 	              </div>
-	              <div v-if="orderForm.mode !== 'dedicated'" class="mt-2">
-	                <a-form-item label="家宽账号策略" class="mb-2">
-	                  <a-radio-group v-model:value="orderForm.residential_credential_mode">
-	                    <a-radio-button value="random">随机 User:Pass</a-radio-button>
-	                    <a-radio-button value="custom">指定 User:Pass</a-radio-button>
-	                  </a-radio-group>
-	                </a-form-item>
-	                <a-textarea
-	                  v-if="orderForm.residential_credential_mode === 'custom'"
-	                  v-model:value="orderForm.residential_credential_lines"
-	                  :rows="4"
-	                  placeholder="每行 user:pass；行数必须等于家宽数量"
-	                />
-	                <a-alert
-	                  class="mt-2"
-	                  type="info"
-	                  show-icon
-	                  :message="orderForm.residential_credential_mode === 'custom'
-	                    ? `已填写 ${residentialCredentialLinesCount(orderForm.residential_credential_lines)} 行；提交时会校验与数量一致，并校验用户名在数据库中唯一`
-	                    : '随机模式会自动生成全局唯一的家宽用户名，避免路由冲突'"
-	                />
-	              </div>
+		              <div v-if="orderForm.mode !== 'dedicated'" class="mt-2">
+		                <a-form-item label="家宽账号策略" class="mb-2">
+		                  <a-radio-group v-model:value="orderForm.residential_credential_mode">
+		                    <a-radio-button value="random">随机 User:Pass</a-radio-button>
+		                    <a-radio-button value="custom">指定 User:Pass</a-radio-button>
+		                  </a-radio-group>
+		                </a-form-item>
+		                <template v-if="orderForm.residential_credential_mode === 'custom'">
+		                  <a-form-item label="指定方式" class="mb-2">
+		                    <a-radio-group v-model:value="orderForm.residential_credential_strategy">
+		                      <a-radio-button value="per_line">逐条指定</a-radio-button>
+		                      <a-radio-button value="shared">整单共用 1 组</a-radio-button>
+		                    </a-radio-group>
+		                  </a-form-item>
+		                  <a-textarea
+		                    v-model:value="orderForm.residential_credential_lines"
+		                    :rows="4"
+		                    :placeholder="residentialCredentialPlaceholder(orderForm.residential_credential_strategy)"
+		                  />
+		                </template>
+		                <a-alert
+		                  class="mt-2"
+		                  type="info"
+		                  show-icon
+		                  :message="orderForm.residential_credential_mode === 'custom'
+		                    ? (orderForm.residential_credential_strategy === 'shared'
+		                      ? `已填写 ${residentialCredentialLinesCount(orderForm.residential_credential_lines)} 行；整单共用 1 组 User:Pass，并校验同一 IP 下用户名唯一`
+		                      : `已填写 ${residentialCredentialLinesCount(orderForm.residential_credential_lines)} 行；提交时会校验与数量一致，并校验同一 IP 下用户名唯一`)
+		                    : '随机模式会自动生成同一 IP 下唯一的家宽用户名，避免路由冲突'"
+		                />
+		              </div>
 				  <div v-if="orderForm.mode === 'dedicated'" class="mt-2">
 					<a-space class="mb-2" wrap>
 					  <span class="text-xs text-slate-500">专线 Inbound/Ingress 请到 设置-专线 管理；先选协议再选入口</span>
@@ -3786,18 +3826,30 @@ function downloadBlobFile(data: Blob, filename: string) {
 	          </a-select>
 	          <div class="mt-1 text-xs text-slate-500">若不调整数量，可留空保持原绑定；调整数量时建议明确选择。</div>
 	        </a-form-item>
-	        <template v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'">
-	          <a-form-item label="家宽账号策略">
-	            <a-radio-group v-model:value="orderEditForm.residential_credential_mode">
-	              <a-radio-button value="random">保持现状/新增随机</a-radio-button>
-	              <a-radio-button value="custom">按顺序指定</a-radio-button>
-	            </a-radio-group>
-	          </a-form-item>
-	          <a-form-item v-if="orderEditForm.residential_credential_mode === 'custom'" label="指定家宽凭据">
-	            <a-textarea v-model:value="orderEditForm.residential_credential_lines" :rows="4" placeholder="每行 user:pass；行数必须等于最终数量" />
-	            <div class="mt-1 text-xs text-slate-500">保存时会按当前订单项顺序整体改写凭据，并校验用户名在数据库中唯一。</div>
-	          </a-form-item>
-	        </template>
+		        <template v-if="orderEditForm.mode !== 'forward' && orderEditForm.mode !== 'dedicated'">
+		          <a-form-item label="家宽账号策略">
+		            <a-radio-group v-model:value="orderEditForm.residential_credential_mode">
+		              <a-radio-button value="random">保持现状/新增随机</a-radio-button>
+		              <a-radio-button value="custom">指定 User:Pass</a-radio-button>
+		            </a-radio-group>
+		          </a-form-item>
+		          <a-form-item v-if="orderEditForm.residential_credential_mode === 'custom'" label="指定家宽凭据">
+		            <a-radio-group v-model:value="orderEditForm.residential_credential_strategy" class="mb-2">
+		              <a-radio-button value="per_line">按顺序逐条指定</a-radio-button>
+		              <a-radio-button value="shared">整单共用 1 组</a-radio-button>
+		            </a-radio-group>
+		            <a-textarea
+		              v-model:value="orderEditForm.residential_credential_lines"
+		              :rows="4"
+		              :placeholder="residentialCredentialPlaceholder(orderEditForm.residential_credential_strategy, true)"
+		            />
+		            <div class="mt-1 text-xs text-slate-500">
+		              {{ orderEditForm.residential_credential_strategy === 'shared'
+		                ? '保存时会把同一组 User:Pass 复用到当前订单全部不同 IP，并校验同一 IP 下用户名唯一。'
+		                : '保存时会按当前订单项顺序整体改写凭据，并校验同一 IP 下用户名唯一。' }}
+		            </div>
+		          </a-form-item>
+		        </template>
 	        <a-form-item v-else-if="orderEditForm.mode === 'forward'" label="废弃模式（只读）">
 	          <a-alert type="warning" show-icon message="forward 模式已废弃：历史订单可查看，但不支持编辑。" />
 	          <a-input class="mt-2" :value="`历史出口数量: ${orderEditForm.forward_outbound_ids.length}`" disabled />

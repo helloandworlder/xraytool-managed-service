@@ -100,7 +100,7 @@ func (s *OrderService) RefreshResidentialCredentials(ctx context.Context, orderI
 			return err
 		}
 		for _, item := range items {
-			username, err := s.nextAvailableResidentialUsernameTx(tx)
+			username, err := s.nextAvailableResidentialUsernameTx(tx, item.IP, order.ID)
 			if err != nil {
 				return err
 			}

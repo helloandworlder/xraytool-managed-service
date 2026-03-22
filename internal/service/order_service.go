@@ -41,22 +41,23 @@ type BatchTestResult struct {
 }
 
 type CreateOrderInput struct {
-	CustomerID                 uint      `json:"customer_id"`
-	Name                       string    `json:"name"`
-	Quantity                   int       `json:"quantity"`
-	DurationDay                int       `json:"duration_day"`
-	ExpiresAt                  time.Time `json:"expires_at"`
-	Mode                       string    `json:"mode"`
-	Port                       int       `json:"port"`
-	ManualIPIDs                []uint    `json:"manual_ip_ids"`
-	ResidentialCredentialMode  string    `json:"residential_credential_mode"`
-	ResidentialCredentialLines string    `json:"residential_credential_lines"`
-	ForwardOutboundIDs         []uint    `json:"forward_outbound_ids"`
-	DedicatedEntryID           uint      `json:"dedicated_entry_id"`
-	DedicatedInboundID         uint      `json:"dedicated_inbound_id"`
-	DedicatedIngressID         uint      `json:"dedicated_ingress_id"`
-	DedicatedProtocol          string    `json:"dedicated_protocol"`
-	DedicatedEgressLines       string    `json:"dedicated_egress_lines"`
+	CustomerID                    uint      `json:"customer_id"`
+	Name                          string    `json:"name"`
+	Quantity                      int       `json:"quantity"`
+	DurationDay                   int       `json:"duration_day"`
+	ExpiresAt                     time.Time `json:"expires_at"`
+	Mode                          string    `json:"mode"`
+	Port                          int       `json:"port"`
+	ManualIPIDs                   []uint    `json:"manual_ip_ids"`
+	ResidentialCredentialMode     string    `json:"residential_credential_mode"`
+	ResidentialCredentialStrategy string    `json:"residential_credential_strategy"`
+	ResidentialCredentialLines    string    `json:"residential_credential_lines"`
+	ForwardOutboundIDs            []uint    `json:"forward_outbound_ids"`
+	DedicatedEntryID              uint      `json:"dedicated_entry_id"`
+	DedicatedInboundID            uint      `json:"dedicated_inbound_id"`
+	DedicatedIngressID            uint      `json:"dedicated_ingress_id"`
+	DedicatedProtocol             string    `json:"dedicated_protocol"`
+	DedicatedEgressLines          string    `json:"dedicated_egress_lines"`
 }
 
 type UpdateOrderInput struct {
@@ -66,6 +67,7 @@ type UpdateOrderInput struct {
 	ExpiresAt                      time.Time `json:"expires_at"`
 	ManualIPIDs                    []uint    `json:"manual_ip_ids"`
 	ResidentialCredentialMode      string    `json:"residential_credential_mode"`
+	ResidentialCredentialStrategy  string    `json:"residential_credential_strategy"`
 	ResidentialCredentialLines     string    `json:"residential_credential_lines"`
 	ForwardOutboundIDs             []uint    `json:"forward_outbound_ids"`
 	DedicatedEntryID               uint      `json:"dedicated_entry_id"`
@@ -90,11 +92,19 @@ type ExportOrderOptions struct {
 }
 
 const (
-	ResidentialCredentialModeRandom = "random"
-	ResidentialCredentialModeCustom = "custom"
+	ResidentialCredentialModeRandom      = "random"
+	ResidentialCredentialModeCustom      = "custom"
+	ResidentialCredentialStrategyPerLine = "per_line"
+	ResidentialCredentialStrategyShared  = "shared"
 )
 
 type ResidentialCredentialLine struct {
+	Username string
+	Password string
+}
+
+type residentialCredentialAssignment struct {
+	IP       string
 	Username string
 	Password string
 }
@@ -200,6 +210,7 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	targetDedicatedIngressID := order.DedicatedIngressID
 	targetForwardOutboundIDs := uniqueUintIDs(in.ForwardOutboundIDs)
 	residentialCredentialMode := normalizeResidentialCredentialMode(in.ResidentialCredentialMode)
+	residentialCredentialStrategy := normalizeResidentialCredentialStrategy(in.ResidentialCredentialStrategy)
 	residentialCredentials := []ResidentialCredentialLine{}
 	if order.Mode != model.OrderModeDedicated && (residentialCredentialMode == ResidentialCredentialModeCustom || strings.TrimSpace(in.ResidentialCredentialLines) != "") {
 		residentialCredentialMode = ResidentialCredentialModeCustom
@@ -266,8 +277,12 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	if order.Mode == model.OrderModeDedicated && in.Quantity > 0 && in.Quantity != len(order.Items) {
 		return nil, errors.New("dedicated order quantity is fixed to item count")
 	}
-	if order.Mode != model.OrderModeDedicated && len(residentialCredentials) > 0 && len(residentialCredentials) != targetQuantity {
-		return nil, fmt.Errorf("credential count %d not equal quantity %d", len(residentialCredentials), targetQuantity)
+	if order.Mode != model.OrderModeDedicated && len(residentialCredentials) > 0 {
+		expandedCredentials, err := expandResidentialCredentialLines(residentialCredentials, residentialCredentialStrategy, targetQuantity)
+		if err != nil {
+			return nil, err
+		}
+		residentialCredentials = expandedCredentials
 	}
 	if order.Mode == model.OrderModeImport && targetQuantity > len(order.Items) {
 		return nil, errors.New("import order quantity cannot be increased")
@@ -319,7 +334,7 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 					return err
 				}
 				for _, ip := range selectedIPs {
-					username, err := s.nextAvailableResidentialUsernameTx(tx)
+					username, err := s.nextAvailableResidentialUsernameTx(tx, ip.IP, order.ID)
 					if err != nil {
 						return err
 					}
@@ -355,15 +370,19 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 				return err
 			}
 			if len(residentialCredentials) > 0 {
-				if err := s.ensureResidentialCredentialsAvailableTx(tx, residentialCredentials, order.ID); err != nil {
-					return err
-				}
 				currentItems := []model.OrderItem{}
 				if err := tx.Where("order_id = ?", order.ID).Order("id asc").Find(&currentItems).Error; err != nil {
 					return err
 				}
 				if len(currentItems) != len(residentialCredentials) {
 					return fmt.Errorf("credential count %d not equal order items %d", len(residentialCredentials), len(currentItems))
+				}
+				assignments, err := residentialAssignmentsFromOrderItems(currentItems, residentialCredentials)
+				if err != nil {
+					return err
+				}
+				if err := s.ensureResidentialCredentialAssignmentsAvailableTx(tx, assignments, order.ID); err != nil {
+					return err
 				}
 				for i, item := range currentItems {
 					cred := residentialCredentials[i]
@@ -460,6 +479,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		return nil, errors.New("quantity must be > 0")
 	}
 	residentialCredentialMode := normalizeResidentialCredentialMode(in.ResidentialCredentialMode)
+	residentialCredentialStrategy := normalizeResidentialCredentialStrategy(in.ResidentialCredentialStrategy)
 	residentialCredentials := []ResidentialCredentialLine{}
 	if residentialCredentialMode == ResidentialCredentialModeCustom {
 		var err error
@@ -467,8 +487,9 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 		if err != nil {
 			return nil, err
 		}
-		if len(residentialCredentials) != in.Quantity {
-			return nil, fmt.Errorf("credential count %d not equal quantity %d", len(residentialCredentials), in.Quantity)
+		residentialCredentials, err = expandResidentialCredentialLines(residentialCredentials, residentialCredentialStrategy, in.Quantity)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -520,7 +541,11 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if len(residentialCredentials) > 0 {
-			if err := s.ensureResidentialCredentialsAvailableTx(tx, residentialCredentials, 0); err != nil {
+			assignments, err := residentialAssignmentsFromHostIPs(selectedIPs, residentialCredentials)
+			if err != nil {
+				return err
+			}
+			if err := s.ensureResidentialCredentialAssignmentsAvailableTx(tx, assignments, 0); err != nil {
 				return err
 			}
 		}
@@ -539,7 +564,7 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 				username = residentialCredentials[i].Username
 				password = residentialCredentials[i].Password
 			} else {
-				username, err = s.nextAvailableResidentialUsernameTx(tx)
+				username, err = s.nextAvailableResidentialUsernameTx(tx, ip.IP, 0)
 				if err != nil {
 					return err
 				}
@@ -596,41 +621,7 @@ func (s *OrderService) SyncOrderRuntime(ctx context.Context, orderID uint) error
 	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
 		return err
 	}
-	if order.Mode == model.OrderModeDedicated || order.IsGroupHead || order.ParentOrderID != nil {
-		return s.rebuildManagedRuntime(ctx)
-	}
-
-	return s.xray.ApplyOrFallback(ctx, func(ctx context.Context) error {
-		for _, item := range order.Items {
-			if !item.Managed || item.Status != model.OrderItemStatusActive {
-				continue
-			}
-			resource, err := s.xray.ApplyOrderItem(ctx, item, InboundTag(item.Port))
-			if err != nil && !isAlreadyExists(err) {
-				return err
-			}
-			resource.OrderItemID = item.ID
-			if err := s.db.Where("order_item_id = ?", item.ID).Assign(resource).FirstOrCreate(&model.XrayResource{}).Error; err != nil {
-				return err
-			}
-		}
-		ports := map[int]struct{}{}
-		for _, item := range order.Items {
-			if item.Managed {
-				ports[item.Port] = struct{}{}
-			}
-		}
-		for port := range ports {
-			accounts, err := s.activeAccountsForPort(port)
-			if err != nil {
-				return err
-			}
-			if err := s.xray.RebuildInboundForPort(ctx, port, accounts); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return s.rebuildManagedRuntime(ctx)
 }
 
 func (s *OrderService) DeactivateOrder(ctx context.Context, orderID uint, status string) error {
@@ -680,32 +671,7 @@ func (s *OrderService) DeactivateOrder(ctx context.Context, orderID uint, status
 		return err
 	}
 
-	return s.xray.ApplyOrFallback(ctx, func(ctx context.Context) error {
-		ports := map[int]struct{}{}
-		for _, item := range order.Items {
-			ports[item.Port] = struct{}{}
-			if !item.Managed {
-				continue
-			}
-			if err := s.xray.RemoveItemResource(ctx, model.XrayResource{
-				OrderItemID: item.ID,
-				OutboundTag: OutboundTag(item.ID),
-				RuleTag:     RuleTag(item.ID),
-			}); err != nil && !isNotFoundErr(err) {
-				return err
-			}
-		}
-		for port := range ports {
-			accounts, err := s.activeAccountsForPort(port)
-			if err != nil {
-				return err
-			}
-			if err := s.xray.RebuildInboundForPort(ctx, port, accounts); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return s.rebuildManagedRuntime(ctx)
 }
 
 func (s *OrderService) ActivateOrder(ctx context.Context, orderID uint) error {
@@ -1527,29 +1493,6 @@ func sanitizeFilenamePart(v string) string {
 	return strings.Trim(v, "-. ")
 }
 
-func (s *OrderService) activeAccountsForPort(port int) (map[string]string, error) {
-	rows := []struct {
-		Username string
-		Password string
-	}{}
-	err := s.db.Table("order_items oi").
-		Select("oi.username, oi.password").
-		Joins("join orders o on o.id = oi.order_id").
-		Where("oi.port = ? and oi.managed = 1 and oi.status = ? and o.status = ? and o.expires_at > ?", port, model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
-		Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	accounts := map[string]string{}
-	for _, row := range rows {
-		if _, exists := accounts[row.Username]; exists {
-			return nil, fmt.Errorf("duplicate username %s found on port %d", row.Username, port)
-		}
-		accounts[row.Username] = row.Password
-	}
-	return accounts, nil
-}
-
 func (s *OrderService) defaultPort() (int, error) {
 	var row model.Setting
 	if err := s.db.First(&row, "key = ?", "default_inbound_port").Error; err != nil {
@@ -1584,6 +1527,13 @@ func normalizeResidentialCredentialMode(mode string) string {
 	return ResidentialCredentialModeRandom
 }
 
+func normalizeResidentialCredentialStrategy(strategy string) string {
+	if strings.EqualFold(strings.TrimSpace(strategy), ResidentialCredentialStrategyShared) {
+		return ResidentialCredentialStrategyShared
+	}
+	return ResidentialCredentialStrategyPerLine
+}
+
 func parseResidentialCredentialLines(lines string) ([]ResidentialCredentialLine, error) {
 	scanner := bufio.NewScanner(strings.NewReader(lines))
 	out := make([]ResidentialCredentialLine, 0)
@@ -1614,36 +1564,91 @@ func parseResidentialCredentialLines(lines string) ([]ResidentialCredentialLine,
 	return out, nil
 }
 
-func (s *OrderService) ensureResidentialCredentialsAvailableTx(tx *gorm.DB, rows []ResidentialCredentialLine, excludeOrderID uint) error {
-	seen := make(map[string]struct{}, len(rows))
-	for _, row := range rows {
-		user := strings.TrimSpace(row.Username)
+func expandResidentialCredentialLines(rows []ResidentialCredentialLine, strategy string, quantity int) ([]ResidentialCredentialLine, error) {
+	if quantity <= 0 {
+		return nil, errors.New("quantity must be > 0")
+	}
+	if normalizeResidentialCredentialStrategy(strategy) == ResidentialCredentialStrategyShared {
+		if len(rows) != 1 {
+			return nil, fmt.Errorf("shared credential strategy requires exactly 1 credential line, got %d", len(rows))
+		}
+		expanded := make([]ResidentialCredentialLine, quantity)
+		for i := 0; i < quantity; i++ {
+			expanded[i] = rows[0]
+		}
+		return expanded, nil
+	}
+	if len(rows) != quantity {
+		return nil, fmt.Errorf("credential count %d not equal quantity %d", len(rows), quantity)
+	}
+	return rows, nil
+}
+
+func residentialAssignmentsFromHostIPs(ips []model.HostIP, rows []ResidentialCredentialLine) ([]residentialCredentialAssignment, error) {
+	if len(ips) != len(rows) {
+		return nil, fmt.Errorf("credential count %d not equal ip count %d", len(rows), len(ips))
+	}
+	assignments := make([]residentialCredentialAssignment, 0, len(rows))
+	for i, ip := range ips {
+		assignments = append(assignments, residentialCredentialAssignment{
+			IP:       strings.TrimSpace(ip.IP),
+			Username: strings.TrimSpace(rows[i].Username),
+			Password: rows[i].Password,
+		})
+	}
+	return assignments, nil
+}
+
+func residentialAssignmentsFromOrderItems(items []model.OrderItem, rows []ResidentialCredentialLine) ([]residentialCredentialAssignment, error) {
+	if len(items) != len(rows) {
+		return nil, fmt.Errorf("credential count %d not equal order items %d", len(rows), len(items))
+	}
+	assignments := make([]residentialCredentialAssignment, 0, len(rows))
+	for i, item := range items {
+		assignments = append(assignments, residentialCredentialAssignment{
+			IP:       strings.TrimSpace(item.IP),
+			Username: strings.TrimSpace(rows[i].Username),
+			Password: rows[i].Password,
+		})
+	}
+	return assignments, nil
+}
+
+func (s *OrderService) ensureResidentialCredentialAssignmentsAvailableTx(tx *gorm.DB, assignments []residentialCredentialAssignment, excludeOrderID uint) error {
+	seen := make(map[string]struct{}, len(assignments))
+	for _, assignment := range assignments {
+		ip := strings.TrimSpace(assignment.IP)
+		user := strings.TrimSpace(assignment.Username)
+		if ip == "" {
+			return errors.New("ip required for residential credential validation")
+		}
 		if user == "" {
 			return errors.New("username required")
 		}
-		if _, ok := seen[user]; ok {
-			return fmt.Errorf("username %s duplicated in credential lines", user)
+		key := ip + "\x00" + user
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("username %s duplicated for ip %s in credential lines", user, ip)
 		}
-		seen[user] = struct{}{}
-		q := tx.Model(&model.OrderItem{}).Where("username = ?", user)
-		if excludeOrderID > 0 {
-			q = q.Where("order_id <> ?", excludeOrderID)
-		}
-		var count int64
-		if err := q.Count(&count).Error; err != nil {
+		seen[key] = struct{}{}
+		exists, err := s.residentialCredentialAssignmentExistsTx(tx, ip, user, excludeOrderID)
+		if err != nil {
 			return err
 		}
-		if count > 0 {
-			return fmt.Errorf("username %s already exists in database", user)
+		if exists {
+			return fmt.Errorf("username %s already exists for ip %s in database", user, ip)
 		}
 	}
 	return nil
 }
 
-func (s *OrderService) nextAvailableResidentialUsernameTx(tx *gorm.DB) (string, error) {
+func (s *OrderService) nextAvailableResidentialUsernameTx(tx *gorm.DB, ip string, excludeOrderID uint) (string, error) {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return "", errors.New("ip required for residential username generation")
+	}
 	for i := 0; i < 24; i++ {
 		candidate := randomString(8)
-		exists, err := s.orderUsernameExistsTx(tx, candidate, 0)
+		exists, err := s.residentialCredentialAssignmentExistsTx(tx, ip, candidate, excludeOrderID)
 		if err != nil {
 			return "", err
 		}
@@ -1655,11 +1660,14 @@ func (s *OrderService) nextAvailableResidentialUsernameTx(tx *gorm.DB) (string, 
 }
 
 func (s *OrderService) ensurePortReadyForManaged(port int) error {
-	accounts, err := s.activeAccountsForPort(port)
-	if err != nil {
+	var count int64
+	if err := s.db.Table("order_items oi").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("oi.port = ? and oi.managed = 1 and oi.status = ? and o.status = ? and o.expires_at > ?", port, model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
+		Count(&count).Error; err != nil {
 		return err
 	}
-	if len(accounts) > 0 {
+	if count > 0 {
 		return nil
 	}
 	occupied, probeErr := ProbePort("0.0.0.0", port)
@@ -2108,6 +2116,19 @@ func (s *OrderService) orderUsernameExistsTx(tx *gorm.DB, username string, exclu
 	q := tx.Model(&model.OrderItem{}).Where("username = ?", strings.TrimSpace(username))
 	if excludeItemID > 0 {
 		q = q.Where("id <> ?", excludeItemID)
+	}
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *OrderService) residentialCredentialAssignmentExistsTx(tx *gorm.DB, ip string, username string, excludeOrderID uint) (bool, error) {
+	var count int64
+	q := tx.Model(&model.OrderItem{}).
+		Where("ip = ? and username = ?", strings.TrimSpace(ip), strings.TrimSpace(username))
+	if excludeOrderID > 0 {
+		q = q.Where("order_id <> ?", excludeOrderID)
 	}
 	if err := q.Count(&count).Error; err != nil {
 		return false, err

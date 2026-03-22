@@ -58,6 +58,10 @@ func InboundTag(port int) string {
 	return fmt.Sprintf("xtool-in-%d", port)
 }
 
+func managedMixedInboundTag(listen string, port int) string {
+	return fmt.Sprintf("xtool-in-managed-%d-%s", port, sanitizeTagPart(listen))
+}
+
 func dedicatedInboundTag(protocol string, port int) string {
 	return fmt.Sprintf("xtool-in-%s-%d", strings.ToLower(strings.TrimSpace(protocol)), port)
 }
@@ -68,6 +72,32 @@ func OutboundTag(itemID uint) string {
 
 func RuleTag(itemID uint) string {
 	return fmt.Sprintf("xtool-rule-%d", itemID)
+}
+
+func sanitizeTagPart(v string) string {
+	v = strings.TrimSpace(strings.ToLower(v))
+	if v == "" {
+		return "any"
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range v {
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlphaNum {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "any"
+	}
+	return out
 }
 
 func (m *XrayManager) StartManaged() error {
@@ -519,7 +549,11 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		}
 	}
 
-	legacyMixedAccountsByPort := map[int]map[string]string{}
+	type managedListenKey struct {
+		port   int
+		listen string
+	}
+	legacyMixedAccountsByListen := map[managedListenKey]map[string]string{}
 	dedicatedMixedAccountsByPort := map[int]map[string]string{}
 	vmessClientsByPort := map[int]map[string]string{}
 	vlessClientsByPort := map[int]map[string]string{}
@@ -585,11 +619,19 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			}
 		}
 		if len(inboundTags) == 0 && row.Port > 0 {
-			if _, ok := legacyMixedAccountsByPort[row.Port]; !ok {
-				legacyMixedAccountsByPort[row.Port] = map[string]string{}
+			listenIP := strings.TrimSpace(row.IP)
+			if listenIP == "" {
+				listenIP = "0.0.0.0"
 			}
-			legacyMixedAccountsByPort[row.Port][row.Username] = row.Password
-			inboundTags = append(inboundTags, InboundTag(row.Port))
+			key := managedListenKey{port: row.Port, listen: listenIP}
+			if _, ok := legacyMixedAccountsByListen[key]; !ok {
+				legacyMixedAccountsByListen[key] = map[string]string{}
+			}
+			if existingPass, exists := legacyMixedAccountsByListen[key][row.Username]; exists && existingPass != row.Password {
+				return fmt.Errorf("duplicate managed username %s found on %s:%d", row.Username, listenIP, row.Port)
+			}
+			legacyMixedAccountsByListen[key][row.Username] = row.Password
+			inboundTags = append(inboundTags, managedMixedInboundTag(listenIP, row.Port))
 		}
 		items = append(items, managedItem{
 			itemID:          row.ItemID,
@@ -615,13 +657,18 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			"settings": map[string]interface{}{"address": "127.0.0.1"},
 		},
 	}
-	ports := make([]int, 0, len(legacyMixedAccountsByPort))
-	for p := range legacyMixedAccountsByPort {
-		ports = append(ports, p)
+	listenKeys := make([]managedListenKey, 0, len(legacyMixedAccountsByListen))
+	for key := range legacyMixedAccountsByListen {
+		listenKeys = append(listenKeys, key)
 	}
-	sort.Ints(ports)
-	for _, p := range ports {
-		accounts := legacyMixedAccountsByPort[p]
+	sort.Slice(listenKeys, func(i, j int) bool {
+		if listenKeys[i].port != listenKeys[j].port {
+			return listenKeys[i].port < listenKeys[j].port
+		}
+		return listenKeys[i].listen < listenKeys[j].listen
+	})
+	for _, key := range listenKeys {
+		accounts := legacyMixedAccountsByListen[key]
 		users := make([]string, 0, len(accounts))
 		for u := range accounts {
 			users = append(users, u)
@@ -632,9 +679,9 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			accs = append(accs, map[string]string{"user": u, "pass": accounts[u]})
 		}
 		inbounds = append(inbounds, map[string]interface{}{
-			"tag":      InboundTag(p),
-			"listen":   "0.0.0.0",
-			"port":     p,
+			"tag":      managedMixedInboundTag(key.listen, key.port),
+			"listen":   key.listen,
+			"port":     key.port,
 			"protocol": "mixed",
 			"settings": map[string]interface{}{
 				"auth":     "password",
