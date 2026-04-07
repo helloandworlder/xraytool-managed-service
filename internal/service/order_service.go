@@ -85,10 +85,35 @@ type AllocationPreview struct {
 	Available      int `json:"available"`
 }
 
+type ListOrdersInput struct {
+	Page       int
+	PageSize   int
+	Keyword    string
+	Mode       string
+	Status     string
+	CustomerID uint
+}
+
+type OrderListStats struct {
+	Total    int64 `json:"total"`
+	Active   int64 `json:"active"`
+	Expired  int64 `json:"expired"`
+	Disabled int64 `json:"disabled"`
+}
+
+type ListOrdersResult struct {
+	Rows     []model.Order  `json:"rows"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"page_size"`
+	Total    int64          `json:"total"`
+	Stats    OrderListStats `json:"stats"`
+}
+
 type ExportOrderOptions struct {
 	Count                int
 	Shuffle              bool
 	ResidentialTXTLayout string
+	IncludeRawSocks5     bool
 }
 
 const (
@@ -138,10 +163,71 @@ func NewOrderService(db *gorm.DB, xray *XrayManager, log *zap.Logger) *OrderServ
 	return &OrderService{db: db, xray: xray, log: log}
 }
 
-func (s *OrderService) ListOrders() ([]model.Order, error) {
-	var orders []model.Order
-	err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Preload("Items").Order("id desc").Find(&orders).Error
-	return orders, err
+func (s *OrderService) ListOrders(in ListOrdersInput) (ListOrdersResult, error) {
+	in = normalizeListOrdersInput(in)
+	result := ListOrdersResult{
+		Page:     in.Page,
+		PageSize: in.PageSize,
+		Rows:     make([]model.Order, 0),
+	}
+
+	rootQuery := s.applyListOrdersFilters(s.db.Model(&model.Order{}).Where("orders.parent_order_id IS NULL"), in)
+	if err := rootQuery.Session(&gorm.Session{}).Count(&result.Total).Error; err != nil {
+		return result, err
+	}
+
+	rootOrders := make([]model.Order, 0)
+	if result.Total > 0 {
+		if err := s.applyOrderListPreloads(
+			rootQuery.
+				Order("orders.id desc").
+				Offset((in.Page - 1) * in.PageSize).
+				Limit(in.PageSize),
+		).Find(&rootOrders).Error; err != nil {
+			return result, err
+		}
+	}
+
+	headIDs := make([]uint, 0)
+	for _, row := range rootOrders {
+		if row.IsGroupHead {
+			headIDs = append(headIDs, row.ID)
+		}
+	}
+
+	childrenByParent := map[uint][]model.Order{}
+	if len(headIDs) > 0 {
+		children := make([]model.Order, 0)
+		if err := s.applyOrderListPreloads(
+			s.db.
+				Model(&model.Order{}).
+				Where("orders.parent_order_id in ?", uniqueUintIDs(headIDs)).
+				Order("orders.parent_order_id asc, orders.sequence_no asc, orders.id asc"),
+		).Find(&children).Error; err != nil {
+			return result, err
+		}
+		for _, child := range children {
+			if child.ParentOrderID == nil || *child.ParentOrderID == 0 {
+				continue
+			}
+			parentID := *child.ParentOrderID
+			childrenByParent[parentID] = append(childrenByParent[parentID], child)
+		}
+	}
+
+	for _, row := range rootOrders {
+		result.Rows = append(result.Rows, row)
+		if row.IsGroupHead {
+			result.Rows = append(result.Rows, childrenByParent[row.ID]...)
+		}
+	}
+
+	stats, err := s.orderListStats()
+	if err != nil {
+		return result, err
+	}
+	result.Stats = stats
+	return result, nil
 }
 
 func (s *OrderService) GetOrder(orderID uint) (*model.Order, error) {
@@ -151,6 +237,148 @@ func (s *OrderService) GetOrder(orderID uint) (*model.Order, error) {
 		return nil, err
 	}
 	return &order, nil
+}
+
+func normalizeListOrdersInput(in ListOrdersInput) ListOrdersInput {
+	if in.Page <= 0 {
+		in.Page = 1
+	}
+	if in.PageSize <= 0 {
+		in.PageSize = 12
+	}
+	if in.PageSize > 100 {
+		in.PageSize = 100
+	}
+	in.Keyword = strings.TrimSpace(in.Keyword)
+	in.Mode = strings.ToLower(strings.TrimSpace(in.Mode))
+	in.Status = strings.ToLower(strings.TrimSpace(in.Status))
+	return in
+}
+
+func (s *OrderService) applyOrderListPreloads(db *gorm.DB) *gorm.DB {
+	return db.
+		Preload("Customer").
+		Preload("DedicatedEntry").
+		Preload("DedicatedInbound").
+		Preload("DedicatedIngress").
+		Preload("Items", func(tx *gorm.DB) *gorm.DB {
+			return tx.Order("id asc")
+		})
+}
+
+func (s *OrderService) applyListOrdersFilters(db *gorm.DB, in ListOrdersInput) *gorm.DB {
+	if in.CustomerID > 0 {
+		db = db.Where("orders.customer_id = ?", in.CustomerID)
+	}
+	switch in.Mode {
+	case "home":
+		db = db.Where("orders.mode in ?", []string{model.OrderModeAuto, model.OrderModeManual, model.OrderModeImport})
+	case "dedicated":
+		db = db.Where("orders.mode = ?", model.OrderModeDedicated)
+	case model.OrderModeAuto, model.OrderModeManual, model.OrderModeImport, model.OrderModeForward:
+		db = db.Where("orders.mode = ?", in.Mode)
+	}
+	switch in.Status {
+	case model.OrderStatusActive, model.OrderStatusExpired, model.OrderStatusDisabled:
+		db = db.Where("orders.status = ?", in.Status)
+	}
+	if in.Keyword != "" {
+		kw := orderListKeywordLike(in.Keyword)
+		db = db.Where(orderListKeywordFilterSQL(), keywordArgs(kw)...)
+	}
+	return db
+}
+
+func (s *OrderService) orderListStats() (OrderListStats, error) {
+	stats := OrderListStats{}
+	if err := s.db.Model(&model.Order{}).Count(&stats.Total).Error; err != nil {
+		return stats, err
+	}
+	if err := s.db.Model(&model.Order{}).Where("status = ?", model.OrderStatusActive).Count(&stats.Active).Error; err != nil {
+		return stats, err
+	}
+	if err := s.db.Model(&model.Order{}).Where("status = ?", model.OrderStatusExpired).Count(&stats.Expired).Error; err != nil {
+		return stats, err
+	}
+	if err := s.db.Model(&model.Order{}).Where("status = ?", model.OrderStatusDisabled).Count(&stats.Disabled).Error; err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func orderListKeywordLike(raw string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + replacer.Replace(strings.TrimSpace(raw)) + "%"
+}
+
+func orderListKeywordFilterSQL() string {
+	return `(
+orders.order_no LIKE ? ESCAPE '\' OR
+orders.name LIKE ? ESCAPE '\' OR
+orders.mode LIKE ? ESCAPE '\' OR
+orders.status LIKE ? ESCAPE '\' OR
+EXISTS (
+	SELECT 1
+	FROM customers c
+	WHERE c.id = orders.customer_id
+	  AND (c.name LIKE ? ESCAPE '\' OR c.code LIKE ? ESCAPE '\')
+) OR
+EXISTS (
+	SELECT 1
+	FROM dedicated_ingresses di
+	WHERE di.id = orders.dedicated_ingress_id
+	  AND di.domain LIKE ? ESCAPE '\'
+) OR
+EXISTS (
+	SELECT 1
+	FROM order_items oi
+	WHERE oi.order_id = orders.id
+	  AND (
+		oi.ip LIKE ? ESCAPE '\' OR
+		CAST(oi.port AS TEXT) LIKE ? ESCAPE '\' OR
+		oi.username LIKE ? ESCAPE '\' OR
+		oi.forward_address LIKE ? ESCAPE '\' OR
+		CAST(oi.forward_port AS TEXT) LIKE ? ESCAPE '\'
+	  )
+) OR
+EXISTS (
+	SELECT 1
+	FROM orders child
+	WHERE child.parent_order_id = orders.id
+	  AND (
+		child.order_no LIKE ? ESCAPE '\' OR
+		child.name LIKE ? ESCAPE '\' OR
+		child.mode LIKE ? ESCAPE '\' OR
+		child.status LIKE ? ESCAPE '\' OR
+		EXISTS (
+			SELECT 1
+			FROM dedicated_ingresses cdi
+			WHERE cdi.id = child.dedicated_ingress_id
+			  AND cdi.domain LIKE ? ESCAPE '\'
+		) OR
+		EXISTS (
+			SELECT 1
+			FROM order_items coi
+			WHERE coi.order_id = child.id
+			  AND (
+				coi.ip LIKE ? ESCAPE '\' OR
+				CAST(coi.port AS TEXT) LIKE ? ESCAPE '\' OR
+				coi.username LIKE ? ESCAPE '\' OR
+				coi.forward_address LIKE ? ESCAPE '\' OR
+				CAST(coi.forward_port AS TEXT) LIKE ? ESCAPE '\'
+			  )
+		)
+	  )
+)
+)`
+}
+
+func keywordArgs(kw string) []interface{} {
+	args := make([]interface{}, 0, 22)
+	for range 22 {
+		args = append(args, kw)
+	}
+	return args
 }
 
 func (s *OrderService) AllocationPreview(customerID uint, excludeOrderID uint) (AllocationPreview, error) {
@@ -400,6 +628,16 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 		orderStatus := model.OrderStatusActive
 		if !targetExpiresAt.After(now) {
 			orderStatus = model.OrderStatusExpired
+		}
+		if order.Mode == model.OrderModeDedicated && strings.TrimSpace(in.DedicatedEgressLines) != "" {
+			if err := s.updateDedicatedOrderEgressTx(tx, order, in.DedicatedEgressLines, now); err != nil {
+				return err
+			}
+		}
+		if order.Mode == model.OrderModeDedicated && (in.RegenerateDedicatedCredentials || strings.TrimSpace(in.DedicatedCredentialLines) != "") {
+			if err := s.updateDedicatedOrderCredentialsTx(tx, order, targetDedicatedProtocol, targetPort, in.DedicatedCredentialLines, in.RegenerateDedicatedCredentials, now); err != nil {
+				return err
+			}
 		}
 		orderUpdates := map[string]interface{}{
 			"name":                targetName,
@@ -864,13 +1102,14 @@ func normalizeResidentialTXTLayout(raw string) string {
 	}
 }
 
-func (s *OrderService) BatchExport(orderIDs []uint, residentialTXTLayout string) (string, string, error) {
+func (s *OrderService) BatchExport(orderIDs []uint, residentialTXTLayout string, includeRawSocks5 bool) (string, string, error) {
 	parts := make([]string, 0, len(orderIDs)*4)
-	skus := map[string]struct{}{}
+	ordersForName, _ := s.expandOrdersForExport(orderIDs)
 	for _, id := range orderIDs {
 		lines, filename, err := s.ExportOrderLinesWithMeta(id, ExportOrderOptions{
 			Shuffle:              false,
 			ResidentialTXTLayout: residentialTXTLayout,
+			IncludeRawSocks5:     includeRawSocks5,
 		})
 		if err != nil {
 			return "", "", err
@@ -878,20 +1117,7 @@ func (s *OrderService) BatchExport(orderIDs []uint, residentialTXTLayout string)
 		parts = append(parts, fmt.Sprintf("# %s", filename))
 		parts = append(parts, lines)
 	}
-	for _, id := range orderIDs {
-		order := model.Order{}
-		if err := s.db.Select("id", "mode", "dedicated_protocol").First(&order, id).Error; err != nil {
-			continue
-		}
-		skus[exportSKUForOrder(order)] = struct{}{}
-	}
-	sku := "Batch"
-	if len(skus) == 1 {
-		for one := range skus {
-			sku = one
-		}
-	}
-	return strings.Join(parts, "\n\n"), buildTimestampSKUFilename(time.Now(), sku, "txt"), nil
+	return strings.Join(parts, "\n\n"), buildExportFilenameForOrders(time.Now(), ordersForName, "txt"), nil
 }
 
 func (s *OrderService) ExportOrderLines(orderID uint) (string, error) {
@@ -950,13 +1176,13 @@ func (s *OrderService) ExportOrderLinesWithMeta(orderID uint, opts ExportOrderOp
 		if err != nil {
 			return "", "", err
 		}
-		return buildDedicatedTXT(rows, exportOrderProtocol(order)), buildTimestampSKUFilename(time.Now(), exportSKUForOrder(order), "txt"), nil
+		return buildDedicatedTXT(rows, exportOrderProtocol(order), opts.ResidentialTXTLayout, opts.IncludeRawSocks5), buildExportFilenameForRows(time.Now(), rows, "txt"), nil
 	}
 	layout := normalizeResidentialTXTLayout(opts.ResidentialTXTLayout)
 	for _, item := range items {
 		lines = append(lines, buildResidentialTXTLine(item, layout))
 	}
-	return strings.Join(lines, "\n"), buildTimestampSKUFilename(time.Now(), exportSKUForOrder(order), "txt"), nil
+	return strings.Join(lines, "\n"), buildExportFilename(time.Now(), exportCustomerLabelFromOrders([]model.Order{order}), map[string]int{exportSKUForOrder(order): len(items)}, "txt"), nil
 }
 
 type dedicatedExportContext struct {
@@ -1467,14 +1693,18 @@ func exportSKUForOrder(order model.Order) string {
 }
 
 func buildResidentialTXTLine(item model.OrderItem, layout string) string {
+	return buildSocks5TXTLine(strings.TrimSpace(item.IP), item.Port, strings.TrimSpace(item.Username), strings.TrimSpace(item.Password), layout)
+}
+
+func buildSocks5TXTLine(host string, port int, username string, password string, layout string) string {
 	if normalizeResidentialTXTLayout(layout) == ResidentialTXTLayoutURI {
 		return (&url.URL{
 			Scheme: "socks5",
-			User:   url.UserPassword(strings.TrimSpace(item.Username), strings.TrimSpace(item.Password)),
-			Host:   fmt.Sprintf("%s:%d", strings.TrimSpace(item.IP), item.Port),
+			User:   url.UserPassword(strings.TrimSpace(username), strings.TrimSpace(password)),
+			Host:   fmt.Sprintf("%s:%d", strings.TrimSpace(host), port),
 		}).String()
 	}
-	return fmt.Sprintf("%s:%d:%s:%s", item.IP, item.Port, item.Username, item.Password)
+	return fmt.Sprintf("%s:%d:%s:%s", host, port, username, password)
 }
 
 func sanitizeFilenamePart(v string) string {
@@ -1615,7 +1845,6 @@ func residentialAssignmentsFromOrderItems(items []model.OrderItem, rows []Reside
 }
 
 func (s *OrderService) ensureResidentialCredentialAssignmentsAvailableTx(tx *gorm.DB, assignments []residentialCredentialAssignment, excludeOrderID uint) error {
-	seen := make(map[string]struct{}, len(assignments))
 	for _, assignment := range assignments {
 		ip := strings.TrimSpace(assignment.IP)
 		user := strings.TrimSpace(assignment.Username)
@@ -1625,17 +1854,12 @@ func (s *OrderService) ensureResidentialCredentialAssignmentsAvailableTx(tx *gor
 		if user == "" {
 			return errors.New("username required")
 		}
-		key := ip + "\x00" + user
-		if _, ok := seen[key]; ok {
-			return fmt.Errorf("username %s duplicated for ip %s in credential lines", user, ip)
-		}
-		seen[key] = struct{}{}
-		exists, err := s.residentialCredentialAssignmentExistsTx(tx, ip, user, excludeOrderID)
+		exists, err := s.orderUsernameExistsInOtherOrdersTx(tx, user, excludeOrderID)
 		if err != nil {
 			return err
 		}
 		if exists {
-			return fmt.Errorf("username %s already exists for ip %s in database", user, ip)
+			return fmt.Errorf("username %s already exists in another active order", user)
 		}
 	}
 	return nil
@@ -1648,7 +1872,7 @@ func (s *OrderService) nextAvailableResidentialUsernameTx(tx *gorm.DB, ip string
 	}
 	for i := 0; i < 24; i++ {
 		candidate := randomString(8)
-		exists, err := s.residentialCredentialAssignmentExistsTx(tx, ip, candidate, excludeOrderID)
+		exists, err := s.orderUsernameExistsInOtherOrdersTx(tx, candidate, excludeOrderID)
 		if err != nil {
 			return "", err
 		}
@@ -2116,6 +2340,18 @@ func (s *OrderService) orderUsernameExistsTx(tx *gorm.DB, username string, exclu
 	q := tx.Model(&model.OrderItem{}).Where("username = ?", strings.TrimSpace(username))
 	if excludeItemID > 0 {
 		q = q.Where("id <> ?", excludeItemID)
+	}
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *OrderService) orderUsernameExistsInOtherOrdersTx(tx *gorm.DB, username string, excludeOrderID uint) (bool, error) {
+	var count int64
+	q := tx.Model(&model.OrderItem{}).Where("username = ?", strings.TrimSpace(username))
+	if excludeOrderID > 0 {
+		q = q.Where("order_id <> ?", excludeOrderID)
 	}
 	if err := q.Count(&count).Error; err != nil {
 		return false, err

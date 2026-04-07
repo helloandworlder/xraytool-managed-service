@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,11 @@ type xlsxExportRow struct {
 	CustomerCode string
 	CountryCode  string
 	ExitIP       string
+	IngressHost  string
+	IngressPort  int
+	Username     string
+	Password     string
+	UUID         string
 	CycleTag     string
 	DurationDays int
 	ExpiresAt    time.Time
@@ -115,7 +121,7 @@ func (s *OrderService) BatchExportArtifact(orderIDs []uint, opts XLSXExportOptio
 	if err != nil {
 		return nil, "", "", err
 	}
-	filename := buildTimestampSKUFilename(time.Now(), "Batch", "zip")
+	filename := buildExportFilenameForRows(time.Now(), rows, "zip")
 	return zipBody, filename, "application/zip", nil
 }
 
@@ -123,27 +129,6 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 	orders, err := s.expandOrdersForExport(orderIDs)
 	if err != nil {
 		return nil, err
-	}
-	headOrderNoByID := map[uint]string{}
-	headIDs := make([]uint, 0)
-	for _, order := range orders {
-		headID := groupHeadID(order)
-		if headID > 0 {
-			headIDs = append(headIDs, headID)
-		}
-	}
-	headIDs = uniqueUintIDs(headIDs)
-	if len(headIDs) > 0 {
-		type orderNoRow struct {
-			ID      uint
-			OrderNo string
-		}
-		headRows := []orderNoRow{}
-		if err := s.db.Model(&model.Order{}).Select("id", "order_no").Where("id in ?", headIDs).Find(&headRows).Error; err == nil {
-			for _, row := range headRows {
-				headOrderNoByID[row.ID] = strings.TrimSpace(row.OrderNo)
-			}
-		}
 	}
 	itemIDs := make([]uint, 0)
 	for _, order := range orders {
@@ -187,10 +172,6 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 				country = "xx"
 			}
 			orderNo := strings.TrimSpace(order.OrderNo)
-			headID := groupHeadID(order)
-			if v := strings.TrimSpace(headOrderNoByID[headID]); v != "" {
-				orderNo = v
-			}
 			if orderNo == "" {
 				orderNo = buildOrderNo(order.CreatedAt, order.ID)
 			}
@@ -198,6 +179,14 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 			if strings.TrimSpace(item.ForwardAddress) == "" || item.ForwardPort <= 0 {
 				rawSocks = ""
 			}
+			host := strings.TrimSpace(order.DedicatedIngress.Domain)
+			if host == "" {
+				host = strings.TrimSpace(order.DedicatedEntry.Domain)
+			}
+			if host == "" {
+				host = strings.TrimSpace(item.IP)
+			}
+			ingressPort := dedicatedExportPort(order)
 			result = append(result, xlsxExportRow{
 				Protocol:     protocol,
 				Mode:         strings.TrimSpace(order.Mode),
@@ -207,6 +196,11 @@ func (s *OrderService) collectXLSXRows(orderIDs []uint, opts XLSXExportOptions) 
 				CustomerCode: strings.TrimSpace(order.Customer.Code),
 				CountryCode:  country,
 				ExitIP:       strings.TrimSpace(egress.ExitIP),
+				IngressHost:  host,
+				IngressPort:  ingressPort,
+				Username:     strings.TrimSpace(item.Username),
+				Password:     strings.TrimSpace(item.Password),
+				UUID:         strings.TrimSpace(item.VmessUUID),
 				CycleTag:     cycleTag(order, now),
 				DurationDays: cycleDays(order, now),
 				ExpiresAt:    order.ExpiresAt,
@@ -320,8 +314,15 @@ func buildExportZip(groups map[string][]xlsxExportRow, includeRaw bool) ([]byte,
 	return buf.Bytes(), nil
 }
 
+func dedicatedExportPort(order model.Order) int {
+	if order.DedicatedIngress != nil && order.DedicatedIngress.IngressPort > 0 {
+		return order.DedicatedIngress.IngressPort
+	}
+	return order.Port
+}
+
 func exportArtifactFilename(rows []xlsxExportRow, protocol string, ext string) string {
-	return buildTimestampSKUFilename(time.Now(), exportArtifactSKU(rows, protocol), ext)
+	return buildExportFilenameForRows(time.Now(), rows, ext)
 }
 
 func exportArtifactSKU(rows []xlsxExportRow, protocol string) string {
@@ -332,6 +333,109 @@ func exportArtifactSKU(rows []xlsxExportRow, protocol string) string {
 		return exportProtocolLabel(protocol)
 	}
 	return "Home"
+}
+
+func buildExportFilenameForRows(ts time.Time, rows []xlsxExportRow, ext string) string {
+	return buildExportFilename(ts, exportCustomerLabelFromRows(rows), exportSKUCountsFromRows(rows), ext)
+}
+
+func buildExportFilenameForOrders(ts time.Time, orders []model.Order, ext string) string {
+	return buildExportFilename(ts, exportCustomerLabelFromOrders(orders), exportSKUCountsFromOrders(orders), ext)
+}
+
+func buildExportFilename(ts time.Time, customer string, skuCounts map[string]int, ext string) string {
+	customer = sanitizeFilenamePart(customer)
+	if customer == "" {
+		customer = "未分配客户"
+	}
+	summary := "Export[0]"
+	if len(skuCounts) > 0 {
+		keys := make([]string, 0, len(skuCounts))
+		for key := range skuCounts {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			parts = append(parts, fmt.Sprintf("%s[%d]", sanitizeFilenamePart(key), skuCounts[key]))
+		}
+		summary = strings.Join(parts, "")
+	}
+	base := fmt.Sprintf("%s-%s-(%s)", customer, ts.Format("20060102"), summary)
+	if strings.TrimSpace(ext) == "" {
+		return base
+	}
+	return base + "." + sanitizeFilenamePart(ext)
+}
+
+func exportCustomerLabelFromRows(rows []xlsxExportRow) string {
+	values := map[string]struct{}{}
+	for _, row := range rows {
+		label := strings.TrimSpace(row.Customer)
+		if label == "" {
+			label = strings.TrimSpace(row.CustomerCode)
+		}
+		if label == "" {
+			label = "未分配客户"
+		}
+		values[label] = struct{}{}
+	}
+	if len(values) == 1 {
+		for one := range values {
+			return one
+		}
+	}
+	if len(values) > 1 {
+		return "多客户"
+	}
+	return "未分配客户"
+}
+
+func exportCustomerLabelFromOrders(orders []model.Order) string {
+	values := map[string]struct{}{}
+	for _, order := range orders {
+		label := strings.TrimSpace(order.Customer.Name)
+		if label == "" {
+			label = strings.TrimSpace(order.Customer.Code)
+		}
+		if label == "" {
+			label = "未分配客户"
+		}
+		values[label] = struct{}{}
+	}
+	if len(values) == 1 {
+		for one := range values {
+			return one
+		}
+	}
+	if len(values) > 1 {
+		return "多客户"
+	}
+	return "未分配客户"
+}
+
+func exportSKUCountsFromRows(rows []xlsxExportRow) map[string]int {
+	counts := map[string]int{}
+	for _, row := range rows {
+		key := exportProtocolLabel(row.Protocol)
+		if !strings.EqualFold(strings.TrimSpace(row.Mode), model.OrderModeDedicated) {
+			key = "Home"
+		}
+		counts[key]++
+	}
+	return counts
+}
+
+func exportSKUCountsFromOrders(orders []model.Order) map[string]int {
+	counts := map[string]int{}
+	for _, order := range orders {
+		count := len(order.Items)
+		if count <= 0 {
+			count = 1
+		}
+		counts[exportSKUForOrder(order)] += count
+	}
+	return counts
 }
 
 func buildTimestampSKUFilename(ts time.Time, sku string, ext string) string {
@@ -560,7 +664,20 @@ func buildSingleProtocolQRCodeImage(link string, title string) ([]byte, error) {
 	return qrcode.Encode(link, qrcode.Medium, 420)
 }
 
-func buildDedicatedTXT(rows []xlsxExportRow, protocol string) string {
+func buildDedicatedTXT(rows []xlsxExportRow, protocol string, layout string, includeRaw bool) string {
+	if strings.EqualFold(strings.TrimSpace(protocol), model.DedicatedFeatureMixed) {
+		blocks := make([]string, 0, len(rows))
+		for _, row := range rows {
+			block := []string{
+				buildSocks5TXTLine(row.IngressHost, row.IngressPort, row.Username, row.Password, layout),
+			}
+			if includeRaw && strings.TrimSpace(row.RawSocks5) != "" {
+				block = append(block, fmt.Sprintf("出口Socks5: %s", formatRawSocks5Line(row.RawSocks5, layout)))
+			}
+			blocks = append(blocks, strings.Join(block, "\n"))
+		}
+		return strings.Join(blocks, "\n\n")
+	}
 	blocks := make([]string, 0, len(rows))
 	linkLabel := exportProtocolLabel(protocol) + " 链接"
 	if strings.EqualFold(strings.TrimSpace(protocol), model.DedicatedFeatureMixed) {
@@ -573,9 +690,25 @@ func buildDedicatedTXT(rows []xlsxExportRow, protocol string) string {
 			fmt.Sprintf("二维码内容: %s", strings.TrimSpace(row.Link)),
 			fmt.Sprintf("到期时间: %s", row.ExpiresAt.Format("2006-01-02 15:04:05")),
 		}
+		if includeRaw && strings.TrimSpace(row.RawSocks5) != "" {
+			block = append(block, fmt.Sprintf("出口Socks5: %s", formatRawSocks5Line(row.RawSocks5, layout)))
+		}
 		blocks = append(blocks, strings.Join(block, "\n"))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+func formatRawSocks5Line(raw string, layout string) string {
+	parts := strings.Split(strings.TrimSpace(raw), ":")
+	if len(parts) != 4 {
+		return strings.TrimSpace(raw)
+	}
+	return buildSocks5TXTLine(parts[0], mustAtoi(parts[1]), parts[2], parts[3], layout)
+}
+
+func mustAtoi(raw string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(raw))
+	return n
 }
 
 func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]byte, error) {
@@ -620,6 +753,9 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		qrCol = "C"
 		expiresCol = "D"
 		orderNoCol = "E"
+	} else if isDedicated && includeRaw {
+		rawCol = "E"
+		headers = append(headers, "出口Socks5")
 	}
 	for idx, row := range rows {
 		r := idx + 2
@@ -633,6 +769,9 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 		if !isDedicated && includeRaw {
 			rawValue := row.RawSocks5
 			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), rawValue)
+		}
+		if isDedicated && includeRaw {
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", rawCol, r), row.RawSocks5)
 		}
 		_ = f.SetRowHeight(sheet, r, qrRowHeight)
 		if len(row.QRCodeData) > 0 {
@@ -657,10 +796,13 @@ func buildOrdersXLSX(rows []xlsxExportRow, protocol string, includeRaw bool) ([]
 	_ = f.SetColWidth(sheet, qrCol, qrCol, qrColWidth)
 	_ = f.SetColWidth(sheet, expiresCol, expiresCol, 22)
 	_ = f.SetColWidth(sheet, orderNoCol, orderNoCol, 18)
-	if includeRaw {
+	if rawCol != "" {
 		_ = f.SetColWidth(sheet, rawCol, rawCol, 44)
 	}
 	endCol := orderNoCol
+	if rawCol != "" && isDedicated {
+		endCol = rawCol
+	}
 	_ = f.SetCellStyle(sheet, "A1", endCol+"1", wrapStyle)
 	if len(rows) > 0 {
 		_ = f.SetCellStyle(sheet, "A2", fmt.Sprintf("%s%d", endCol, len(rows)+1), wrapStyle)

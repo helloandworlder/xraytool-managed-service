@@ -1,15 +1,10 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
 	ApiOutlined,
 	DashboardOutlined,
 	DatabaseOutlined,
-	DeleteOutlined,
-	EditOutlined,
-	FilterOutlined,
-	LogoutOutlined,
-	ReloadOutlined,
 	SettingOutlined,
 	TeamOutlined,
 	UnorderedListOutlined,
@@ -17,8 +12,17 @@ import {
 } from '@ant-design/icons-vue'
 import { useAuthStore } from './stores/auth'
 import { usePanelStore } from './stores/panel'
-import { http } from './lib/http'
+import { http, isAuthError, subscribeHttpActivity } from './lib/http'
 import type { ImportPreviewRow, Order } from './lib/types'
+import AppShell from './components/layout/AppShell.vue'
+const DashboardPage = defineAsyncComponent(() => import('./pages/DashboardPage.vue'))
+const CustomersPage = defineAsyncComponent(() => import('./pages/CustomersPage.vue'))
+const HostIPsPage = defineAsyncComponent(() => import('./pages/HostIPsPage.vue'))
+const OrdersPage = defineAsyncComponent(() => import('./pages/OrdersPage.vue'))
+const DeliveryPage = defineAsyncComponent(() => import('./pages/DeliveryPage.vue'))
+const DedicatedWorkbenchPage = defineAsyncComponent(() => import('./pages/DedicatedWorkbenchPage.vue'))
+const ImportPage = defineAsyncComponent(() => import('./pages/ImportPage.vue'))
+const SettingsPage = defineAsyncComponent(() => import('./pages/SettingsPage.vue'))
 
 const auth = useAuthStore()
 const panel = usePanelStore()
@@ -217,6 +221,8 @@ const exportDialogResidentialTXTLayout = ref<'uri' | 'colon'>('uri')
 const exportDialogOrderID = ref<number | null>(null)
 const exportDialogOrderIDs = ref<number[]>([])
 const exportDialogContainsResidential = ref(false)
+const exportDialogContainsDedicated = ref(false)
+const exportDialogIncludeRawSocks5 = ref(false)
 const groupSocksModalOpen = ref(false)
 const groupCredModalOpen = ref(false)
 const groupGeoModalOpen = ref(false)
@@ -250,7 +256,6 @@ const dedicatedProbeRunning = ref(false)
 const dedicatedProbeRows = ref<Array<{ index: number; raw: string; available: boolean; exit_ip: string; country_code: string; region: string; error?: string }>>([])
 const dedicatedProbeMeta = reactive({ total: 0, success: 0, failed: 0 })
 
-const siderCollapsed = ref(false)
 const probeResult = ref('')
 const testingOrderID = ref<number | null>(null)
 const testResult = ref<Record<string, string> | null>(null)
@@ -258,11 +263,19 @@ const batchTestResult = ref<Array<{ id: number; success: boolean; result?: Recor
 const orderDetailOpen = ref(false)
 const orderDetailLoading = ref(false)
 const orderSearchKeyword = ref('')
+const orderCustomerID = ref<number>(0)
 const orderModeFilter = ref<'all' | 'home' | 'dedicated'>('all')
 const orderStatusFilter = ref<'all' | 'active' | 'expired' | 'disabled'>('all')
 const deliverySearchKeyword = ref('')
 const orderPagination = reactive({ current: 1, pageSize: 12 })
 const deliveryPagination = reactive({ current: 1, pageSize: 12 })
+const dedicatedSearchKeyword = ref('')
+const dedicatedCustomerID = ref<number>(0)
+const dedicatedStatusFilter = ref<'all' | 'active' | 'expired' | 'disabled'>('all')
+const dedicatedPagination = reactive({ current: 1, pageSize: 12 })
+const activeDedicatedHeadID = ref<number>(0)
+const dedicatedCheckRunning = ref(false)
+const dedicatedCheckResults = ref<Record<number, Record<string, any>>>({})
 const orderEditCurrentInboundLines = ref('')
 const orderEditCurrentEgressLines = ref('')
 const batchMoreDays = ref(30)
@@ -276,16 +289,16 @@ const menuItems = [
   { key: 'ips', icon: () => h(DatabaseOutlined), label: 'IP池' },
   { key: 'orders', icon: () => h(UnorderedListOutlined), label: '订单' },
   { key: 'delivery', icon: () => h(ApiOutlined), label: '发货' },
+  { key: 'dedicated', icon: () => h(DatabaseOutlined), label: '专线工作台' },
   { key: 'import', icon: () => h(UploadOutlined), label: '批量导入' },
   { key: 'settings', icon: () => h(SettingOutlined), label: '设置' }
 ]
 
 const healthCards = computed(() => {
-  const disabled = panel.orders.filter((o) => o.status === 'disabled').length
   return [
     { title: '激活订单', value: panel.activeOrderCount, color: '#059669' },
     { title: '到期订单', value: panel.expiredOrderCount, color: '#d97706' },
-    { title: '停用订单', value: disabled, color: '#dc2626' },
+    { title: '停用订单', value: panel.disabledOrderCount, color: '#dc2626' },
     { title: '可用公网IP', value: panel.activeHostPublicCount, color: '#0284c7' }
   ]
 })
@@ -362,6 +375,42 @@ function matchesOrderFilters(order: any): boolean {
 	return orderSearchContent(order).includes(keyword)
 }
 
+function deliverySearchMatches(order: any, keyword: string): boolean {
+	const normalized = String(keyword || '').trim().toLowerCase()
+	if (!normalized) return true
+	if (orderSearchContent(order).includes(normalized)) return true
+	const children = Array.isArray(order.children) ? order.children : []
+	return children.some((child: any) => orderSearchContent(child).includes(normalized))
+}
+
+function deliveryOrdersForCopy(order: Order): Order[] {
+	if (String(order.mode || '') !== 'dedicated' || !order.is_group_head) {
+		return [order]
+	}
+	return panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(order.id))
+		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0) || Number(a.id) - Number(b.id))
+}
+
+function deliveryLinesForOrder(order: Order): string[] {
+	const orders = deliveryOrdersForCopy(order)
+	const lines: string[] = []
+	for (const oneOrder of orders) {
+		for (const item of oneOrder.items || []) {
+			if (String(oneOrder.mode || '') === 'dedicated') {
+				const host = String(oneOrder.dedicated_ingress?.domain || oneOrder.dedicated_entry?.domain || item.ip || '').trim()
+				const port = dedicatedCopyPort(oneOrder)
+				if (host && port > 0) {
+					lines.push(`${host}:${port}:${item.username}:${item.password}`)
+				}
+				continue
+			}
+			lines.push(`${item.ip}:${item.port}:${item.username}:${item.password}`)
+		}
+	}
+	return lines
+}
+
 const filteredOrderRows = computed(() => {
 	const rows: any[] = []
 	for (const root of orderRows.value) {
@@ -386,8 +435,7 @@ const filteredOrderRows = computed(() => {
 const deliveryCustomerID = ref<number>(0)
 const deliveryMode = ref<'all' | 'home' | 'dedicated'>('all')
 const deliveryRows = computed(() =>
-	panel.orders
-		.filter((row) => Number((row as any).parent_order_id || 0) === 0)
+	orderRows.value
 		.filter((row) => {
 			if (deliveryCustomerID.value > 0 && Number(row.customer_id) !== Number(deliveryCustomerID.value)) return false
 			if (deliveryMode.value === 'home') return isResidentialMode(String(row.mode || ''))
@@ -396,10 +444,45 @@ const deliveryRows = computed(() =>
 		})
 		.filter((row) => {
 			const keyword = String(deliverySearchKeyword.value || '').trim().toLowerCase()
-			if (!keyword) return true
-			return orderSearchContent(row).includes(keyword)
+			return deliverySearchMatches(row, keyword)
 		})
 		.map((row) => ({ ...row, key: row.id }))
+)
+
+const dedicatedGroupHeads = computed(() =>
+	panel.orders
+		.filter((row) => String(row.mode || '') === 'dedicated')
+		.filter((row) => Boolean((row as any).is_group_head) || Number((row as any).parent_order_id || 0) === 0)
+		.sort((a, b) => Number(b.id) - Number(a.id))
+)
+
+const activeDedicatedHead = computed(() =>
+	dedicatedGroupHeads.value.find((row) => Number(row.id) === Number(activeDedicatedHeadID.value || 0)) || null
+)
+
+const activeDedicatedChildren = computed(() =>
+	panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(activeDedicatedHeadID.value || 0))
+		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0) || Number(a.id) - Number(b.id))
+)
+
+const releaseVersionText = computed(() => {
+	const info = panel.versionInfo
+	if (!info) return 'Release dev'
+	const version = String(info.version || 'dev').trim() || 'dev'
+	const commit = String(info.commit || '').trim()
+	return commit && commit !== 'unknown' ? `Release ${version} (${commit.slice(0, 7)})` : `Release ${version}`
+})
+
+const activeRequests = computed(() =>
+	Object.entries(panel.activeRequestMap || {})
+		.map(([id, row]) => ({
+			id,
+			method: String(row.method || 'GET').toUpperCase(),
+			url: String(row.url || '/'),
+			sinceText: `${Math.max(0, Math.round((Date.now() - Number(row.startedAt || Date.now())) / 1000))}s`
+		}))
+		.sort((a, b) => a.url.localeCompare(b.url))
 )
 
 const isForwardDeprecatedOrderEdit = computed(() => orderEditOpen.value && String(orderEditForm.mode || '') === 'forward')
@@ -645,16 +728,6 @@ const oversellColumns = [
   { title: '可用', dataIndex: 'enabled', key: 'enabled', width: 90 }
 ]
 
-const runtimeColumns = [
-	{ title: '客户', key: 'customer', width: 180 },
-	{ title: '在线数', dataIndex: 'online_clients', key: 'online_clients', width: 90 },
-	{ title: '实时速度', key: 'speed', width: 120 },
-	{ title: '1h流量', key: 't1h', width: 100 },
-	{ title: '24h流量', key: 't24h', width: 100 },
-	{ title: '7d流量', key: 't7d', width: 100 },
-	{ title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 170 }
-]
-
 const importColumns = [
 	{ title: '来源文件', dataIndex: 'source_file', key: 'source_file', width: 280 },
   { title: '原始', dataIndex: 'raw', key: 'raw', width: 340 },
@@ -705,14 +778,44 @@ const backupColumns = [
 ]
 
 onMounted(async () => {
+  stopHttpActivitySubscription = subscribeHttpActivity((event) => {
+    if (event.phase === 'start') {
+      panel.noteRequestStart({
+        requestId: event.requestId,
+        method: event.method,
+        url: event.url,
+        startedAt: event.startedAt
+      })
+      return
+    }
+    panel.noteRequestFinish({
+      requestId: event.requestId,
+      method: event.method,
+      url: event.url,
+      status: event.status,
+      ok: event.ok,
+      durationMs: event.durationMs,
+      error: event.error
+    })
+  })
   if (!auth.isAuthed) return
   try {
     await panel.bootstrap()
     seedDefaultsFromSettings()
   } catch (err) {
     panel.setError(err)
-    auth.logout()
-  }
+    if (isAuthError(err)) {
+      auth.logout()
+      panel.$reset()
+    }
+	}
+})
+
+let stopHttpActivitySubscription: null | (() => void) = null
+
+onBeforeUnmount(() => {
+  stopHttpActivitySubscription?.()
+  stopHttpActivitySubscription = null
 })
 
 watch(
@@ -803,9 +906,22 @@ watch(
 )
 
 watch(
-	() => [orderSearchKeyword.value, orderModeFilter.value, orderStatusFilter.value],
+	() => [orderSearchKeyword.value, orderCustomerID.value, orderModeFilter.value, orderStatusFilter.value],
 	() => {
 		orderPagination.current = 1
+		if (panel.activeTab === 'orders') {
+			void loadOrdersView()
+		}
+	}
+)
+
+watch(
+	() => [dedicatedSearchKeyword.value, dedicatedCustomerID.value, dedicatedStatusFilter.value],
+	() => {
+		dedicatedPagination.current = 1
+		if (panel.activeTab === 'dedicated') {
+			void loadDedicatedView()
+		}
 	}
 )
 
@@ -813,8 +929,103 @@ watch(
 	() => [deliverySearchKeyword.value, deliveryMode.value, deliveryCustomerID.value],
 	() => {
 		deliveryPagination.current = 1
+		if (panel.activeTab === 'delivery') {
+			void loadDeliveryView()
+		}
 	}
 )
+
+watch(
+	() => panel.activeTab,
+	(tab) => {
+		if (tab === 'orders') {
+			void loadOrdersView()
+			return
+		}
+		if (tab === 'delivery') {
+			void loadDeliveryView()
+			return
+		}
+		if (tab === 'dedicated') {
+			void loadDedicatedView()
+		}
+	}
+)
+
+watch(
+	() => dedicatedGroupHeads.value.map((row) => Number(row.id)).join(','),
+	() => {
+		if (!dedicatedGroupHeads.value.length) {
+			activeDedicatedHeadID.value = 0
+			dedicatedCheckResults.value = {}
+			return
+		}
+		if (!dedicatedGroupHeads.value.some((row) => Number(row.id) === Number(activeDedicatedHeadID.value || 0))) {
+			activeDedicatedHeadID.value = Number(dedicatedGroupHeads.value[0].id)
+			dedicatedCheckResults.value = {}
+		}
+	}
+)
+
+async function loadOrdersView(page = orderPagination.current, pageSize = orderPagination.pageSize) {
+	try {
+		await panel.loadOrders({
+			page,
+			page_size: pageSize,
+			keyword: String(orderSearchKeyword.value || '').trim(),
+			mode: orderModeFilter.value,
+			status: orderStatusFilter.value,
+			customer_id: Number(orderCustomerID.value || 0)
+		})
+		orderPagination.current = Number(panel.orderList.page || page || 1)
+		orderPagination.pageSize = Number(panel.orderList.pageSize || pageSize || 12)
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function loadDeliveryView(page = deliveryPagination.current, pageSize = deliveryPagination.pageSize) {
+	try {
+		await panel.loadOrders({
+			page,
+			page_size: pageSize,
+			keyword: String(deliverySearchKeyword.value || '').trim(),
+			mode: deliveryMode.value,
+			customer_id: Number(deliveryCustomerID.value || 0),
+			status: 'all'
+		})
+		deliveryPagination.current = Number(panel.orderList.page || page || 1)
+		deliveryPagination.pageSize = Number(panel.orderList.pageSize || pageSize || 12)
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+async function loadDedicatedView(page = dedicatedPagination.current, pageSize = dedicatedPagination.pageSize) {
+	try {
+		await panel.loadOrders({
+			page,
+			page_size: pageSize,
+			keyword: String(dedicatedSearchKeyword.value || '').trim(),
+			mode: 'dedicated',
+			status: dedicatedStatusFilter.value,
+			customer_id: Number(dedicatedCustomerID.value || 0)
+		})
+		dedicatedPagination.current = Number(panel.orderList.page || page || 1)
+		dedicatedPagination.pageSize = Number(panel.orderList.pageSize || pageSize || 12)
+		if (!dedicatedGroupHeads.value.some((row) => Number(row.id) === Number(activeDedicatedHeadID.value || 0))) {
+			activeDedicatedHeadID.value = Number(dedicatedGroupHeads.value[0]?.id || 0)
+			dedicatedCheckResults.value = {}
+		}
+	} catch (err) {
+		panel.setError(err)
+	}
+}
+
+function selectDedicatedHead(orderID: number) {
+	activeDedicatedHeadID.value = Number(orderID || 0)
+	dedicatedCheckResults.value = {}
+}
 
 function seedDefaultsFromSettings() {
   const p = Number(panel.settings.default_inbound_port || '23457')
@@ -956,6 +1167,11 @@ async function doLogin() {
     await auth.login(loginForm)
     await panel.bootstrap()
     seedDefaultsFromSettings()
+    if (panel.activeTab === 'orders') {
+      await loadOrdersView()
+    } else if (panel.activeTab === 'delivery') {
+      await loadDeliveryView()
+    }
     message.success('登录成功')
   } catch (err) {
     panel.setError(err)
@@ -975,6 +1191,13 @@ function onMenuClick(info: { key: string }) {
 async function refreshAll() {
   try {
     await panel.bootstrap()
+    if (panel.activeTab === 'orders') {
+      await loadOrdersView()
+    } else if (panel.activeTab === 'delivery') {
+      await loadDeliveryView()
+    } else if (panel.activeTab === 'dedicated') {
+      await loadDedicatedView()
+    }
     message.success('数据已刷新')
   } catch (err) {
     panel.setError(err)
@@ -1472,8 +1695,10 @@ function openExportDialog(orderIDs: number[]) {
 	exportDialogOrderIDs.value = ids
 	exportDialogOrderID.value = ids.length === 1 ? ids[0] : null
 	exportDialogContainsResidential.value = rows.some((row) => isResidentialMode(String(row.mode || '')))
+	exportDialogContainsDedicated.value = rows.some((row) => String(row.mode || '') === 'dedicated')
 	exportDialogFormat.value = 'xlsx'
 	exportDialogResidentialTXTLayout.value = 'uri'
+	exportDialogIncludeRawSocks5.value = false
 	exportDialogOpen.value = true
 }
 
@@ -1497,12 +1722,18 @@ async function submitExportDialog() {
 	try {
 		exportDialogSubmitting.value = true
 		if (exportDialogOrderID.value && exportDialogOrderIDs.value.length === 1) {
-			await downloadOrderExport(exportDialogOrderID.value, exportDialogFormat.value, exportDialogResidentialTXTLayout.value)
+			await downloadOrderExport(
+				exportDialogOrderID.value,
+				exportDialogFormat.value,
+				exportDialogResidentialTXTLayout.value,
+				exportDialogIncludeRawSocks5.value
+			)
 		} else {
 			const res = await panel.batchExport(
 				exportDialogOrderIDs.value,
 				exportDialogFormat.value,
-				exportDialogResidentialTXTLayout.value
+				exportDialogResidentialTXTLayout.value,
+				exportDialogIncludeRawSocks5.value
 			)
 			const header = String(res.headers?.['content-disposition'] || '')
 			const fallbackExt = exportDialogFormat.value === 'txt' ? 'txt' : 'zip'
@@ -1517,7 +1748,7 @@ async function submitExportDialog() {
 	}
 }
 
-async function downloadOrderExport(orderID: number, format: 'txt' | 'xlsx', residentialTXTLayout: 'uri' | 'colon') {
+async function downloadOrderExport(orderID: number, format: 'txt' | 'xlsx', residentialTXTLayout: 'uri' | 'colon', includeRawSocks5 = false) {
 	try {
 		exportingOrderID.value = orderID
 		const params = new URLSearchParams()
@@ -1526,6 +1757,9 @@ async function downloadOrderExport(orderID: number, format: 'txt' | 'xlsx', resi
 		}
 		params.set('format', format)
 		params.set('residential_txt_layout', residentialTXTLayout)
+		if (includeRawSocks5) {
+			params.set('include_raw_socks5', 'true')
+		}
 		params.set('shuffle', 'false')
 		const query = params.toString()
 		const res = await http.get(`/api/orders/${orderID}/export${query ? `?${query}` : ''}`, { responseType: 'blob' })
@@ -1575,6 +1809,8 @@ async function streamTestOrder(orderID: number) {
 	streamMeta.success = 0
 	streamMeta.failed = 0
 	streamTestOpen.value = true
+	const activityID = `stream-test:${orderID}:${Date.now()}`
+	panel.startTrackedActivity(activityID, '流式测活', `订单 #${orderID} 正在流式测活`)
 	try {
 		await panel.streamTestOrder(orderID, Number(testSamplePercent.value), (event) => {
 			if (event.type === 'meta') {
@@ -1598,9 +1834,11 @@ async function streamTestOrder(orderID: number) {
 				streamMeta.failed = Number(event.failure_count || streamMeta.failed)
 			}
 		})
+		panel.finishTrackedActivity(activityID, 'success', `订单 #${orderID} 流式测活完成，成功 ${streamMeta.success}，失败 ${streamMeta.failed}`)
 		message.success('流式测活完成')
 	} catch (err) {
 		panel.setError(err)
+		panel.finishTrackedActivity(activityID, 'error', `订单 #${orderID} 流式测活失败: ${panel.error || 'unknown error'}`)
 	}
 }
 
@@ -1622,16 +1860,106 @@ function dedicatedCopyPort(order: Order): number {
 	return Number(order.port || 0)
 }
 
-async function copyOrderLines(order: Order) {
-	const lines = order.items.map((item) => {
-		if (order.mode === 'dedicated') {
-			const host = String(order.dedicated_ingress?.domain || order.dedicated_entry?.domain || item.ip)
-			const port = dedicatedCopyPort(order)
-			return `${host}:${port}:${item.username}:${item.password}`
+function dedicatedProbeProtocol(order: Order): string {
+	const raw = String(order.dedicated_protocol || 'mixed').trim().toLowerCase()
+	if (raw === 'vmess') return 'VMESS'
+	if (raw === 'vless') return 'VLESS'
+	if (raw === 'shadowsocks') return 'SHADOWSOCKS'
+	return 'SOCKS5_MIXED'
+}
+
+async function runDedicatedGroupProtocolCheck(orderID = Number(activeDedicatedHeadID.value || 0)) {
+	if (dedicatedCheckRunning.value) return
+	const head = panel.orders.find((row) => Number(row.id) === Number(orderID))
+	if (!head) {
+		message.warning('请先选择专线组头订单')
+		return
+	}
+	const children = panel.orders
+		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
+		.sort((a, b) => Number((a as any).sequence_no || 0) - Number((b as any).sequence_no || 0) || Number(a.id) - Number(b.id))
+	if (!children.length) {
+		message.warning('当前组头没有可探测的子订单')
+		return
+	}
+	activeDedicatedHeadID.value = Number(orderID)
+	dedicatedCheckRunning.value = true
+	dedicatedCheckResults.value = {}
+	const activityID = `dedicated-check:${orderID}:${Date.now()}`
+	panel.startTrackedActivity(activityID, '专线 XrayCore 探测', `组头 #${orderID}，准备探测 ${children.length} 个子订单`)
+	const queue = [...children]
+	const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+		while (queue.length > 0) {
+			const child = queue.shift()
+			if (!child) return
+			const item = child.items?.[0]
+			if (!item) {
+				dedicatedCheckResults.value[child.id] = { ok: false, message: '子订单缺少凭据' }
+				continue
+			}
+			const host = String(child.dedicated_ingress?.domain || child.dedicated_entry?.domain || item.ip || '').trim()
+			const port = dedicatedCopyPort(child)
+			if (!host || port <= 0) {
+				dedicatedCheckResults.value[child.id] = { ok: false, message: '入口域名或端口无效' }
+				continue
+			}
+			try {
+				const result = await panel.checkDedicatedRuntime({
+					protocol: dedicatedProbeProtocol(child),
+					ip: host,
+					port,
+					username: String(item.username || ''),
+					password: String(item.password || ''),
+					vmessUuid: String(item.vmess_uuid || '')
+				})
+				dedicatedCheckResults.value[child.id] = {
+					ok: Boolean(result.ok || result.connectivityOk),
+					exitIp: String(result.exitIp || ''),
+					countryCode: String(result.countryCode || ''),
+					region: String(result.region || ''),
+					message: String(result.message || ''),
+					errorCode: String(result.errorCode || ''),
+					checkedAt: String(result.checkedAt || '')
+				}
+			} catch (err) {
+				panel.setError(err)
+				dedicatedCheckResults.value[child.id] = {
+					ok: false,
+					message: panel.error || '探测失败'
+				}
+			}
 		}
-		return `${item.ip}:${item.port}:${item.username}:${item.password}`
-	}).join('\n')
-	await navigator.clipboard.writeText(lines)
+	})
+	try {
+		await Promise.all(workers)
+		const results = children.map((child) => dedicatedCheckResults.value[child.id]).filter(Boolean)
+		const failed = results.filter((row) => !row.ok).length
+		const succeeded = results.length - failed
+		if (failed === 0) {
+			panel.finishTrackedActivity(activityID, 'success', `组头 #${orderID} 已完成 ${children.length} 个子订单的 XrayCore 探测`)
+			message.success(`XrayCore 探测完成，共 ${children.length} 个子订单`)
+		} else if (succeeded === 0) {
+			panel.finishTrackedActivity(activityID, 'error', `组头 #${orderID} XrayCore 探测全部失败，共 ${failed} 个子订单`)
+			message.error(`XrayCore 探测失败，共 ${failed} 个子订单失败`)
+		} else {
+			panel.finishTrackedActivity(activityID, 'warning', `组头 #${orderID} XrayCore 探测部分失败，成功 ${succeeded}，失败 ${failed}`)
+			message.warning(`XrayCore 探测部分失败，成功 ${succeeded}，失败 ${failed}`)
+		}
+	} catch (err) {
+		panel.setError(err)
+		panel.finishTrackedActivity(activityID, 'error', `组头 #${orderID} XrayCore 探测失败: ${panel.error || 'unknown error'}`)
+	} finally {
+		dedicatedCheckRunning.value = false
+	}
+}
+
+async function copyOrderLines(order: Order) {
+	const lines = deliveryLinesForOrder(order)
+	if (lines.length === 0) {
+		message.warning('当前订单没有可复制的发货内容')
+		return
+	}
+	await navigator.clipboard.writeText(lines.join('\n'))
 	message.success('发货内容已复制')
 }
 
@@ -2023,11 +2351,13 @@ function openGroupSocksModal(orderID: number) {
 }
 
 function openGroupEditor(orderID: number) {
+	activeDedicatedHeadID.value = Number(orderID)
 	groupEditorHeadOrderID.value = orderID
 	groupEditorChildOrderIDs.value = panel.orders
 		.filter((row) => Number((row as any).parent_order_id || 0) === Number(orderID))
 		.map((row) => Number(row.id))
-	groupEditorOpen.value = true
+	dedicatedCheckResults.value = {}
+	panel.activeTab = 'dedicated'
 }
 
 function openGroupSocksModalFromEditor() {
@@ -2137,6 +2467,8 @@ async function probeDedicatedCreateLines() {
 	dedicatedProbeMeta.total = 0
 	dedicatedProbeMeta.success = 0
 	dedicatedProbeMeta.failed = 0
+	const activityID = `dedicated-egress-probe:${Date.now()}`
+	panel.startTrackedActivity(activityID, '专线出口探测', '正在并发探测专线出口可用性')
 	try {
 		const token = localStorage.getItem('xtool_token') || ''
 		const resp = await fetch('/api/orders/dedicated/egress/probe-stream', {
@@ -2188,9 +2520,11 @@ async function probeDedicatedCreateLines() {
 				}
 			}
 		}
+		panel.finishTrackedActivity(activityID, 'success', `专线出口探测完成，可用 ${dedicatedProbeMeta.success}，失败 ${dedicatedProbeMeta.failed}`)
 		message.success('专线出口探测完成')
 	} catch (err) {
 		panel.setError(err)
+		panel.finishTrackedActivity(activityID, 'error', `专线出口探测失败: ${panel.error || 'unknown error'}`)
 		message.error(panel.error || '专线出口探测失败')
 	} finally {
 		dedicatedProbeRunning.value = false
@@ -2709,756 +3043,232 @@ function downloadBlobFile(data: Blob, filename: string) {
       </a-card>
     </div>
 
-    <a-layout v-else class="layout-root">
-      <a-layout-sider v-model:collapsed="siderCollapsed" collapsible theme="dark" width="228">
-        <div class="logo-row">XrayTool</div>
-        <a-menu
-          :selected-keys="[panel.activeTab]"
-          theme="dark"
-          mode="inline"
-          :items="menuItems"
-          @click="onMenuClick"
-        />
-      </a-layout-sider>
+    <AppShell
+      v-else
+      :active-tab="panel.activeTab"
+      :menu-items="menuItems"
+      :release-version-text="releaseVersionText"
+      :notice="panel.notice"
+      :error="panel.error"
+      :pending-requests="panel.pendingRequests"
+      :running-activity-count="panel.runningActivityCount"
+      :active-requests="activeRequests"
+      :recent-activities="panel.recentActivities"
+      :task-logs="panel.taskLogs"
+      @menu-click="onMenuClick"
+      @refresh="refreshAll"
+      @logout="doLogout"
+    >
+      <DashboardPage
+        v-if="panel.activeTab === 'dashboard'"
+        :health-cards="healthCards"
+        :oversell-customer-i-d="oversellCustomerID"
+        :panel="panel"
+        :oversell-columns="oversellColumns"
+        :log-filters="logFilters"
+        :change-oversell-view="changeOversellView"
+        :bps-text="bpsText"
+        :bytes-text="bytesText"
+        :format-time="formatTime"
+        :apply-log-filter="applyLogFilter"
+        :reset-log-filter="resetLogFilter"
+      />
 
-      <a-layout>
-        <a-layout-header class="layout-header">
-          <div>
-            <div class="title">XrayTool Managed Panel</div>
-            <div class="subtitle">Ant Design Vue 管理面板风格 · 支持详情弹窗/批量操作/状态可视化</div>
-          </div>
-          <a-space>
-            <a-button :icon="h(ReloadOutlined)" @click="refreshAll">刷新</a-button>
-            <a-button :icon="h(LogoutOutlined)" @click="doLogout">退出</a-button>
-          </a-space>
-        </a-layout-header>
+      <CustomersPage
+        v-else-if="panel.activeTab === 'customers'"
+        :customer-form="customerForm"
+        :panel="panel"
+        :customer-columns="customerColumns"
+        :create-customer="createCustomer"
+        :open-customer-edit="openCustomerEdit"
+        :delete-customer="deleteCustomer"
+      />
 
-        <a-layout-content class="layout-content">
-          <a-alert v-if="panel.notice" :message="panel.notice" class="mb-3" type="success" show-icon />
-          <a-alert v-if="panel.error" :message="panel.error" class="mb-3" type="error" show-icon />
+      <HostIPsPage
+        v-else-if="panel.activeTab === 'ips'"
+        :probe-form="probeForm"
+        :probe-result="probeResult"
+        :panel="panel"
+        :host-columns="hostColumns"
+        :probe-port="probePort"
+      />
 
-          <template v-if="panel.activeTab === 'dashboard'">
-            <a-row :gutter="12" class="mb-3">
-              <a-col v-for="card in healthCards" :key="card.title" :xs="24" :sm="12" :lg="6">
-                <a-card :bordered="false" class="metric-card">
-                  <div class="metric-title">{{ card.title }}</div>
-                  <div class="metric-value" :style="{ color: card.color }">{{ card.value }}</div>
-                </a-card>
-              </a-col>
-            </a-row>
+      <OrdersPage
+        v-else-if="panel.activeTab === 'orders'"
+        :panel="panel"
+        :order-search-keyword="orderSearchKeyword"
+        :order-customer-i-d="orderCustomerID"
+        :order-mode-filter="orderModeFilter"
+        :order-status-filter="orderStatusFilter"
+        :test-sample-percent="testSamplePercent"
+        :export-count="exportCount"
+        :batch-more-days="batchMoreDays"
+        :batch-renew-expires-at="batchRenewExpiresAt"
+        :filtered-order-rows="filteredOrderRows"
+        :row-selection="rowSelection"
+        :order-pagination="orderPagination"
+        :exporting-order-i-d="exportingOrderID"
+        :copying-links-order-i-d="copyingLinksOrderID"
+        :testing-order-i-d="testingOrderID"
+        :test-result="testResult"
+        :batch-test-result="batchTestResult"
+        :orders-columns="ordersColumns"
+        :load-orders-view="loadOrdersView"
+        :open-order-detail="openOrderDetail"
+        :open-order-edit-smart="openOrderEditSmart"
+        :export-order="exportOrder"
+        :copy-order-links="copyOrderLinks"
+        :copy-links-label="copyLinksLabel"
+        :test-order="testOrder"
+        :renew-order="renewOrder"
+        :stream-test-order="streamTestOrder"
+        :reset-order-credentials="resetOrderCredentials"
+        :split-order-head="splitOrderHead"
+        :open-group-editor="openGroupEditor"
+        :open-group-geo-modal="openGroupGeoModal"
+        :open-group-socks-modal="openGroupSocksModal"
+        :open-group-cred-modal="openGroupCredModal"
+        :open-group-renew-modal="openGroupRenewModal"
+        :remove-order="removeOrder"
+        :activate-order="activateOrder"
+        :deactivate-order="deactivateOrder"
+        :status-color="statusColor"
+        :mode-color="modeColor"
+        :mode-label="modeLabel"
+        :dedicated-summary="dedicatedSummary"
+        :forward-summary="forwardSummary"
+        :expires-hint="expiresHint"
+        :format-time="formatTime"
+        :do-batch-renew="doBatchRenew"
+        :do-batch-resync="doBatchResync"
+        :do-batch-test="doBatchTest"
+        :do-batch-export="doBatchExport"
+        :do-batch-activate="doBatchActivate"
+        :do-batch-deactivate="doBatchDeactivate"
+        @update:orderSearchKeyword="orderSearchKeyword = $event"
+        @update:orderCustomerID="orderCustomerID = $event"
+        @update:orderModeFilter="orderModeFilter = $event"
+        @update:orderStatusFilter="orderStatusFilter = $event"
+        @update:testSamplePercent="testSamplePercent = $event"
+        @update:exportCount="exportCount = $event"
+        @update:batchMoreDays="batchMoreDays = $event"
+        @update:batchRenewExpiresAt="batchRenewExpiresAt = $event"
+      />
 
-            <a-row :gutter="12">
-              <a-col :xs="24" :lg="13">
-                <a-card :bordered="false" title="IP 超卖热度" class="mb-3">
-                  <template #extra>
-                    <a-space>
-                      <span class="text-xs text-slate-500">视图</span>
-                      <a-select :value="oversellCustomerID" size="small" style="width: 180px" @change="(v:number) => changeOversellView(Number(v))">
-                        <a-select-option :value="0">本机全局</a-select-option>
-                        <a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}{{ c.code ? ` (${c.code})` : '' }}</a-select-option>
-                      </a-select>
-                    </a-space>
-                  </template>
-                  <div class="mb-2 ip-grid">
-                    <div v-for="row in panel.oversell" :key="row.ip" class="ip-cell" :style="{ backgroundColor: row.oversold_count > 0 ? 'rgba(239,68,68,0.16)' : row.total_active_count > 0 ? 'rgba(34,197,94,0.16)' : 'rgba(148,163,184,0.08)' }" :title="`${row.ip} 总占用:${row.total_active_count}`">
-                      <span>{{ row.ip }}</span>
-                    </div>
-                  </div>
-                  <a-table
-                    :columns="oversellColumns"
-                    :data-source="panel.oversell"
-                    :pagination="false"
-                    size="small"
-                    :row-key="(row:any) => row.ip"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'enabled'">
-                        <a-tag :color="record.enabled ? 'green' : 'red'">{{ record.enabled ? '启用' : '禁用' }}</a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'oversell_rate'">
-                        <a-tag :color="record.oversold_count > 0 ? 'red' : 'green'">{{ Number(record.oversell_rate || 0).toFixed(1) }}%</a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'heat'">
-                        <a-progress :percent="Math.min(100, Number(record.total_active_count) * 8)" :show-info="false" status="active" />
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-                <a-card :bordered="false" title="Socks5 客户实时状态" class="mb-3">
-                  <template #extra>
-                    <a-button size="small" @click="panel.loadRuntimeStats">刷新</a-button>
-                  </template>
-                  <a-table :columns="runtimeColumns" :data-source="panel.runtimeStats" size="small" :row-key="(row:any)=>row.customer_id" :pagination="{ pageSize: 8 }">
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'customer'">
-                        {{ record.customer_name }}{{ record.customer_code ? ` (${record.customer_code})` : '' }}
-                      </template>
-                      <template v-else-if="column.key === 'speed'">
-                        {{ bpsText(Number(record.realtime_bps || 0)) }}
-                      </template>
-                      <template v-else-if="column.key === 't1h'">
-                        {{ bytesText(Number(record.traffic_1h || 0)) }}
-                      </template>
-                      <template v-else-if="column.key === 't24h'">
-                        {{ bytesText(Number(record.traffic_24h || 0)) }}
-                      </template>
-                      <template v-else-if="column.key === 't7d'">
-                        {{ bytesText(Number(record.traffic_7d || 0)) }}
-                      </template>
-                      <template v-else-if="column.key === 'updated_at'">
-                        {{ formatTime(record.updated_at) }}
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-              </a-col>
-              <a-col :xs="24" :lg="11">
-                <a-card :bordered="false" title="系统任务日志" class="mb-3">
-                  <div class="mb-2 grid grid-cols-2 gap-2">
-                    <a-select v-model:value="logFilters.level" allow-clear size="small" placeholder="级别">
-                      <a-select-option value="info">info</a-select-option>
-                      <a-select-option value="warn">warn</a-select-option>
-                      <a-select-option value="error">error</a-select-option>
-                    </a-select>
-                    <a-input v-model:value="logFilters.keyword" size="small" placeholder="关键词" />
-                    <a-input v-model:value="logFilters.start" size="small" placeholder="开始时间 RFC3339" />
-                    <a-input v-model:value="logFilters.end" size="small" placeholder="结束时间 RFC3339" />
-                  </div>
-                  <div class="mb-2 flex gap-2">
-                    <a-button size="small" :icon="h(FilterOutlined)" @click="applyLogFilter">筛选</a-button>
-                    <a-button size="small" @click="resetLogFilter">重置</a-button>
-                  </div>
-                  <a-list :data-source="panel.taskLogs" size="small" class="max-h-[24rem] overflow-auto">
-                    <template #renderItem="{ item }">
-                      <a-list-item>
-                        <a-list-item-meta :description="item.message">
-                          <template #title>{{ formatTime(item.created_at) }} · {{ item.level }}</template>
-                        </a-list-item-meta>
-                      </a-list-item>
-                    </template>
-                  </a-list>
-                </a-card>
-              </a-col>
-            </a-row>
-          </template>
+      <DeliveryPage
+        v-else-if="panel.activeTab === 'delivery'"
+        :order-form="orderForm"
+        :panel="panel"
+        :dedicated-protocol-options="dedicatedProtocolOptions"
+        :manual-host-i-p-options="manualHostIPOptions"
+        :filtered-dedicated-inbounds-for-create="filteredDedicatedInboundsForCreate"
+        :filtered-dedicated-ingresses-for-create="filteredDedicatedIngressesForCreate"
+        :dedicated-probe-running="dedicatedProbeRunning"
+        :dedicated-probe-meta="dedicatedProbeMeta"
+        :dedicated-probe-rows="dedicatedProbeRows"
+        :creating-order="creatingOrder"
+        :delivery-search-keyword="deliverySearchKeyword"
+        :delivery-customer-i-d="deliveryCustomerID"
+        :delivery-mode="deliveryMode"
+        :delivery-rows="deliveryRows"
+        :delivery-pagination="deliveryPagination"
+        :exporting-order-i-d="exportingOrderID"
+        :copying-links-order-i-d="copyingLinksOrderID"
+        :format-time="formatTime"
+        :export-order="exportOrder"
+        :set-quick-expiry="setQuickExpiry"
+        :dedicated-lines-count="dedicatedLinesCount"
+        :residential-credential-lines-count="residentialCredentialLinesCount"
+        :residential-credential-placeholder="residentialCredentialPlaceholder"
+        :download-dedicated-create-sample="downloadDedicatedCreateSample"
+        :probe-dedicated-create-lines="probeDedicatedCreateLines"
+        :create-order="createOrder"
+        :copy-order-lines="copyOrderLines"
+        :copy-order-links="copyOrderLinks"
+        :copy-links-label="copyLinksLabel"
+        :reset-order-credentials="resetOrderCredentials"
+        :remove-order="removeOrder"
+        :load-delivery-view="loadDeliveryView"
+        @update:deliverySearchKeyword="deliverySearchKeyword = $event"
+        @update:deliveryCustomerID="deliveryCustomerID = $event"
+        @update:deliveryMode="deliveryMode = $event"
+      />
 
-          <template v-else-if="panel.activeTab === 'customers'">
-            <a-row :gutter="12">
-              <a-col :xs="24" :lg="8">
-                <a-card :bordered="false" title="创建客户">
-                  <a-form layout="vertical">
-                    <a-form-item label="客户名"><a-input v-model:value="customerForm.name" /></a-form-item>
-                    <a-form-item label="客户代号"><a-input v-model:value="customerForm.code" placeholder="如 liunian" /></a-form-item>
-                    <a-form-item label="联系方式"><a-input v-model:value="customerForm.contact" /></a-form-item>
-                    <a-form-item label="备注"><a-textarea v-model:value="customerForm.notes" :rows="4" /></a-form-item>
-                    <a-button type="primary" block @click="createCustomer">创建客户</a-button>
-                  </a-form>
-                </a-card>
-              </a-col>
-              <a-col :xs="24" :lg="16">
-                <a-card :bordered="false" title="客户列表">
-                  <a-table
-                    :columns="customerColumns"
-                    :data-source="panel.customers"
-                    :pagination="{ pageSize: 10 }"
-                    :row-key="(row:any) => row.id"
-                    size="small"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.dataIndex === 'status'">
-                        <a-tag :color="record.status === 'active' ? 'green' : 'default'">{{ record.status }}</a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'action'">
-                        <a-space :size="2">
-                          <a-tooltip title="编辑客户">
-                            <a-button size="small" :icon="h(EditOutlined)" aria-label="编辑客户" @click="openCustomerEdit(record)" />
-                          </a-tooltip>
-                          <a-tooltip title="删除客户">
-                            <a-button size="small" danger :icon="h(DeleteOutlined)" aria-label="删除客户" @click="deleteCustomer(record.id)" />
-                          </a-tooltip>
-                        </a-space>
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-              </a-col>
-            </a-row>
-          </template>
+      <DedicatedWorkbenchPage
+        v-else-if="panel.activeTab === 'dedicated'"
+        :panel="panel"
+        :dedicated-search-keyword="dedicatedSearchKeyword"
+        :dedicated-customer-i-d="dedicatedCustomerID"
+        :dedicated-status-filter="dedicatedStatusFilter"
+        :dedicated-pagination="dedicatedPagination"
+        :dedicated-group-heads="dedicatedGroupHeads"
+        :active-dedicated-head-i-d="activeDedicatedHeadID"
+        :active-dedicated-head="activeDedicatedHead"
+        :active-dedicated-children="activeDedicatedChildren"
+        :dedicated-check-running="dedicatedCheckRunning"
+        :dedicated-check-results="dedicatedCheckResults"
+        :load-dedicated-view="loadDedicatedView"
+        :select-dedicated-head="selectDedicatedHead"
+        :open-order-edit="openOrderEdit"
+        :open-group-socks-modal="openGroupSocksModal"
+        :open-group-cred-modal="openGroupCredModal"
+        :open-group-geo-modal="openGroupGeoModal"
+        :open-group-renew-modal="openGroupRenewModal"
+        :export-order="exportOrder"
+        :copy-order-links="copyOrderLinks"
+        :copy-links-label="copyLinksLabel"
+        :run-dedicated-group-protocol-check="runDedicatedGroupProtocolCheck"
+        :format-time="formatTime"
+        :expires-hint="expiresHint"
+        @update:dedicatedSearchKeyword="dedicatedSearchKeyword = $event"
+        @update:dedicatedCustomerID="dedicatedCustomerID = $event"
+        @update:dedicatedStatusFilter="dedicatedStatusFilter = $event"
+      />
 
-          <template v-else-if="panel.activeTab === 'ips'">
-            <a-row :gutter="12">
-              <a-col :xs="24" :lg="8">
-                <a-card :bordered="false" title="IP扫描与端口检测" class="mb-3">
-                  <a-space direction="vertical" style="width: 100%">
-                    <a-button type="primary" block @click="panel.scanHostIPs">扫描本机IP</a-button>
-                    <a-divider style="margin: 8px 0" />
-                    <a-input v-model:value="probeForm.ip" addon-before="IP" />
-                    <a-input-number v-model:value="probeForm.port" addon-before="Port" style="width: 100%" />
-                    <a-button block @click="probePort">检测端口占用</a-button>
-                    <a-alert v-if="probeResult" :message="probeResult" type="info" show-icon />
-                  </a-space>
-                </a-card>
-              </a-col>
-              <a-col :xs="24" :lg="16">
-                <a-card :bordered="false" title="宿主机IP池">
-                  <a-table
-                    :columns="hostColumns"
-                    :data-source="panel.hostIPs"
-                    :row-key="(row:any) => row.id"
-                    size="small"
-                    :pagination="{ pageSize: 12 }"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'ip'">
-                        <span class="font-mono">{{ record.ip }}</span>
-                      </template>
-                      <template v-else-if="column.key === 'is_public'">
-                        {{ record.is_public ? '是' : '否' }}
-                      </template>
-                      <template v-else-if="column.key === 'enabled'">
-                        <a-tag :color="record.enabled ? 'green' : 'red'">{{ record.enabled ? '启用' : '禁用' }}</a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'action'">
-                        <a-switch :checked="record.enabled" @change="(checked:boolean) => panel.toggleHostIP(record.id, checked)" />
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-              </a-col>
-            </a-row>
-          </template>
+      <ImportPage
+        v-else-if="panel.activeTab === 'import'"
+        :panel="panel"
+        :import-form="importForm"
+        :singbox-selected-files="singboxSelectedFiles"
+        :all-singbox-selected="allSingboxSelected"
+        :selectable-singbox-files="selectableSingboxFiles"
+        :previewing-singbox-import="previewingSingboxImport"
+        :previewing-import="previewingImport"
+        :confirming-import="confirmingImport"
+        :import-preview-valid="importPreviewValid"
+        :node-form="nodeForm"
+        :node-columns="nodeColumns"
+        :import-columns="importColumns"
+        :migration-columns="migrationColumns"
+        :set-import-expiry-days="setImportExpiryDays"
+        :toggle-singbox-select-all="toggleSingboxSelectAll"
+        :scan-singbox-configs="scanSingboxConfigs"
+        :preview-selected-singbox-files="previewSelectedSingboxFiles"
+        :preview-import="previewImport"
+        :preview-cross-node-migration="previewCrossNodeMigration"
+        :confirm-import="confirmImport"
+        :create-node="createNode"
+        :remove-node="removeNode"
+        :migration-state-color="migrationStateColor"
+        @update:singboxSelectedFiles="singboxSelectedFiles = $event"
+      />
 
-          <template v-else-if="panel.activeTab === 'orders'">
-            <a-card :bordered="false" title="创建订单" class="mb-3">
-              <a-row :gutter="8">
-                <a-col :xs="24" :md="8"><a-select v-model:value="orderForm.customer_id" style="width: 100%" placeholder="选择客户">
-                  <a-select-option :value="0">请选择</a-select-option>
-                  <a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}</a-select-option>
-                </a-select></a-col>
-                <a-col :xs="24" :md="8"><a-input v-model:value="orderForm.name" placeholder="订单名(可空)" /></a-col>
-                <a-col :xs="24" :md="8"><a-select v-model:value="orderForm.mode" style="width: 100%">
-				  <a-select-option value="auto">家宽-自动</a-select-option>
-				  <a-select-option value="manual">家宽-手动</a-select-option>
-				  <a-select-option value="dedicated">专线分发</a-select-option>
-                </a-select></a-col>
-              </a-row>
-              <a-row :gutter="8" class="mt-2">
-				<a-col v-if="orderForm.mode !== 'dedicated'" :xs="24" :md="8"><a-input-number v-model:value="orderForm.quantity" :min="1" style="width: 100%" placeholder="数量" /></a-col>
-				<a-col v-else :xs="24" :md="8"><a-input :value="`专线数: ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}`" disabled /></a-col>
-                <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.duration_day" :min="1" style="width: 100%" placeholder="有效天数" /></a-col>
-                <a-col :xs="24" :md="8"><a-input-number v-model:value="orderForm.port" :min="1" :max="65535" :disabled="orderForm.mode === 'dedicated'" style="width: 100%" placeholder="端口" /></a-col>
-              </a-row>
-              <a-row :gutter="8" class="mt-2">
-                <a-col :xs="24" :md="12">
-                  <a-date-picker v-model:value="orderForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" placeholder="指定到期时间(可选)" />
-                </a-col>
-                <a-col :xs="24" :md="12" class="flex items-center">
-                  <a-space>
-                    <a-button size="small" @click="setQuickExpiry(7, 'create')">7天</a-button>
-                    <a-button size="small" @click="setQuickExpiry(15, 'create')">15天</a-button>
-                    <a-button size="small" @click="setQuickExpiry(30, 'create')">30天</a-button>
-                    <a-button size="small" @click="setQuickExpiry(90, 'create')">90天</a-button>
-                  </a-space>
-                </a-col>
-              </a-row>
-              <a-alert v-if="panel.allocationPreview" class="mt-2" type="info" show-icon :message="`可分配IP: ${panel.allocationPreview.available} / 池总量: ${panel.allocationPreview.pool_size} / 已被该客户占用: ${panel.allocationPreview.used_by_customer}`" />
-	              <div v-if="orderForm.mode === 'manual'" class="mt-2">
-	                <a-select v-model:value="orderForm.manual_ip_ids" mode="multiple" style="width: 100%" placeholder="选择手动IP">
-	                  <a-select-option v-for="ip in manualHostIPOptions" :key="ip.id" :value="ip.id">{{ ip.ip }}</a-select-option>
-	                </a-select>
-	              </div>
-		              <div v-if="orderForm.mode !== 'dedicated'" class="mt-2">
-		                <a-form-item label="家宽账号策略" class="mb-2">
-		                  <a-radio-group v-model:value="orderForm.residential_credential_mode">
-		                    <a-radio-button value="random">随机 User:Pass</a-radio-button>
-		                    <a-radio-button value="custom">指定 User:Pass</a-radio-button>
-		                  </a-radio-group>
-		                </a-form-item>
-		                <template v-if="orderForm.residential_credential_mode === 'custom'">
-		                  <a-form-item label="指定方式" class="mb-2">
-		                    <a-radio-group v-model:value="orderForm.residential_credential_strategy">
-		                      <a-radio-button value="per_line">逐条指定</a-radio-button>
-		                      <a-radio-button value="shared">整单共用 1 组</a-radio-button>
-		                    </a-radio-group>
-		                  </a-form-item>
-		                  <a-textarea
-		                    v-model:value="orderForm.residential_credential_lines"
-		                    :rows="4"
-		                    :placeholder="residentialCredentialPlaceholder(orderForm.residential_credential_strategy)"
-		                  />
-		                </template>
-		                <a-alert
-		                  class="mt-2"
-		                  type="info"
-		                  show-icon
-		                  :message="orderForm.residential_credential_mode === 'custom'
-		                    ? (orderForm.residential_credential_strategy === 'shared'
-		                      ? `已填写 ${residentialCredentialLinesCount(orderForm.residential_credential_lines)} 行；整单共用 1 组 User:Pass，并校验同一 IP 下用户名唯一`
-		                      : `已填写 ${residentialCredentialLinesCount(orderForm.residential_credential_lines)} 行；提交时会校验与数量一致，并校验同一 IP 下用户名唯一`)
-		                    : '随机模式会自动生成同一 IP 下唯一的家宽用户名，避免路由冲突'"
-		                />
-		              </div>
-				  <div v-if="orderForm.mode === 'dedicated'" class="mt-2">
-					<a-space class="mb-2" wrap>
-					  <span class="text-xs text-slate-500">专线 Inbound/Ingress 请到 设置-专线 管理；先选协议再选入口</span>
-				</a-space>
-				<a-select v-model:value="orderForm.dedicated_protocol" style="width:100%" placeholder="选择协议">
-				  <a-select-option v-for="opt in dedicatedProtocolOptions" :key="opt.value" :value="opt.value">
-					{{ opt.label }}
-				  </a-select-option>
-				</a-select>
-				<a-select v-model:value="orderForm.dedicated_inbound_id" class="mt-2" style="width:100%" placeholder="选择Inbound(协议+本机端口)">
-				  <a-select-option v-for="row in filteredDedicatedInboundsForCreate" :key="row.id" :value="row.id">
-					{{ row.name }} / {{ row.protocol }} / :{{ row.listen_port }}
-				  </a-select-option>
-				</a-select>
-				<a-select v-model:value="orderForm.dedicated_ingress_id" class="mt-2" style="width:100%" placeholder="选择Ingress(入口域名:端口)">
-				  <a-select-option v-for="row in filteredDedicatedIngressesForCreate" :key="row.id" :value="row.id">
-					{{ row.name || row.domain }} / {{ row.domain }}:{{ row.ingress_port }} / {{ (row.country_code || '--').toUpperCase() }} {{ row.region || '' }}
-				  </a-select-option>
-				</a-select>
-				<a-space class="mt-2" wrap>
-				  <a-button size="small" @click="downloadDedicatedCreateSample">下载示例</a-button>
-				  <a-button size="small" :loading="dedicatedProbeRunning" @click="probeDedicatedCreateLines">探测出口可用性</a-button>
-				  <span class="text-xs text-slate-500">示例格式: ip:port:user:pass，可直接复制多行</span>
-				</a-space>
-				<a-textarea v-model:value="orderForm.dedicated_egress_lines" class="mt-2" :rows="6" placeholder="每行: ip:port:user:pass（按顺序创建子订单）" />
-				<a-alert class="mt-2" type="info" show-icon :message="`专线数量 = ${dedicatedLinesCount(orderForm.dedicated_egress_lines)}，订单将自动拆分为子订单 1:1`" />
-				<a-alert v-if="dedicatedProbeMeta.total > 0" class="mt-2" type="info" show-icon :message="`探测进度 ${dedicatedProbeMeta.success + dedicatedProbeMeta.failed}/${dedicatedProbeMeta.total}，可用 ${dedicatedProbeMeta.success}，失败 ${dedicatedProbeMeta.failed}`" />
-				<div v-if="dedicatedProbeRows.length" class="mt-2 max-h-40 overflow-auto rounded border border-slate-200 p-2">
-				  <div v-for="row in dedicatedProbeRows" :key="`${row.index}-${row.raw}`" class="text-xs leading-6">
-					<span class="font-mono">#{{ row.index }} {{ row.raw }}</span>
-					<span v-if="row.available" class="ml-2 text-emerald-600">可用 / {{ row.exit_ip }} / {{ (row.country_code || '--').toUpperCase() }} {{ row.region || '' }}</span>
-					<span v-else class="ml-2 text-rose-600">失败 / {{ row.error || 'unknown' }}</span>
-				  </div>
-				</div>
-              </div>
-              <div class="mt-3 flex justify-end">
-                <a-button type="primary" :loading="creatingOrder" @click="createOrder">下单并同步Xray</a-button>
-              </div>
-            </a-card>
-
-            <a-card :bordered="false" title="订单列表">
-              <template #extra>
-                <a-space>
-				  <a-input v-model:value="orderSearchKeyword" size="small" style="width: 220px" placeholder="搜索: 订单号/客户/域名/IP/账号" allow-clear />
-				  <a-select v-model:value="orderModeFilter" size="small" style="width: 120px">
-					<a-select-option value="all">全部模式</a-select-option>
-					<a-select-option value="home">家宽</a-select-option>
-					<a-select-option value="dedicated">专线</a-select-option>
-				  </a-select>
-				  <a-select v-model:value="orderStatusFilter" size="small" style="width: 120px">
-					<a-select-option value="all">全部状态</a-select-option>
-					<a-select-option value="active">active</a-select-option>
-					<a-select-option value="expired">expired</a-select-option>
-					<a-select-option value="disabled">disabled</a-select-option>
-				  </a-select>
-                  <span class="text-xs text-slate-500">已选 {{ panel.orderSelection.length }} 个</span>
-                  <a-select v-model:value="testSamplePercent" size="small" style="width: 110px">
-                    <a-select-option :value="100">测活100%</a-select-option>
-                    <a-select-option :value="10">测活10%</a-select-option>
-                    <a-select-option :value="5">测活5%</a-select-option>
-                  </a-select>
-				  <a-input-number v-model:value="exportCount" :min="0" size="small" :placeholder="'导出条数(0=全部)'" />
-				  <a-input-number v-model:value="batchMoreDays" :min="1" :max="365" size="small" />
-				  <a-button size="small" @click="batchMoreDays = 30">30天</a-button>
-				  <a-button size="small" @click="batchMoreDays = 60">60天</a-button>
-				  <a-button size="small" @click="batchMoreDays = 90">90天</a-button>
-				  <a-date-picker v-model:value="batchRenewExpiresAt" size="small" show-time value-format="YYYY-MM-DDTHH:mm:ss" placeholder="续期到期时间(可选)" />
-                  <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchRenew">批量续期</a-button>
-                  <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchResync">批量重同步</a-button>
-                  <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchTest">批量测活</a-button>
-                  <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchExport">批量导出</a-button>
-                  <a-button size="small" :disabled="panel.orderSelection.length===0" @click="doBatchActivate">批量启用</a-button>
-                  <a-button size="small" danger :disabled="panel.orderSelection.length===0" @click="doBatchDeactivate">批量停用</a-button>
-                </a-space>
-              </template>
-
-              <a-table
-                :columns="ordersColumns"
-				:data-source="filteredOrderRows"
-                :row-selection="rowSelection"
-                :scroll="{ x: 1300 }"
-				:pagination="{ current: orderPagination.current, pageSize: orderPagination.pageSize, showSizeChanger: false, onChange: (page:number, pageSize:number) => { orderPagination.current = Number(page || 1); orderPagination.pageSize = Number(pageSize || 12) } }"
-                size="small"
-              >
-				<template #bodyCell="{ column, record }">
-				  <template v-if="column.key === 'order_no'">
-					<span class="font-mono text-xs">{{ record.order_no || '-' }}</span>
-				  </template>
-				  <template v-if="column.key === 'customer'">
-					{{ record.customer?.name || record.customer_id }}
-				  </template>
-				  <template v-else-if="column.key === 'order_name'">
-					  <div class="text-xs">
-						<div class="font-medium text-slate-700">{{ record.name || '-' }}</div>
-						<div class="text-slate-500">
-						  <span class="font-mono">{{ record.order_no || `OD-${record.id}` }}</span>
-							<span v-if="record.is_group_head">组头单</span>
-							<span v-else-if="record.parent_order_id">子单 #{{ record.sequence_no || '-' }}</span>
-							<span v-else>普通单</span>
-						<span class="ml-2" v-if="record.group_id">G{{ record.group_id }}</span>
-					  </div>
-					</div>
-				  </template>
-                  <template v-else-if="column.dataIndex === 'status'">
-                    <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
-                  </template>
-                  <template v-else-if="column.dataIndex === 'mode'">
-                    <a-tag :color="modeColor(record.mode)">{{ modeLabel(record.mode) }}</a-tag>
-                  </template>
-                  <template v-else-if="column.key === 'forward_summary'">
-					<span class="text-xs" :class="record.mode === 'dedicated' ? 'font-mono text-slate-700' : 'text-slate-500'">
-						{{ record.mode === 'dedicated' ? dedicatedSummary(record) : forwardSummary(record) }}
-					</span>
-				  </template>
-                  <template v-else-if="column.key === 'expires'">
-                    <div>{{ expiresHint(record.expires_at) }}</div>
-                    <div class="text-xs text-slate-500">{{ formatTime(record.expires_at) }}</div>
-                  </template>
-                  <template v-else-if="column.key === 'action'">
-					<a-space :size="4" wrap>
-					  <a-button size="small" @click="openOrderDetail(record)">详情</a-button>
-					  <a-button size="small" @click="openOrderEditSmart(record)">{{ record.is_group_head ? '组编辑' : '编辑' }}</a-button>
-					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
-					  <a-button v-if="record.mode === 'dedicated'" size="small" :loading="copyingLinksOrderID===record.id" @click="copyOrderLinks(record)">{{ copyLinksLabel(record) }}</a-button>
-					  <a-button size="small" :disabled="record.mode === 'dedicated'" :loading="testingOrderID===record.id" @click="testOrder(record.id)">测活</a-button>
-					  <a-dropdown>
-						<a-button size="small">更多</a-button>
-						<template #overlay>
-						  <a-menu>
-							<a-menu-item @click="renewOrder(record.id)">续期</a-menu-item>
-							<a-menu-item :disabled="record.mode === 'dedicated'" @click="streamTestOrder(record.id)">流式测活</a-menu-item>
-							<a-menu-item v-if="isResidentialMode(record.mode)" @click="resetOrderCredentials(record.id)">刷新家宽凭据</a-menu-item>
-							<a-menu-item v-if="!record.parent_order_id && record.quantity > 1" @click="splitOrderHead(record.id)">拆分为子订单</a-menu-item>
-							<a-menu-item v-if="record.is_group_head" @click="openGroupEditor(record.id)">组编辑工作台</a-menu-item>
-							<a-menu-item v-if="record.is_group_head" @click="openGroupGeoModal(record.id)">批量设置国家地区</a-menu-item>
-							<a-menu-item v-if="record.is_group_head" @click="openGroupSocksModal(record.id)">组内顺序改 Socks5</a-menu-item>
-							<a-menu-item v-if="record.is_group_head" @click="openGroupCredModal(record.id)">组内批量改凭据</a-menu-item>
-							<a-menu-item v-if="record.is_group_head" @click="openGroupRenewModal(record.id)">组内部分续期</a-menu-item>
-							<a-menu-divider />
-							<a-menu-item danger @click="removeOrder(record.id)">删除订单</a-menu-item>
-							<a-menu-item v-if="record.status === 'disabled'" @click="activateOrder(record.id)">启用订单</a-menu-item>
-							<a-menu-item v-else danger @click="deactivateOrder(record.id)">停用订单</a-menu-item>
-						  </a-menu>
-						</template>
-					  </a-dropdown>
-					</a-space>
-                  </template>
-                </template>
-              </a-table>
-
-              <a-alert v-if="testResult" class="mt-3" type="info" show-icon message="测活结果">
-                <template #description>
-                  <div v-for="(value, key) in testResult" :key="key" class="font-mono text-xs">item#{{ key }} => {{ value }}</div>
-                </template>
-              </a-alert>
-
-              <a-alert v-if="batchTestResult" class="mt-3" type="info" show-icon message="批量测活结果">
-                <template #description>
-                  <div v-for="entry in batchTestResult" :key="entry.id" class="text-xs">
-                    <strong>#{{ entry.id }}</strong>
-                    <span v-if="entry.success"> - success</span>
-                    <span v-else class="text-rose-600"> - {{ entry.error }}</span>
-                  </div>
-                </template>
-              </a-alert>
-            </a-card>
-          </template>
-
-		  <template v-else-if="panel.activeTab === 'delivery'">
-			<a-card :bordered="false" title="发货控制台">
-			  <template #extra>
-				<a-space>
-				  <a-input v-model:value="deliverySearchKeyword" style="width:220px" placeholder="搜索: 订单号/客户/域名/IP/账号" allow-clear />
-				  <a-select v-model:value="deliveryCustomerID" style="width:180px" placeholder="客户筛选">
-					<a-select-option :value="0">全部客户</a-select-option>
-					<a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}</a-select-option>
-				  </a-select>
-				  <a-select v-model:value="deliveryMode" style="width:140px">
-					<a-select-option value="all">全部类型</a-select-option>
-					<a-select-option value="home">家宽</a-select-option>
-					<a-select-option value="dedicated">专线</a-select-option>
-				  </a-select>
-				</a-space>
-			  </template>
-			  <a-alert class="mb-3" type="info" show-icon message="订单管理与发货已分离：本页用于导出、复制发货内容、刷新家宽凭据。" />
-			  <a-table :data-source="deliveryRows" :row-key="(row:any)=>row.id" size="small" :pagination="{ current: deliveryPagination.current, pageSize: deliveryPagination.pageSize, showSizeChanger: false, onChange: (page:number, pageSize:number) => { deliveryPagination.current = Number(page || 1); deliveryPagination.pageSize = Number(pageSize || 12) } }">
-				<a-table-column title="类型" key="mode" width="120">
-				  <template #default="{ record }">
-					<a-tag :color="record.mode === 'dedicated' ? 'magenta' : 'cyan'">{{ record.mode === 'dedicated' ? '专线' : '家宽' }}</a-tag>
-				  </template>
-				</a-table-column>
-				<a-table-column title="订单" key="name" width="280">
-				  <template #default="{ record }">#{{ record.id }} / {{ record.name || '-' }}</template>
-				</a-table-column>
-				<a-table-column title="客户" key="customer" width="160">
-				  <template #default="{ record }">{{ record.customer?.name || record.customer_id }}</template>
-				</a-table-column>
-				<a-table-column title="订单号" key="order_no" width="170">
-				  <template #default="{ record }"><span class="font-mono text-xs">{{ record.order_no || '-' }}</span></template>
-				</a-table-column>
-				<a-table-column title="到期" key="expires" width="180">
-				  <template #default="{ record }">{{ formatTime(record.expires_at) }}</template>
-				</a-table-column>
-				<a-table-column title="动作" key="action" width="360">
-				  <template #default="{ record }">
-					<a-space :size="4" wrap>
-					  <a-button size="small" :loading="exportingOrderID===record.id" @click="exportOrder(record.id)">导出</a-button>
-					  <a-button size="small" @click="copyOrderLines(record)">复制发货</a-button>
-					  <a-button v-if="record.mode === 'dedicated'" size="small" :loading="copyingLinksOrderID===record.id" @click="copyOrderLinks(record)">{{ copyLinksLabel(record) }}</a-button>
-					  <a-button v-if="isResidentialMode(record.mode)" size="small" @click="resetOrderCredentials(record.id)">刷新凭据</a-button>
-					  <a-button size="small" danger @click="removeOrder(record.id)">删除</a-button>
-					</a-space>
-				  </template>
-				</a-table-column>
-			  </a-table>
-			</a-card>
-		  </template>
-
-          <template v-else-if="panel.activeTab === 'import'">
-            <a-row :gutter="12">
-              <a-col :xs="24" :lg="10">
-                <a-card :bordered="false" title="批量导入已有 Socks5">
-                  <a-space direction="vertical" style="width:100%">
-                    <a-alert
-                      type="info"
-                      show-icon
-                      message="一键导入 sing-box"
-                      description="扫描 /etc/sing-box/conf/*.json + /etc/sing-box/*.json，默认导入有效期预设 15 天。"
-                    />
-                    <a-space>
-                      <a-button @click="scanSingboxConfigs">扫描宿主机配置</a-button>
-                      <a-button type="primary" ghost :loading="previewingSingboxImport" :disabled="singboxSelectedFiles.length === 0" @click="previewSelectedSingboxFiles">预检已选文件</a-button>
-                    </a-space>
-                    <a-checkbox :checked="allSingboxSelected" @change="(e:any)=>toggleSingboxSelectAll(Boolean(e.target?.checked))">全选可导入文件</a-checkbox>
-                    <div class="max-h-52 overflow-auto rounded border border-slate-200 p-2">
-                      <a-checkbox-group v-model:value="singboxSelectedFiles" style="width:100%">
-                        <a-space direction="vertical" style="width:100%">
-                          <a-checkbox v-for="file in panel.singboxScan?.files || []" :key="file.path" :value="file.path" :disabled="!file.selectable">
-                            <span class="font-mono text-xs">{{ file.path }}</span>
-                            <span class="text-xs text-slate-500"> ({{ file.entry_count }} 条)</span>
-                            <span v-if="file.error" class="text-xs text-rose-500"> - {{ file.error }}</span>
-                          </a-checkbox>
-                        </a-space>
-                      </a-checkbox-group>
-                      <div v-if="!(panel.singboxScan?.files || []).length" class="text-xs text-slate-500">尚未扫描配置文件</div>
-                    </div>
-                    <a-select v-model:value="importForm.customer_id" style="width:100%" placeholder="选择客户">
-                      <a-select-option :value="0">暂不配置客户（自动归入未分配客户）</a-select-option>
-                      <a-select-option v-for="c in panel.customers" :key="c.id" :value="c.id">{{ c.name }}</a-select-option>
-                    </a-select>
-                    <a-input v-model:value="importForm.order_name" placeholder="导入订单名" />
-                    <a-date-picker v-model:value="importForm.expires_at" show-time style="width:100%" value-format="YYYY-MM-DDTHH:mm:ss" />
-                    <a-space>
-                      <a-button size="small" @click="setImportExpiryDays(15)">15天(预设)</a-button>
-                      <a-button size="small" @click="setImportExpiryDays(30)">30天</a-button>
-                      <a-button size="small" @click="setImportExpiryDays(2)">2天</a-button>
-                    </a-space>
-                    <a-textarea v-model:value="importForm.lines" :rows="14" placeholder="每行: ip:port:user:pass" />
-                    <a-space>
-                      <a-button :loading="previewingImport" @click="previewImport">预检</a-button>
-                      <a-button danger ghost @click="previewCrossNodeMigration">跨节点预检</a-button>
-                      <a-button type="primary" :loading="confirmingImport" :disabled="!importPreviewValid" @click="confirmImport">确认导入</a-button>
-                    </a-space>
-                    <a-alert v-if="(panel.importPreview || []).length > 0 && !importPreviewValid" type="warning" show-icon message="预检结果已失效，请重新预检后导入" />
-                  </a-space>
-                </a-card>
-
-                <a-card :bordered="false" title="xraytool 节点管理" class="mt-3">
-                  <a-space direction="vertical" style="width:100%">
-                    <a-input v-model:value="nodeForm.name" placeholder="节点名，例如 香港-01" />
-                    <a-input v-model:value="nodeForm.base_url" placeholder="http://node:18080" />
-                    <a-input v-model:value="nodeForm.username" placeholder="管理账号" />
-                    <a-input-password v-model:value="nodeForm.password" placeholder="管理密码" />
-                    <a-space>
-                      <a-switch :checked="nodeForm.enabled" @change="(v:boolean)=>nodeForm.enabled=v" />
-                      <span class="text-xs text-slate-500">启用节点</span>
-                      <a-switch :checked="nodeForm.is_local" @change="(v:boolean)=>nodeForm.is_local=v" />
-                      <span class="text-xs text-slate-500">标记本机</span>
-                    </a-space>
-                    <a-button type="primary" @click="createNode">新增节点</a-button>
-                  </a-space>
-                  <a-table
-                    class="mt-3"
-                    :columns="nodeColumns"
-                    :data-source="panel.nodes"
-                    size="small"
-                    :pagination="{ pageSize: 5 }"
-                    :row-key="(row:any) => row.id"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.dataIndex === 'enabled'">
-                        <a-tag :color="record.enabled ? 'green' : 'red'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'action'">
-                        <a-button danger size="small" :icon="h(DeleteOutlined)" @click="removeNode(record.id)">删除</a-button>
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-
-				<a-alert class="mt-3" type="info" show-icon message="转发出口仅保留历史兼容能力，家宽订单请使用 auto/manual。" />
-              </a-col>
-              <a-col :xs="24" :lg="14">
-                <a-card :bordered="false" title="导入预检结果">
-                  <a-table
-                    :columns="importColumns"
-                    :data-source="panel.importPreview"
-                    :pagination="{ pageSize: 10 }"
-                    size="small"
-                    :row-key="(row:any, idx:number) => `${idx}-${row.raw}`"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'state'">
-                        <a-tag :color="record.error ? 'red' : 'green'">{{ record.error || 'ok' }}</a-tag>
-                      </template>
-                      <template v-else-if="column.dataIndex === 'raw'">
-                        <span class="font-mono text-xs">{{ record.raw }}</span>
-                      </template>
-                      <template v-else-if="column.dataIndex === 'is_local_ip'">
-                        {{ record.is_local_ip ? '是' : '否' }}
-                      </template>
-                      <template v-else-if="column.dataIndex === 'port_occupied'">
-                        {{ record.port_occupied ? '是' : '否' }}
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-
-                <a-card :bordered="false" title="跨节点渐进迁移预检" class="mt-3">
-                  <a-alert
-                    v-if="panel.migrationPreview && panel.migrationPreview.blocked_node_count > 0"
-                    type="error"
-                    show-icon
-                    :message="`发现 ${panel.migrationPreview.blocked_node_count} 个节点端口冲突，已标红`"
-                    description="请到目标服务器释放占用端口后重试。"
-                    class="mb-3"
-                  />
-                  <a-space v-if="panel.migrationPreview" direction="vertical" style="width:100%" class="mb-3">
-                    <div class="text-xs text-slate-600">可迁移: {{ panel.migrationPreview.ready_rows }} | 阻塞: {{ panel.migrationPreview.blocked_rows }} | 未匹配: {{ panel.migrationPreview.unmatched_rows }} | 多重归属: {{ panel.migrationPreview.ambiguous_rows }}</div>
-                    <a-row :gutter="8">
-                      <a-col v-for="node in panel.migrationPreview.nodes" :key="node.node_name" :xs="24" :md="12" :lg="8">
-                        <a-card size="small" :style="{ borderColor: node.highlight_color === 'red' ? '#ef4444' : '#22c55e', background: node.highlight_color === 'red' ? 'rgba(239,68,68,0.06)' : 'rgba(34,197,94,0.06)' }">
-                          <div class="font-semibold">{{ node.node_name }}</div>
-                          <div class="text-xs text-slate-600">分配 {{ node.assigned_count }} / 就绪 {{ node.ready_count }}</div>
-                          <div v-if="node.port_conflicts?.length" class="text-xs text-rose-600">占用端口: {{ node.port_conflicts.join(', ') }}</div>
-                          <div v-if="node.error" class="text-xs text-rose-600">{{ node.error }}</div>
-                          <div v-if="node.action_hint" class="text-xs text-slate-500">{{ node.action_hint }}</div>
-                        </a-card>
-                      </a-col>
-                    </a-row>
-                  </a-space>
-                  <a-table
-                    :columns="migrationColumns"
-                    :data-source="panel.migrationPreview?.rows || []"
-                    size="small"
-                    :pagination="{ pageSize: 8 }"
-                    :row-key="(row:any, idx:number) => `${idx}-${row.raw}-${row.state}`"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.dataIndex === 'state'">
-                        <a-tag :color="migrationStateColor(record.state)">{{ record.state }}</a-tag>
-                      </template>
-                      <template v-else-if="column.dataIndex === 'raw'">
-                        <span class="font-mono text-xs">{{ record.raw }}</span>
-                      </template>
-                    </template>
-                  </a-table>
-                </a-card>
-              </a-col>
-            </a-row>
-          </template>
-
-          <template v-else-if="panel.activeTab === 'settings'">
-            <a-card :bordered="false" title="系统设置" class="max-w-4xl mb-3">
-              <a-row :gutter="12">
-                <a-col :xs="24" :md="12"><a-form-item label="默认入口端口"><a-input v-model:value="panel.settings.default_inbound_port" /></a-form-item></a-col>
-                <a-col :xs="24" :md="12">
-                  <a-form-item label="Bark启用">
-                    <a-switch :checked="panel.settings.bark_enabled === 'true'" @change="(checked:boolean)=> panel.settings.bark_enabled = checked ? 'true' : 'false'" />
-                  </a-form-item>
-                </a-col>
-                <a-col :xs="24" :md="12"><a-form-item label="Bark地址"><a-input v-model:value="panel.settings.bark_base_url" /></a-form-item></a-col>
-                <a-col :xs="24" :md="12"><a-form-item label="Bark设备Key"><a-input v-model:value="panel.settings.bark_device_key" /></a-form-item></a-col>
-                <a-col :xs="24" :md="12"><a-form-item label="Bark分组"><a-input v-model:value="panel.settings.bark_group" /></a-form-item></a-col>
-              </a-row>
-              <div class="text-right">
-                <a-space>
-                  <a-button @click="sendBarkTest">发送测试通知</a-button>
-                  <a-button type="primary" :icon="h(ApiOutlined)" @click="saveSettings">保存设置</a-button>
-                </a-space>
-              </div>
-            </a-card>
-
-			<a-card :bordered="false" title="设置-GoSea Light Telemetry" class="max-w-4xl mb-3">
-			  <a-row :gutter="12">
-				<a-col :xs="24" :md="12">
-				  <a-form-item label="启用上报">
-					<a-switch :checked="panel.settings.gosealight_telemetry_enabled === 'true'" @change="(checked:boolean)=> panel.settings.gosealight_telemetry_enabled = checked ? 'true' : 'false'" />
-				  </a-form-item>
-				</a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="上报间隔(秒)"><a-input v-model:value="panel.settings.gosealight_telemetry_interval_seconds" placeholder="60" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="GoSea-Light 地址"><a-input v-model:value="panel.settings.gosealight_base_url" placeholder="http://127.0.0.1:3000" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="节点 ID"><a-input v-model:value="panel.settings.gosealight_node_id" placeholder="provider node id" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="节点用户名"><a-input v-model:value="panel.settings.gosealight_node_username" /></a-form-item></a-col>
-				<a-col :xs="24" :md="12"><a-form-item label="节点密码"><a-input-password v-model:value="panel.settings.gosealight_node_password" /></a-form-item></a-col>
-			  </a-row>
-			  <a-alert type="info" show-icon message="启用后会周期性向 GoSea-Light /api/nodes/telemetry/ingest 上报本机版本、能力、连接数、速度和 24h 流量。" />
-			</a-card>
-
-			<a-card :bordered="false" title="设置-专线" class="max-w-4xl mb-3">
-			  <a-alert type="info" show-icon class="mb-3" message="VLESS 的 Security / TLS / REALITY 已迁移到每个 Inbound 单独配置。" />
-			  <a-space>
-				<a-button @click="openDedicatedManager">管理 Inbound / Ingress</a-button>
-				<span class="text-xs text-slate-500">在 VLESS Inbound 中可分别配置 none / tls / reality、flow、SNI、ShortID、公私钥等参数</span>
-			  </a-space>
-			</a-card>
-
-			<a-card :bordered="false" title="设置-家宽" class="max-w-4xl mb-3">
-			  <a-row :gutter="12">
-				<a-col :xs="24" :md="12"><a-form-item label="家宽订单名称前缀"><a-input v-model:value="panel.settings.residential_name_prefix" placeholder="家宽-Socks5" /></a-form-item></a-col>
-			  </a-row>
-			  <a-alert type="info" show-icon message="forward 模式已废弃，家宽订单统一使用 家宽-自动 / 家宽-手动。" />
-			</a-card>
-
-            <a-card :bordered="false" title="数据库备份恢复" class="max-w-4xl">
-              <template #extra>
-                <a-space>
-                  <a-button type="primary" ghost @click="exportBackupDirect">一键导出到本机</a-button>
-                  <a-button @click="panel.loadBackups">刷新</a-button>
-                  <a-button type="primary" @click="createBackup">创建备份</a-button>
-                </a-space>
-              </template>
-              <a-table
-                :columns="backupColumns"
-                :data-source="panel.backups"
-                size="small"
-                :row-key="(row:any) => row.name"
-                :pagination="{ pageSize: 8 }"
-              >
-                <template #bodyCell="{ column, record }">
-                  <template v-if="column.key === 'size'">
-                    {{ bytesText(record.size_bytes) }}
-                  </template>
-                  <template v-else-if="column.key === 'updated_at'">
-                    {{ formatTime(record.updated_at) }}
-                  </template>
-                  <template v-else-if="column.key === 'action'">
-                    <a-space :size="4">
-                      <a-button size="small" @click="downloadBackup(record.name)">下载</a-button>
-                      <a-button size="small" @click="restoreBackup(record.name)">恢复</a-button>
-                      <a-button size="small" danger @click="deleteBackup(record.name)">删除</a-button>
-                    </a-space>
-                  </template>
-                </template>
-              </a-table>
-              <div class="mt-2 text-xs text-slate-500">恢复备份后服务会自动退出并由 systemd 拉起。</div>
-            </a-card>
-          </template>
-        </a-layout-content>
-      </a-layout>
-    </a-layout>
+      <SettingsPage
+        v-else-if="panel.activeTab === 'settings'"
+        :panel="panel"
+        :backup-columns="backupColumns"
+        :save-settings="saveSettings"
+        :send-bark-test="sendBarkTest"
+        :open-dedicated-manager="openDedicatedManager"
+        :export-backup-direct="exportBackupDirect"
+        :create-backup="createBackup"
+        :bytes-text="bytesText"
+        :format-time="formatTime"
+        :download-backup="downloadBackup"
+        :restore-backup="restoreBackup"
+        :delete-backup="deleteBackup"
+      />
+    </AppShell>
 
     <a-drawer v-model:open="forwardManagerOpen" title="SOCKS5 转发出口管理" width="980" :destroy-on-close="false">
       <a-row :gutter="8" class="mb-2">
@@ -3845,8 +3655,8 @@ function downloadBlobFile(data: Blob, filename: string) {
 		            />
 		            <div class="mt-1 text-xs text-slate-500">
 		              {{ orderEditForm.residential_credential_strategy === 'shared'
-		                ? '保存时会把同一组 User:Pass 复用到当前订单全部不同 IP，并校验同一 IP 下用户名唯一。'
-		                : '保存时会按当前订单项顺序整体改写凭据，并校验同一 IP 下用户名唯一。' }}
+		                ? '保存时会把同一组 User:Pass 复用到当前订单全部不同 IP，并校验全局用户名唯一。'
+		                : '保存时会按当前订单项顺序整体改写凭据，并校验全局用户名唯一。' }}
 		            </div>
 		          </a-form-item>
 		        </template>
@@ -4164,18 +3974,25 @@ function downloadBlobFile(data: Blob, filename: string) {
 			<a-radio value="colon">ip:port:user:pass</a-radio>
 		  </a-radio-group>
 		</a-form-item>
+		<a-form-item v-if="exportDialogContainsDedicated" label="专线附带出口 Socks5">
+		  <a-switch v-model:checked="exportDialogIncludeRawSocks5" />
+		</a-form-item>
 		<a-alert
 			v-if="exportDialogFormat === 'xlsx'"
 			type="info"
 			show-icon
-			message="专线 XLSX 将包含订单号、协议链接、二维码和到期时间；不再附带原始 Socks5。"
+			:message="exportDialogContainsDedicated && exportDialogIncludeRawSocks5
+				? '专线 XLSX 将包含订单号、协议链接、二维码、到期时间，并附带出口 Socks5 列。'
+				: '专线 XLSX 将包含订单号、协议链接、二维码和到期时间。'"
 		/>
 		<a-alert
 			v-else
 			class="mt-2"
 			type="info"
 			show-icon
-			message="专线 TXT 将导出订单号、协议链接、二维码内容和到期时间；家宽 TXT 按上方格式输出。"
+			:message="exportDialogContainsDedicated
+				? '专线 TXT 现在支持 Socks5 专线按上方格式直接导出，也可以选择是否附带出口 Socks5；家宽 TXT 按上方格式输出。'
+				: 'TXT 将按上方格式输出。'"
 		/>
 	  </a-form>
 	</a-modal>
@@ -4216,6 +4033,14 @@ function downloadBlobFile(data: Blob, filename: string) {
   letter-spacing: 0.3px;
 }
 
+.logo-version {
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.82);
+  letter-spacing: 0;
+}
+
 .layout-header {
   background: #fff;
   border-bottom: 1px solid rgba(148, 163, 184, 0.28);
@@ -4226,6 +4051,8 @@ function downloadBlobFile(data: Blob, filename: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .title {
@@ -4278,6 +4105,14 @@ function downloadBlobFile(data: Blob, filename: string) {
 }
 
 @media (max-width: 768px) {
+	.layout-header {
+		align-items: flex-start;
+	}
+
+	.title {
+		font-size: 18px;
+	}
+
 	.ip-grid {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}

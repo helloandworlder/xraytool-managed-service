@@ -40,6 +40,7 @@ func Open(path string) (*gorm.DB, error) {
 		&model.XrayResource{},
 		&model.Setting{},
 		&model.TaskLog{},
+		&model.RuntimeTrafficSnapshot{},
 	); err != nil {
 		return nil, err
 	}
@@ -56,6 +57,9 @@ func Open(path string) (*gorm.DB, error) {
 		return nil, err
 	}
 	if err := migrateDedicatedVlessInboundSettings(database); err != nil {
+		return nil, err
+	}
+	if err := migrateRuntimeSnapshotIndex(database); err != nil {
 		return nil, err
 	}
 	return database, nil
@@ -104,6 +108,13 @@ func migrateOrderNoIndex(database *gorm.DB) error {
 		return err
 	}
 	return database.Exec("CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no)").Error
+}
+
+func migrateRuntimeSnapshotIndex(database *gorm.DB) error {
+	if err := database.Exec("DROP INDEX IF EXISTS idx_runtime_snapshot_scope_key_bucket").Error; err != nil {
+		return err
+	}
+	return database.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_snapshot_scope_key_bucket ON runtime_traffic_snapshots(scope, entity_key, bucket_at)").Error
 }
 
 func migrateDedicatedEntryToInboundIngress(database *gorm.DB) error {

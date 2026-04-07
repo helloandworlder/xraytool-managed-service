@@ -271,3 +271,17 @@ type TaskLog struct {
 	Detail    string    `gorm:"type:text" json:"detail"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+type RuntimeTrafficSnapshot struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	Scope         string    `gorm:"size:32;uniqueIndex:idx_runtime_snapshot_scope_key_bucket,priority:1;not null" json:"scope"`
+	EntityKey     string    `gorm:"size:96;uniqueIndex:idx_runtime_snapshot_scope_key_bucket,priority:2;not null" json:"entity_key"`
+	BucketAt      time.Time `gorm:"uniqueIndex:idx_runtime_snapshot_scope_key_bucket,priority:3;not null" json:"bucket_at"`
+	SampledAt     time.Time `gorm:"index;not null" json:"sampled_at"`
+	UplinkBytes   int64     `json:"uplink_bytes"`
+	DownlinkBytes int64     `json:"downlink_bytes"`
+	TotalBytes    int64     `json:"total_bytes"`
+	OnlineClients int64     `json:"online_clients"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}

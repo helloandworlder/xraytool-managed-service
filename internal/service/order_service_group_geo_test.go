@@ -156,7 +156,7 @@ func setupOrderServiceTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite failed: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Customer{}, &model.HostIP{}, &model.DedicatedEntry{}, &model.DedicatedInbound{}, &model.DedicatedIngress{}, &model.Order{}, &model.OrderItem{}, &model.DedicatedEgress{}, &model.XrayResource{}, &model.Setting{}); err != nil {
+	if err := db.AutoMigrate(&model.Customer{}, &model.HostIP{}, &model.DedicatedEntry{}, &model.DedicatedInbound{}, &model.DedicatedIngress{}, &model.Order{}, &model.OrderItem{}, &model.DedicatedEgress{}, &model.XrayResource{}, &model.Setting{}, &model.RuntimeTrafficSnapshot{}); err != nil {
 		t.Fatalf("automigrate failed: %v", err)
 	}
 	return db

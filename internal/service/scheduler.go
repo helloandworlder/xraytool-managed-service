@@ -15,13 +15,14 @@ type Scheduler struct {
 	db        *gorm.DB
 	orders    *OrderService
 	bark      *BarkService
+	runtime   *RuntimeStatsService
 	telemetry *GoSeaLightTelemetryService
 	logger    *zap.Logger
 	interval  time.Duration
 }
 
-func NewScheduler(db *gorm.DB, orders *OrderService, bark *BarkService, telemetry *GoSeaLightTelemetryService, logger *zap.Logger, interval time.Duration) *Scheduler {
-	return &Scheduler{db: db, orders: orders, bark: bark, telemetry: telemetry, logger: logger, interval: interval}
+func NewScheduler(db *gorm.DB, orders *OrderService, bark *BarkService, runtime *RuntimeStatsService, telemetry *GoSeaLightTelemetryService, logger *zap.Logger, interval time.Duration) *Scheduler {
+	return &Scheduler{db: db, orders: orders, bark: bark, runtime: runtime, telemetry: telemetry, logger: logger, interval: interval}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -40,10 +41,6 @@ func (s *Scheduler) Start(ctx context.Context) {
 }
 
 func (s *Scheduler) runOnce(ctx context.Context) {
-	if s.telemetry != nil {
-		s.telemetry.RunDue(ctx)
-	}
-
 	now := time.Now()
 	oneDayLater := now.Add(24 * time.Hour)
 
@@ -82,5 +79,14 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			}
 			_ = s.db.Model(&model.Order{}).Where("id = ?", order.ID).Update("notify_expired_sent", true).Error
 		}
+	}
+
+	if s.runtime != nil {
+		if err := s.runtime.Capture(ctx); err != nil {
+			s.logger.Warn("runtime stats capture failed", zap.Error(err))
+		}
+	}
+	if s.telemetry != nil {
+		s.telemetry.RunDue(ctx)
 	}
 }

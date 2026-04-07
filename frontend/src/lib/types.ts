@@ -125,6 +125,30 @@ export interface Order {
   items: OrderItem[]
 }
 
+export interface OrderListStats {
+  total: number
+  active: number
+  expired: number
+  disabled: number
+}
+
+export interface OrderListResponse {
+  rows: Order[]
+  page: number
+  page_size: number
+  total: number
+  stats: OrderListStats
+}
+
+export interface OrderListQuery {
+  page?: number
+  page_size?: number
+  keyword?: string
+  mode?: string
+  status?: string
+  customer_id?: number
+}
+
 export interface OversellRow {
   ip: string
   count: number
@@ -148,12 +172,85 @@ export interface CustomerRuntimeStat {
   customer_id: number
   customer_name: string
   customer_code: string
+  home_items: number
+  dedicated_items: number
+  home_online_clients: number
+  dedicated_online_clients: number
   online_clients: number
   realtime_bps: number
   traffic_1h: number
   traffic_24h: number
   traffic_7d: number
+  traffic_total: number
   updated_at: string
+}
+
+export interface OrderGroupRuntimeStat {
+  group_id: number
+  group_order_no: string
+  group_name: string
+  customer_id: number
+  customer_name: string
+  customer_code: string
+  mode: string
+  order_count: number
+  active_items: number
+  online_clients: number
+  realtime_bps: number
+  traffic_1h: number
+  traffic_24h: number
+  traffic_7d: number
+  traffic_total: number
+  updated_at: string
+}
+
+export interface OrderRuntimeStat {
+  order_id: number
+  order_no: string
+  order_name: string
+  group_id: number
+  group_order_no: string
+  customer_id: number
+  customer_name: string
+  customer_code: string
+  mode: string
+  quantity: number
+  active_items: number
+  online_clients: number
+  realtime_bps: number
+  traffic_1h: number
+  traffic_24h: number
+  traffic_7d: number
+  traffic_total: number
+  updated_at: string
+}
+
+export interface RuntimeOverviewStat {
+  customers: CustomerRuntimeStat[]
+  groups: OrderGroupRuntimeStat[]
+  orders: OrderRuntimeStat[]
+  warnings?: string[]
+  updated_at: string
+}
+
+export interface ResidentialCredentialConflictMember {
+  order_id: number
+  order_no: string
+  order_name: string
+  customer_id: number
+  customer_name: string
+  customer_code: string
+  mode: string
+  ip: string
+  expires_at: string
+}
+
+export interface ResidentialCredentialConflict {
+  username: string
+  order_count: number
+  item_count: number
+  affected_order_ids: number[]
+  members: ResidentialCredentialConflictMember[]
 }
 
 export interface ImportPreviewRow {
@@ -257,4 +354,34 @@ export interface BackupInfo {
   name: string
   size_bytes: number
   updated_at: string
+}
+
+export interface VersionInfo {
+  version: string
+  commit: string
+  build_time: string
+  protocolVersion: string
+  capabilities: string[]
+}
+
+export interface DedicatedProtocolCheckResult {
+  ok: boolean
+  connectivityOk?: boolean
+  exitIp?: string
+  countryCode?: string
+  region?: string
+  message?: string
+  error?: string
+  errorCode?: string
+  checkedAt?: string
+}
+
+export interface ActivityEntry {
+  id: string
+  title: string
+  detail: string
+  status: 'running' | 'success' | 'error' | 'warning' | 'info'
+  created_at: string
+  updated_at: string
+  source?: string
 }

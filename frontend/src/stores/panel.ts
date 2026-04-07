@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia'
-import { http, normalizeApiError } from '../lib/http'
+import { http, isAuthError, normalizeApiError } from '../lib/http'
 import type {
   AllocationPreview,
+  ActivityEntry,
   BackupInfo,
   Customer,
   CustomerRuntimeStat,
+  DedicatedProtocolCheckResult,
 	DedicatedInbound,
 	DedicatedIngress,
 	DedicatedEntry,
@@ -12,10 +14,18 @@ import type {
   HostIP,
   ImportPreviewRow,
   Order,
+  OrderGroupRuntimeStat,
+  OrderRuntimeStat,
+  OrderListQuery,
+  OrderListResponse,
+  OrderListStats,
   OversellRow,
+  ResidentialCredentialConflict,
+  RuntimeOverviewStat,
   SingboxScanResult,
   SocksMigrationPreviewResult,
   TaskLog,
+  VersionInfo,
   XrayNode
 } from '../lib/types'
 
@@ -32,20 +42,51 @@ export const usePanelStore = defineStore('panel', {
     notice: '',
     error: '',
     activeTab: 'dashboard',
+    pendingRequests: 0,
+    recentActivities: [] as ActivityEntry[],
+    activeRequestMap: {} as Record<string, { method: string; url: string; startedAt: number }>,
 
     customers: [] as Customer[],
     hostIPs: [] as HostIP[],
     oversell: [] as OversellRow[],
     oversellCustomerID: 0,
     orders: [] as Order[],
+    orderStats: {
+      total: 0,
+      active: 0,
+      expired: 0,
+      disabled: 0
+    } as OrderListStats,
+    orderList: {
+      page: 1,
+      pageSize: 12,
+      total: 0
+    },
+    orderListQuery: {
+      page: 1,
+      page_size: 12,
+      keyword: '',
+      mode: 'all',
+      status: 'all',
+      customer_id: 0
+    } as Required<OrderListQuery>,
     selectedOrder: null as Order | null,
     orderSelection: [] as number[],
     allocationPreview: null as AllocationPreview | null,
 
     settings: {} as Record<string, string>,
+    versionInfo: null as VersionInfo | null,
     taskLogs: [] as TaskLog[],
     backups: [] as BackupInfo[],
+    residentialCredentialConflicts: [] as ResidentialCredentialConflict[],
     runtimeStats: [] as CustomerRuntimeStat[],
+    runtimeOverview: {
+      customers: [] as CustomerRuntimeStat[],
+      groups: [] as OrderGroupRuntimeStat[],
+      orders: [] as OrderRuntimeStat[],
+      warnings: [] as string[],
+      updated_at: ''
+    } as RuntimeOverviewStat,
 
     importPreview: [] as ImportPreviewRow[],
     singboxScan: null as SingboxScanResult | null,
@@ -57,42 +98,152 @@ export const usePanelStore = defineStore('panel', {
 		dedicatedIngresses: [] as DedicatedIngress[]
   }),
   getters: {
-    activeOrderCount: (state) => state.orders.filter((o) => o.status === 'active').length,
-    expiredOrderCount: (state) => state.orders.filter((o) => o.status === 'expired').length,
+    activeOrderCount: (state) => Number(state.orderStats.active || 0),
+    expiredOrderCount: (state) => Number(state.orderStats.expired || 0),
     activeHostPublicCount: (state) => state.hostIPs.filter((v) => v.is_public && v.enabled).length,
-    selectedCount: (state) => state.orderSelection.length
+    disabledOrderCount: (state) => Number(state.orderStats.disabled || 0),
+    selectedCount: (state) => state.orderSelection.length,
+    runningActivityCount: (state) => state.recentActivities.filter((entry) => entry.status === 'running').length
   },
   actions: {
+    pushActivity(entry: Omit<ActivityEntry, 'created_at' | 'updated_at'> & { created_at?: string; updated_at?: string }) {
+      const now = new Date().toISOString()
+      const next: ActivityEntry = {
+        created_at: entry.created_at || now,
+        updated_at: entry.updated_at || now,
+        ...entry
+      }
+      const idx = this.recentActivities.findIndex((item) => item.id === next.id)
+      if (idx >= 0) {
+        this.recentActivities[idx] = {
+          ...this.recentActivities[idx],
+          ...next,
+          created_at: this.recentActivities[idx].created_at,
+          updated_at: next.updated_at || now
+        }
+      } else {
+        this.recentActivities.unshift(next)
+      }
+      this.recentActivities = this.recentActivities
+        .slice()
+        .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+        .slice(0, 40)
+    },
+    noteRequestStart(meta: { requestId: string; method: string; url: string; startedAt: number }) {
+      this.pendingRequests += 1
+      this.activeRequestMap = {
+        ...this.activeRequestMap,
+        [meta.requestId]: {
+          method: meta.method,
+          url: meta.url,
+          startedAt: meta.startedAt
+        }
+      }
+    },
+    noteRequestFinish(meta: { requestId: string; method: string; url: string; status?: number; ok?: boolean; durationMs?: number; error?: string }) {
+      this.pendingRequests = Math.max(0, Number(this.pendingRequests || 0) - 1)
+      const nextMap = { ...this.activeRequestMap }
+      delete nextMap[meta.requestId]
+      this.activeRequestMap = nextMap
+      if ((meta.durationMs || 0) < 800 && meta.ok) {
+        return
+      }
+      const statusText = meta.ok ? 'success' : 'error'
+      const detail = meta.ok
+        ? `${meta.method} ${meta.url} · ${meta.status || 200} · ${meta.durationMs || 0}ms`
+        : `${meta.method} ${meta.url} · ${meta.status || 0} · ${meta.error || 'Request failed'}`
+      this.pushActivity({
+        id: `request:${meta.requestId}`,
+        title: meta.ok ? '请求完成' : '请求失败',
+        detail,
+        status: statusText,
+        source: 'http'
+      })
+    },
     setNotice(msg: string) {
       this.notice = msg
+      this.pushActivity({
+        id: `notice:${Date.now()}`,
+        title: '操作完成',
+        detail: msg,
+        status: 'success',
+        source: 'ui'
+      })
       window.setTimeout(() => {
         if (this.notice === msg) this.notice = ''
       }, 3000)
     },
     setError(err: unknown) {
       this.error = normalizeApiError(err)
+      this.pushActivity({
+        id: `error:${Date.now()}`,
+        title: '操作失败',
+        detail: this.error,
+        status: 'error',
+        source: 'ui'
+      })
       window.setTimeout(() => {
         if (this.error) this.error = ''
       }, 3500)
     },
+    startTrackedActivity(id: string, title: string, detail = '', source = 'task') {
+      this.pushActivity({
+        id,
+        title,
+        detail,
+        status: 'running',
+        source
+      })
+    },
+    finishTrackedActivity(id: string, status: ActivityEntry['status'], detail = '', source = 'task') {
+      const existing = this.recentActivities.find((entry) => entry.id === id)
+      this.pushActivity({
+        id,
+        title: existing?.title || '任务更新',
+        detail: detail || existing?.detail || '',
+        status,
+        source
+      })
+    },
+    recordClientError(detail: string, source = 'runtime') {
+      this.pushActivity({
+        id: `runtime:${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        title: '前端异常',
+        detail,
+        status: 'error',
+        source
+      })
+    },
     async bootstrap() {
-      await Promise.all([
-        this.loadCustomers(),
-        this.loadHostIPs(),
-        this.loadOversell(this.oversellCustomerID),
-        this.loadOrders(),
-        this.loadNodes(),
-        this.loadForwardOutbounds(),
-			this.loadDedicatedEntries(),
-			this.loadDedicatedInbounds(),
-			this.loadDedicatedIngresses(),
-        this.loadSettings(),
-        this.loadTaskLogs(),
-        this.loadBackups(),
-        this.loadRuntimeStats().catch(() => {
-          this.runtimeStats = []
-        })
-      ])
+      const tasks = [
+        { label: '客户', run: () => this.loadCustomers() },
+        { label: 'IP池', run: () => this.loadHostIPs() },
+        { label: '超卖统计', run: () => this.loadOversell(this.oversellCustomerID) },
+        { label: '订单', run: () => this.loadOrders() },
+        { label: '节点', run: () => this.loadNodes() },
+        { label: '转发出口', run: () => this.loadForwardOutbounds() },
+        { label: '专线入口', run: () => this.loadDedicatedEntries() },
+        { label: 'Inbound', run: () => this.loadDedicatedInbounds() },
+        { label: 'Ingress', run: () => this.loadDedicatedIngresses() },
+        { label: '设置', run: () => this.loadSettings() },
+        { label: '任务日志', run: () => this.loadTaskLogs() },
+        { label: '备份', run: () => this.loadBackups() },
+        { label: '运行时统计', run: () => this.loadRuntimeStats() },
+        { label: '版本信息', run: () => this.loadVersionInfo() },
+        { label: '家宽账号冲突', run: () => this.loadResidentialCredentialConflicts() }
+      ]
+      const settled = await Promise.allSettled(tasks.map((task) => task.run()))
+      const failures: string[] = []
+      settled.forEach((item, index) => {
+        if (item.status === 'fulfilled') return
+        if (isAuthError(item.reason)) {
+          throw item.reason
+        }
+        failures.push(tasks[index].label)
+      })
+      if (failures.length > 0) {
+        this.setError(`部分数据加载失败: ${failures.join(' / ')}`)
+      }
     },
     async loadCustomers() {
       const res = await http.get('/api/customers')
@@ -401,9 +552,42 @@ export const usePanelStore = defineStore('panel', {
       this.allocationPreview = res.data
       return this.allocationPreview
     },
-    async loadOrders() {
-      const res = await http.get('/api/orders')
-      this.orders = res.data
+    async loadOrders(query: OrderListQuery = {}) {
+      const nextQuery: Required<OrderListQuery> = {
+        page: Number(query.page || this.orderListQuery.page || 1),
+        page_size: Number(query.page_size || this.orderListQuery.page_size || 12),
+        keyword: String(query.keyword ?? this.orderListQuery.keyword ?? '').trim(),
+        mode: String(query.mode ?? this.orderListQuery.mode ?? 'all').trim() || 'all',
+        status: String(query.status ?? this.orderListQuery.status ?? 'all').trim() || 'all',
+        customer_id: Number(query.customer_id ?? this.orderListQuery.customer_id ?? 0)
+      }
+      const params = new URLSearchParams()
+      params.set('page', String(nextQuery.page))
+      params.set('page_size', String(nextQuery.page_size))
+      if (nextQuery.keyword) params.set('keyword', nextQuery.keyword)
+      if (nextQuery.mode && nextQuery.mode !== 'all') params.set('mode', nextQuery.mode)
+      if (nextQuery.status && nextQuery.status !== 'all') params.set('status', nextQuery.status)
+      if (nextQuery.customer_id > 0) params.set('customer_id', String(nextQuery.customer_id))
+      const res = await http.get(`/api/orders?${params.toString()}`)
+      const data = res.data as OrderListResponse
+      this.orders = Array.isArray(data.rows) ? data.rows : []
+      const visibleIDs = new Set(this.orders.map((row) => Number(row.id)))
+      this.orderSelection = this.orderSelection.filter((id) => visibleIDs.has(Number(id)))
+      this.orderStats = data.stats || { total: 0, active: 0, expired: 0, disabled: 0 }
+      this.orderList = {
+        page: Number(data.page || nextQuery.page || 1),
+        pageSize: Number(data.page_size || nextQuery.page_size || 12),
+        total: Number(data.total || 0)
+      }
+      this.orderListQuery = {
+        ...nextQuery,
+        page: this.orderList.page,
+        page_size: this.orderList.pageSize
+      }
+    },
+    async loadVersionInfo() {
+      const res = await http.get('/api/version')
+      this.versionInfo = res.data as VersionInfo
     },
     async loadOrderDetail(orderID: number) {
       const res = await http.get(`/api/orders/${orderID}`)
@@ -412,6 +596,26 @@ export const usePanelStore = defineStore('panel', {
     async copyOrderLinks(orderID: number) {
       const res = await http.get(`/api/orders/${orderID}/copy-links`, { responseType: 'text' })
       return String(res.data || '')
+    },
+    async checkDedicatedRuntime(payload: {
+      routeType?: string
+      protocol: string
+      ip: string
+      port: number
+      username: string
+      password: string
+      vmessUuid?: string
+    }) {
+      const res = await http.post('/api/dedicated/check', {
+        routeType: payload.routeType || 'SHORT_VIDEO',
+        protocol: payload.protocol,
+        ip: payload.ip,
+        port: payload.port,
+        username: payload.username,
+        password: payload.password,
+        vmessUuid: payload.vmessUuid || ''
+      })
+      return res.data as DedicatedProtocolCheckResult
     },
     async createOrder(payload: Record<string, unknown>) {
 		const res = await http.post('/api/orders', payload, { timeout: 120000 })
@@ -539,7 +743,19 @@ export const usePanelStore = defineStore('panel', {
     async resetOrderCredentials(orderID: number) {
       await http.post(`/api/orders/${orderID}/credentials/reset`, {})
       await this.loadOrders()
+      await this.loadResidentialCredentialConflicts()
       this.setNotice('家宽凭据已刷新')
+    },
+    async loadResidentialCredentialConflicts() {
+      const res = await http.get('/api/orders/residential-credential-conflicts')
+      this.residentialCredentialConflicts = Array.isArray(res.data) ? res.data : []
+    },
+    async repairResidentialCredentialConflicts(orderIDs: number[]) {
+      const res = await http.post('/api/orders/residential-credential-conflicts/repair', { order_ids: orderIDs })
+      await this.loadOrders()
+      await this.loadRuntimeStats()
+      await this.loadResidentialCredentialConflicts()
+      return Array.isArray(res.data?.results) ? res.data.results as BatchResult[] : []
     },
     async testOrder(orderID: number, samplePercent = 100) {
       const res = await http.post(`/api/orders/${orderID}/test`, { sample_percent: samplePercent })
@@ -653,8 +869,15 @@ export const usePanelStore = defineStore('panel', {
       this.setNotice('Bark 测试通知已发送')
     },
     async loadRuntimeStats() {
-      const res = await http.get('/api/runtime/customers')
-      this.runtimeStats = res.data
+      const res = await http.get('/api/runtime/overview?limit=30')
+      this.runtimeOverview = {
+        customers: res.data?.customers || [],
+        groups: res.data?.groups || [],
+        orders: res.data?.orders || [],
+        warnings: res.data?.warnings || [],
+        updated_at: res.data?.updated_at || ''
+      }
+      this.runtimeStats = this.runtimeOverview.customers
     },
     async loadTaskLogs(filters?: { level?: string; keyword?: string; start?: string; end?: string; limit?: number }) {
       const params = new URLSearchParams()

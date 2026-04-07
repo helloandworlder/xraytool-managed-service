@@ -144,6 +144,8 @@ func (a *API) Router() *gin.Engine {
 	secure.PUT("/orders/:id", a.updateOrder)
 	secure.DELETE("/orders/:id", a.deleteOrder)
 	secure.POST("/orders/:id/credentials/reset", a.resetOrderCredentials)
+	secure.GET("/orders/residential-credential-conflicts", a.listResidentialCredentialConflicts)
+	secure.POST("/orders/residential-credential-conflicts/repair", a.repairResidentialCredentialConflicts)
 	secure.POST("/orders/dedicated/egress/probe-stream", a.probeDedicatedEgressStream)
 	secure.POST("/orders/:id/split", a.splitOrder)
 	secure.GET("/orders/:id/group/template/socks5.xlsx", a.downloadOrderGroupSocks5Template)
@@ -177,6 +179,7 @@ func (a *API) Router() *gin.Engine {
 	secure.PUT("/settings", a.updateSettings)
 	secure.POST("/settings/bark/test", a.testBark)
 	secure.GET("/runtime/customers", a.customerRuntimeStats)
+	secure.GET("/runtime/overview", a.runtimeOverview)
 	secure.GET("/db/backups", a.listBackups)
 	secure.POST("/db/backups", a.createBackup)
 	secure.GET("/db/backup/export", a.exportBackup)
@@ -1416,12 +1419,22 @@ func (a *API) oversellView(c *gin.Context) {
 }
 
 func (a *API) listOrders(c *gin.Context) {
-	rows, err := a.orders.ListOrders()
+	page, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("page", "1")))
+	pageSize, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("page_size", "12")))
+	customerID, _ := strconv.ParseUint(strings.TrimSpace(c.DefaultQuery("customer_id", "0")), 10, 64)
+	result, err := a.orders.ListOrders(service.ListOrdersInput{
+		Page:       page,
+		PageSize:   pageSize,
+		Keyword:    strings.TrimSpace(c.Query("keyword")),
+		Mode:       strings.TrimSpace(c.Query("mode")),
+		Status:     strings.TrimSpace(c.Query("status")),
+		CustomerID: uint(customerID),
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, rows)
+	c.JSON(http.StatusOK, result)
 }
 
 func (a *API) orderAllocationPreview(c *gin.Context) {
@@ -1545,6 +1558,31 @@ func (a *API) resetOrderCredentials(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (a *API) listResidentialCredentialConflicts(c *gin.Context) {
+	rows, err := a.orders.ListResidentialUsernameConflicts()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) repairResidentialCredentialConflicts(c *gin.Context) {
+	var req struct {
+		OrderIDs []uint `json:"order_ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.OrderIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is empty"})
+		return
+	}
+	results := a.orders.RepairResidentialUsernameConflicts(c.Request.Context(), req.OrderIDs)
+	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
 func (a *API) probeDedicatedEgressStream(c *gin.Context) {
@@ -2095,7 +2133,7 @@ func (a *API) batchExportOrders(c *gin.Context) {
 		c.Data(http.StatusOK, contentType, data)
 		return
 	}
-	text, filename, err := a.orders.BatchExport(req.OrderIDs, req.ResidentialTXTLayout)
+	text, filename, err := a.orders.BatchExport(req.OrderIDs, req.ResidentialTXTLayout, req.IncludeRawSocks5)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -2128,6 +2166,7 @@ func (a *API) exportOrder(c *gin.Context) {
 		Count:                count,
 		Shuffle:              shuffle,
 		ResidentialTXTLayout: residentialTXTLayout,
+		IncludeRawSocks5:     includeRawSocks5,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2321,7 +2360,18 @@ func (a *API) testBark(c *gin.Context) {
 }
 
 func (a *API) customerRuntimeStats(c *gin.Context) {
-	rows, err := a.runtime.Snapshot(c.Request.Context())
+	limit := parseRuntimeLimit(c.DefaultQuery("limit", "30"))
+	rows, err := a.runtime.Overview(c.Request.Context(), limit)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows.Customers)
+}
+
+func (a *API) runtimeOverview(c *gin.Context) {
+	limit := parseRuntimeLimit(c.DefaultQuery("limit", "30"))
+	rows, err := a.runtime.Overview(c.Request.Context(), limit)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -2359,6 +2409,17 @@ func (a *API) taskLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, rows)
+}
+
+func parseRuntimeLimit(raw string) int {
+	limit, _ := strconv.Atoi(strings.TrimSpace(raw))
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	return limit
 }
 
 func (a *API) listBackups(c *gin.Context) {

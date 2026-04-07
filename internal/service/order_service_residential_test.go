@@ -198,7 +198,7 @@ func TestCreateResidentialOrderAcceptsSharedCustomCredential(t *testing.T) {
 	}
 }
 
-func TestCreateResidentialOrderAllowsDuplicateUsernameAcrossDifferentIPs(t *testing.T) {
+func TestCreateResidentialOrderAllowsSharedUsernameWithinSameOrder(t *testing.T) {
 	db := setupOrderServiceTestDB(t)
 	svc := NewOrderService(db, NewXrayManager(config.Config{}, db, zap.NewNop()), zap.NewNop())
 	seedManagedAccountForPort(t, db, residentialTestPort)
@@ -227,7 +227,7 @@ func TestCreateResidentialOrderAllowsDuplicateUsernameAcrossDifferentIPs(t *test
 		ResidentialCredentialLines: "dup-user:pass-a\ndup-user:pass-b",
 	})
 	if err != nil {
-		t.Fatalf("expected duplicate username across different ips to succeed, got: %v", err)
+		t.Fatalf("expected shared username within same order to succeed, got: %v", err)
 	}
 	if len(order.Items) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(order.Items))
@@ -239,7 +239,7 @@ func TestCreateResidentialOrderAllowsDuplicateUsernameAcrossDifferentIPs(t *test
 	}
 }
 
-func TestCreateResidentialOrderRejectsExistingCustomUsernameOnSameIP(t *testing.T) {
+func TestCreateResidentialOrderRejectsExistingCustomUsernameAcrossOrders(t *testing.T) {
 	db := setupOrderServiceTestDB(t)
 	svc := NewOrderService(db, NewXrayManager(config.Config{}, db, zap.NewNop()), zap.NewNop())
 	seedManagedAccountForPort(t, db, residentialTestPort)
@@ -299,14 +299,14 @@ func TestCreateResidentialOrderRejectsExistingCustomUsernameOnSameIP(t *testing.
 		ResidentialCredentialLines: "seed-user:pass-a",
 	})
 	if err == nil {
-		t.Fatalf("expected same ip + username to fail")
+		t.Fatalf("expected duplicate username across orders to fail")
 	}
-	if !strings.Contains(err.Error(), "already exists for ip") {
+	if !strings.Contains(err.Error(), "already exists in another active order") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestCreateResidentialOrderAllowsExistingUsernameOnDifferentIP(t *testing.T) {
+func TestCreateResidentialOrderRejectsExistingUsernameOnDifferentIP(t *testing.T) {
 	db := setupOrderServiceTestDB(t)
 	svc := NewOrderService(db, NewXrayManager(config.Config{}, db, zap.NewNop()), zap.NewNop())
 	seedManagedAccountForPort(t, db, residentialTestPort)
@@ -358,7 +358,7 @@ func TestCreateResidentialOrderAllowsExistingUsernameOnDifferentIP(t *testing.T)
 		t.Fatalf("create existing item failed: %v", err)
 	}
 
-	order, err := svc.CreateOrder(context.Background(), CreateOrderInput{
+	_, err := svc.CreateOrder(context.Background(), CreateOrderInput{
 		CustomerID:                 customer.ID,
 		Name:                       "home-other-ip-order",
 		Mode:                       model.OrderModeManual,
@@ -369,11 +369,11 @@ func TestCreateResidentialOrderAllowsExistingUsernameOnDifferentIP(t *testing.T)
 		ResidentialCredentialMode:  ResidentialCredentialModeCustom,
 		ResidentialCredentialLines: "seed-user:pass-a",
 	})
-	if err != nil {
-		t.Fatalf("expected same username on different ip to succeed, got: %v", err)
+	if err == nil {
+		t.Fatal("expected same username on different ip to fail because usernames must now be globally unique across orders")
 	}
-	if len(order.Items) != 1 || order.Items[0].IP != hostB.IP || order.Items[0].Username != "seed-user" {
-		t.Fatalf("unexpected order items: %#v", order.Items)
+	if !strings.Contains(err.Error(), "already exists in another active order") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

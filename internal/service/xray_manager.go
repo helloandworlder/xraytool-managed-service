@@ -284,6 +284,40 @@ func (m *XrayManager) GetOnlineCount(ctx context.Context, onlineStatName string)
 	return resp.Stat.Value, nil
 }
 
+func (m *XrayManager) GetOnlineCounts(ctx context.Context, onlineStatNames []string) (map[string]int64, error) {
+	out := make(map[string]int64, len(onlineStatNames))
+	if len(onlineStatNames) == 0 {
+		return out, nil
+	}
+
+	conn, err := m.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	client := statscmd.NewStatsServiceClient(conn)
+	for _, onlineStatName := range onlineStatNames {
+		resp, err := client.GetStatsOnline(ctx, &statscmd.GetStatsRequest{Name: onlineStatName, Reset_: false})
+		if err != nil {
+			if isStatsUnsupportedErr(err) {
+				return map[string]int64{}, nil
+			}
+			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+				out[onlineStatName] = 0
+				continue
+			}
+			return nil, err
+		}
+		if resp.Stat == nil {
+			out[onlineStatName] = 0
+			continue
+		}
+		out[onlineStatName] = resp.Stat.Value
+	}
+	return out, nil
+}
+
 func (m *XrayManager) ApplyOrderItem(ctx context.Context, item model.OrderItem, inboundTag string) (model.XrayResource, error) {
 	resource := model.XrayResource{
 		OrderItemID: item.ID,
@@ -613,6 +647,9 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			default:
 				if _, exists := dedicatedMixedAccountsByPort[row.Port]; !exists {
 					dedicatedMixedAccountsByPort[row.Port] = map[string]string{}
+				}
+				if _, exists := dedicatedMixedAccountsByPort[row.Port][row.Username]; exists {
+					return fmt.Errorf("duplicate dedicated mixed username %s found on shared port %d", row.Username, row.Port)
 				}
 				dedicatedMixedAccountsByPort[row.Port][row.Username] = row.Password
 				inboundTags = append(inboundTags, dedicatedInboundTag(model.DedicatedFeatureMixed, row.Port))

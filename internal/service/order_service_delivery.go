@@ -85,41 +85,45 @@ func (s *OrderService) RefreshResidentialCredentials(ctx context.Context, orderI
 	}
 	now := time.Now()
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		targetOrderIDs := []uint{order.ID}
-		if order.IsGroupHead {
-			childIDs := []uint{}
-			if err := tx.Model(&model.Order{}).Where("parent_order_id = ?", order.ID).Pluck("id", &childIDs).Error; err != nil {
-				return err
-			}
-			if len(childIDs) > 0 {
-				targetOrderIDs = childIDs
-			}
-		}
-		items := []model.OrderItem{}
-		if err := tx.Where("order_id in ?", targetOrderIDs).Find(&items).Error; err != nil {
-			return err
-		}
-		for _, item := range items {
-			username, err := s.nextAvailableResidentialUsernameTx(tx, item.IP, order.ID)
-			if err != nil {
-				return err
-			}
-			if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
-				"username":   username,
-				"password":   randomString(12),
-				"vmess_uuid": "",
-				"updated_at": now,
-			}).Error; err != nil {
-				return err
-			}
-		}
-		return tx.Model(&model.Order{}).Where("id in ? or parent_order_id in ?", targetOrderIDs, targetOrderIDs).Updates(map[string]interface{}{
-			"updated_at": now,
-		}).Error
+		return s.refreshResidentialCredentialsTx(tx, order, now)
 	}); err != nil {
 		return err
 	}
 	return s.rebuildManagedRuntime(ctx)
+}
+
+func (s *OrderService) refreshResidentialCredentialsTx(tx *gorm.DB, order model.Order, now time.Time) error {
+	targetOrderIDs := []uint{order.ID}
+	if order.IsGroupHead {
+		childIDs := []uint{}
+		if err := tx.Model(&model.Order{}).Where("parent_order_id = ?", order.ID).Pluck("id", &childIDs).Error; err != nil {
+			return err
+		}
+		if len(childIDs) > 0 {
+			targetOrderIDs = childIDs
+		}
+	}
+	items := []model.OrderItem{}
+	if err := tx.Where("order_id in ?", targetOrderIDs).Find(&items).Error; err != nil {
+		return err
+	}
+	for _, item := range items {
+		username, err := s.nextAvailableResidentialUsernameTx(tx, item.IP, order.ID)
+		if err != nil {
+			return err
+		}
+		if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
+			"username":   username,
+			"password":   randomString(12),
+			"vmess_uuid": "",
+			"updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return tx.Model(&model.Order{}).Where("id in ? or parent_order_id in ?", targetOrderIDs, targetOrderIDs).Updates(map[string]interface{}{
+		"updated_at": now,
+	}).Error
 }
 
 func (s *OrderService) DeleteOrder(ctx context.Context, orderID uint) error {

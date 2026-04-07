@@ -359,7 +359,7 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 			}
 		}
 		if in.RegenerateDedicatedCredentials || strings.TrimSpace(in.DedicatedCredentialLines) != "" {
-			if err := s.updateGroupCredentialsTx(tx, head, children, in.DedicatedCredentialLines, in.RegenerateDedicatedCredentials, now); err != nil {
+			if err := s.updateGroupCredentialsTx(tx, targetProtocol, targetPort, children, in.DedicatedCredentialLines, in.RegenerateDedicatedCredentials, now); err != nil {
 				return err
 			}
 		}
@@ -730,7 +730,11 @@ func (s *OrderService) UpdateGroupCredentials(ctx context.Context, orderID uint,
 		if err != nil {
 			return err
 		}
-		return s.updateGroupCredentialsTx(tx, head, children, lines, regenerate, now)
+		protocol := strings.TrimSpace(head.DedicatedProtocol)
+		if protocol == "" {
+			protocol = model.DedicatedFeatureMixed
+		}
+		return s.updateGroupCredentialsTx(tx, protocol, head.Port, children, lines, regenerate, now)
 	}); err != nil {
 		return err
 	}
@@ -780,7 +784,11 @@ func (s *OrderService) UpdateGroupCredentialsSelected(ctx context.Context, order
 		if err != nil {
 			return err
 		}
-		return s.updateGroupCredentialsTx(tx, head, children, lines, regenerate, now)
+		protocol := strings.TrimSpace(head.DedicatedProtocol)
+		if protocol == "" {
+			protocol = model.DedicatedFeatureMixed
+		}
+		return s.updateGroupCredentialsTx(tx, protocol, head.Port, children, lines, regenerate, now)
 	}); err != nil {
 		return err
 	}
@@ -1049,8 +1057,61 @@ func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, childr
 	return nil
 }
 
-func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, head model.Order, children []model.Order, lines string, regenerate bool, now time.Time) error {
-	protocol := strings.TrimSpace(head.DedicatedProtocol)
+func (s *OrderService) updateDedicatedOrderEgressTx(tx *gorm.DB, order model.Order, lines string, now time.Time) error {
+	if len(order.Items) == 0 {
+		return fmt.Errorf("order %d has no item", order.ID)
+	}
+	egRows, err := parseDedicatedEgressLines(lines)
+	if err != nil {
+		return err
+	}
+	if len(egRows) != len(order.Items) {
+		return fmt.Errorf("lines count %d not equal order items %d", len(egRows), len(order.Items))
+	}
+	if err := s.ensureCustomerDedicatedEgressUniqueTx(tx, order.CustomerID, egRows, []uint{order.ID}); err != nil {
+		return err
+	}
+	for i, item := range order.Items {
+		eg := egRows[i]
+		if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
+			"outbound_type":     model.OutboundTypeSocks5,
+			"forward_address":   eg.Address,
+			"forward_port":      eg.Port,
+			"forward_username":  eg.Username,
+			"forward_password":  eg.Password,
+			"socks_outbound_id": nil,
+			"updated_at":        now,
+		}).Error; err != nil {
+			return err
+		}
+		egress := model.DedicatedEgress{}
+		err := tx.Where("order_item_id = ?", item.ID).First(&egress).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			egress = model.DedicatedEgress{OrderID: order.ID, OrderItemID: item.ID, CreatedAt: now}
+		}
+		egress.Address = eg.Address
+		egress.Port = eg.Port
+		egress.Username = eg.Username
+		egress.Password = eg.Password
+		fillDedicatedEgressProbe(&egress)
+		egress.UpdatedAt = now
+		if err := tx.Save(&egress).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *OrderService) updateDedicatedOrderCredentialsTx(tx *gorm.DB, order model.Order, protocol string, port int, lines string, regenerate bool, now time.Time) error {
+	children := []model.Order{order}
+	return s.updateGroupCredentialsTx(tx, protocol, port, children, lines, regenerate, now)
+}
+
+func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, protocol string, port int, children []model.Order, lines string, regenerate bool, now time.Time) error {
+	protocol = strings.TrimSpace(protocol)
 	if protocol == "" {
 		protocol = model.DedicatedFeatureMixed
 	}
@@ -1075,6 +1136,22 @@ func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, head model.Order, c
 	if len(credRows) != len(children) {
 		return fmt.Errorf("credential count %d not equal child orders %d", len(credRows), len(children))
 	}
+	if protocol == model.DedicatedFeatureMixed {
+		for i := range credRows {
+			if strings.TrimSpace(credRows[i].Username) == "" {
+				credRows[i].Username = randomString(8)
+			}
+			if strings.TrimSpace(credRows[i].Password) == "" {
+				credRows[i].Password = randomString(12)
+			}
+			if strings.TrimSpace(credRows[i].UUID) == "" {
+				credRows[i].UUID = randomUUID()
+			}
+		}
+		if err := s.ensureDedicatedMixedUsernamesAvailableTx(tx, port, children, credRows); err != nil {
+			return err
+		}
+	}
 	for i, child := range children {
 		if len(child.Items) == 0 {
 			return fmt.Errorf("child order %d has no item", child.ID)
@@ -1084,15 +1161,6 @@ func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, head model.Order, c
 		updates := map[string]interface{}{"updated_at": now}
 		switch protocol {
 		case model.DedicatedFeatureMixed:
-			if strings.TrimSpace(cred.Username) == "" {
-				cred.Username = randomString(8)
-			}
-			if strings.TrimSpace(cred.Password) == "" {
-				cred.Password = randomString(12)
-			}
-			if strings.TrimSpace(cred.UUID) == "" {
-				cred.UUID = randomUUID()
-			}
 			updates["username"] = cred.Username
 			updates["password"] = cred.Password
 			updates["vmess_uuid"] = cred.UUID
@@ -1110,6 +1178,69 @@ func (s *OrderService) updateGroupCredentialsTx(tx *gorm.DB, head model.Order, c
 		if err := tx.Model(&model.OrderItem{}).Where("id = ?", item.ID).Updates(updates).Error; err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (s *OrderService) ensureDedicatedMixedUsernamesAvailableTx(tx *gorm.DB, port int, children []model.Order, rows []DedicatedCredentialLine) error {
+	if port <= 0 || len(rows) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(rows))
+	users := make([]string, 0, len(rows))
+	for _, row := range rows {
+		user := strings.TrimSpace(row.Username)
+		if user == "" {
+			continue
+		}
+		if _, exists := seen[user]; exists {
+			return fmt.Errorf("duplicate dedicated mixed username %s on shared port %d", user, port)
+		}
+		seen[user] = struct{}{}
+		users = append(users, user)
+	}
+	if len(users) == 0 {
+		return nil
+	}
+
+	excludeItemIDs := make([]uint, 0, len(children))
+	for _, child := range children {
+		for _, item := range child.Items {
+			if item.ID > 0 {
+				excludeItemIDs = append(excludeItemIDs, item.ID)
+			}
+		}
+	}
+
+	type usedRow struct {
+		Username string
+	}
+	used := []usedRow{}
+	q := tx.Table("order_items oi").
+		Select("oi.username").
+		Joins("join orders o on o.id = oi.order_id").
+		Where("o.mode = ? and o.dedicated_protocol = ? and o.status = ? and o.expires_at > ? and oi.status = ? and oi.port = ? and oi.username in ?",
+			model.OrderModeDedicated,
+			model.DedicatedFeatureMixed,
+			model.OrderStatusActive,
+			time.Now(),
+			model.OrderItemStatusActive,
+			port,
+			users,
+		)
+	if len(excludeItemIDs) > 0 {
+		q = q.Where("oi.id not in ?", uniqueUintIDs(excludeItemIDs))
+	}
+	if err := q.Scan(&used).Error; err != nil {
+		return err
+	}
+	for _, row := range used {
+		user := strings.TrimSpace(row.Username)
+		if user == "" {
+			continue
+		}
+		return fmt.Errorf("dedicated mixed username %s already used on shared port %d", user, port)
 	}
 	return nil
 }

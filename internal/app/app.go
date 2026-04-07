@@ -83,7 +83,7 @@ func Run() error {
 	runtimeSvc := service.NewRuntimeStatsService(database, xrayManager)
 	telemetrySvc := service.NewGoSeaLightTelemetryService(st, runtimeSvc, cfg.GoSeaTelemetry, logger)
 	backupSvc := service.NewBackupService(cfg, database, logger)
-	scheduler := service.NewScheduler(database, orderSvc, barkSvc, telemetrySvc, logger, cfg.SchedulerInterval)
+	scheduler := service.NewScheduler(database, orderSvc, barkSvc, runtimeSvc, telemetrySvc, logger, cfg.SchedulerInterval)
 
 	engine := api.New(database, st, orderSvc, singboxSvc, nodeSvc, forwardSvc, hostSvc, backupSvc, barkSvc, runtimeSvc, cfg, logger).Router()
 	if err := ensureListenAddrAvailable(cfg.ListenAddr); err != nil {
