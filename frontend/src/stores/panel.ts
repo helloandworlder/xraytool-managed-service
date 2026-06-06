@@ -36,6 +36,11 @@ type OrderSubmitResult = {
   warnings: string[]
 }
 
+const orderListRecentReuseWindowMs = 1500
+
+let orderListInflight: { key: string; promise: Promise<void> } | null = null
+let orderListRecent: { key: string; finishedAt: number } = { key: '', finishedAt: 0 }
+
 export const usePanelStore = defineStore('panel', {
   state: () => ({
     loading: false,
@@ -561,6 +566,14 @@ export const usePanelStore = defineStore('panel', {
         status: String(query.status ?? this.orderListQuery.status ?? 'all').trim() || 'all',
         customer_id: Number(query.customer_id ?? this.orderListQuery.customer_id ?? 0)
       }
+      const requestKey = JSON.stringify(nextQuery)
+      if (orderListInflight?.key === requestKey) {
+        return orderListInflight.promise
+      }
+      if (orderListRecent.key === requestKey && Date.now() - orderListRecent.finishedAt < orderListRecentReuseWindowMs) {
+        return
+      }
+      const run = async () => {
       const params = new URLSearchParams()
       params.set('page', String(nextQuery.page))
       params.set('page_size', String(nextQuery.page_size))
@@ -568,7 +581,7 @@ export const usePanelStore = defineStore('panel', {
       if (nextQuery.mode && nextQuery.mode !== 'all') params.set('mode', nextQuery.mode)
       if (nextQuery.status && nextQuery.status !== 'all') params.set('status', nextQuery.status)
       if (nextQuery.customer_id > 0) params.set('customer_id', String(nextQuery.customer_id))
-      const res = await http.get(`/api/orders?${params.toString()}`)
+      const res = await http.get(`/api/orders?${params.toString()}`, { timeout: 60000 })
       const data = res.data as OrderListResponse
       this.orders = Array.isArray(data.rows) ? data.rows : []
       const visibleIDs = new Set(this.orders.map((row) => Number(row.id)))
@@ -584,6 +597,15 @@ export const usePanelStore = defineStore('panel', {
         page: this.orderList.page,
         page_size: this.orderList.pageSize
       }
+      orderListRecent = { key: requestKey, finishedAt: Date.now() }
+      }
+      const promise = run().finally(() => {
+        if (orderListInflight?.key === requestKey) {
+          orderListInflight = null
+        }
+      })
+      orderListInflight = { key: requestKey, promise }
+      return promise
     },
     async loadVersionInfo() {
       const res = await http.get('/api/version')

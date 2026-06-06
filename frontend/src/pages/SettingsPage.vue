@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { message, Modal } from 'ant-design-vue'
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { http, normalizeApiError } from '../lib/http'
 
 const props = defineProps<{
 	panel: any
@@ -19,6 +20,49 @@ const props = defineProps<{
 
 const repairingAll = ref(false)
 const repairingUsername = ref('')
+const lifecycleLoading = ref(false)
+const lifecycleSaving = ref(false)
+const nodeLifecycle = ref({
+	status: 'ACTIVE',
+	message: '',
+	updated_at: ''
+})
+
+const lifecycleOptions = [
+	{ label: 'ACTIVE', value: 'ACTIVE' },
+	{ label: 'DRAINING', value: 'DRAINING' },
+	{ label: 'RETIRED', value: 'RETIRED' },
+	{ label: 'DECOMMISSIONED', value: 'DECOMMISSIONED' }
+]
+
+const lifecycleAlert = computed(() => {
+	switch (nodeLifecycle.value.status) {
+	case 'DRAINING':
+		return {
+			type: 'warning',
+			message: '节点排水中：阻止新建与扩容，保留停用、测试、预览和备份恢复。'
+		}
+	case 'RETIRED':
+		return {
+			type: 'warning',
+			message: '节点已退役：面板进入近只读状态，仅保留清退、导出、预览和备份恢复。'
+		}
+	case 'DECOMMISSIONED':
+		return {
+			type: 'error',
+			message: '节点已彻底退役：除生命周期切换和备份恢复外，写操作全部冻结。'
+		}
+	default:
+		return {
+			type: 'success',
+			message: '节点活跃：正常承接新订单、续费和配置变更。'
+		}
+	}
+})
+
+onMounted(() => {
+	void loadNodeLifecycle()
+})
 
 const allConflictOrderIDs = computed(() => {
 	const set = new Set<number>()
@@ -81,9 +125,72 @@ async function repairOneConflict(username: string, orderIDs: number[]) {
 		repairingUsername.value = ''
 	}
 }
+
+async function loadNodeLifecycle() {
+	lifecycleLoading.value = true
+	try {
+		const res = await http.get('/api/node-lifecycle')
+		nodeLifecycle.value = {
+			status: String(res.data?.status || 'ACTIVE'),
+			message: String(res.data?.message || ''),
+			updated_at: String(res.data?.updated_at || '')
+		}
+	} catch (err) {
+		message.error(normalizeApiError(err))
+	} finally {
+		lifecycleLoading.value = false
+	}
+}
+
+async function saveNodeLifecycle() {
+	lifecycleSaving.value = true
+	try {
+		const res = await http.put('/api/node-lifecycle', {
+			status: nodeLifecycle.value.status,
+			message: nodeLifecycle.value.message
+		})
+		nodeLifecycle.value = {
+			status: String(res.data?.status || nodeLifecycle.value.status),
+			message: String(res.data?.message || ''),
+			updated_at: String(res.data?.updated_at || '')
+		}
+		message.success('节点生命周期已更新')
+	} catch (err) {
+		message.error(normalizeApiError(err))
+	} finally {
+		lifecycleSaving.value = false
+	}
+}
 </script>
 
 <template>
+	<a-card :bordered="false" title="节点生命周期" class="max-w-4xl mb-3" :loading="lifecycleLoading">
+		<a-row :gutter="12">
+			<a-col :xs="24" :md="12">
+				<a-form-item label="当前状态">
+					<a-select v-model:value="nodeLifecycle.status" :options="lifecycleOptions" />
+				</a-form-item>
+			</a-col>
+			<a-col :xs="24" :md="12">
+				<a-form-item label="更新时间">
+					<a-input :value="nodeLifecycle.updated_at ? formatTime(nodeLifecycle.updated_at) : '-'" readonly />
+				</a-form-item>
+			</a-col>
+			<a-col :xs="24">
+				<a-form-item label="备注">
+					<a-textarea v-model:value="nodeLifecycle.message" :rows="3" placeholder="例如：节点准备退役，停止新单，仅保留现有订单" />
+				</a-form-item>
+			</a-col>
+		</a-row>
+		<a-alert :type="lifecycleAlert.type" show-icon :message="lifecycleAlert.message" :description="nodeLifecycle.message || undefined" />
+		<div class="text-right mt-3">
+			<a-space wrap>
+				<a-button @click="loadNodeLifecycle">刷新状态</a-button>
+				<a-button type="primary" :loading="lifecycleSaving" @click="saveNodeLifecycle">保存生命周期</a-button>
+			</a-space>
+		</div>
+	</a-card>
+
 	<a-card :bordered="false" title="系统设置" class="max-w-4xl mb-3">
 		<a-row :gutter="12">
 			<a-col :xs="24" :md="12"><a-form-item label="默认入口端口"><a-input v-model:value="panel.settings.default_inbound_port" /></a-form-item></a-col>

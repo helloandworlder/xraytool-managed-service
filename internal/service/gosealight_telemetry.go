@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,14 +43,29 @@ type goSeaTelemetrySettings struct {
 }
 
 type goSeaTelemetryPayload struct {
-	NodeID          string                     `json:"nodeId"`
-	Username        string                     `json:"username"`
-	Password        string                     `json:"password"`
-	ProtocolVersion string                     `json:"protocolVersion,omitempty"`
-	Version         string                     `json:"version,omitempty"`
-	Capabilities    []string                   `json:"capabilities,omitempty"`
-	SnapshotAt      string                     `json:"snapshotAt,omitempty"`
-	Stats           goSeaTelemetryPayloadStats `json:"stats"`
+	NodeID             string                     `json:"nodeId"`
+	Username           string                     `json:"username"`
+	Password           string                     `json:"password"`
+	ProtocolVersion    string                     `json:"protocolVersion,omitempty"`
+	Version            string                     `json:"version,omitempty"`
+	Capabilities       []string                   `json:"capabilities,omitempty"`
+	LimitPolicy        goSeaTelemetryLimitPolicy  `json:"limitPolicy,omitempty"`
+	XrayCore           goSeaTelemetryXrayCore     `json:"xrayCore,omitempty"`
+	LifecycleStatus    string                     `json:"lifecycleStatus,omitempty"`
+	LifecycleMessage   string                     `json:"lifecycleMessage,omitempty"`
+	LifecycleUpdatedAt string                     `json:"lifecycleUpdatedAt,omitempty"`
+	SnapshotAt         string                     `json:"snapshotAt,omitempty"`
+	Stats              goSeaTelemetryPayloadStats `json:"stats"`
+}
+
+type goSeaTelemetryLimitPolicy struct {
+	AccountHardLimit bool     `json:"accountHardLimit"`
+	Fields           []string `json:"fields"`
+}
+
+type goSeaTelemetryXrayCore struct {
+	BinaryPath string `json:"binaryPath,omitempty"`
+	Version    string `json:"version,omitempty"`
 }
 
 type goSeaTelemetryPayloadStats struct {
@@ -146,6 +162,10 @@ func (s *GoSeaLightTelemetryService) push(ctx context.Context, settings goSeaTel
 	if err != nil {
 		return err
 	}
+	lifecycle, err := s.store.GetNodeLifecycle()
+	if err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	if snapshot.UploadBPS > s.peakUploadBPS {
@@ -177,7 +197,22 @@ func (s *GoSeaLightTelemetryService) push(ctx context.Context, settings goSeaTel
 		ProtocolVersion: buildinfo.ProtocolVersion,
 		Version:         buildinfo.Version,
 		Capabilities:    buildinfo.Capabilities(),
-		SnapshotAt:      snapshot.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		LimitPolicy: goSeaTelemetryLimitPolicy{
+			AccountHardLimit: true,
+			Fields: []string{
+				"uplinkLimitBps",
+				"downlinkLimitBps",
+				"maxConnections",
+			},
+		},
+		XrayCore: goSeaTelemetryXrayCore{
+			BinaryPath: s.cfg.XrayBinaryPath,
+			Version:    detectXrayCoreVersion(s.cfg.XrayBinaryPath),
+		},
+		LifecycleStatus:    lifecycle.Status,
+		LifecycleMessage:   lifecycle.Message,
+		LifecycleUpdatedAt: lifecycle.UpdatedAt,
+		SnapshotAt:         snapshot.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		Stats: goSeaTelemetryPayloadStats{
 			TrafficTotalBytes: snapshot.TrafficTotal,
 			Traffic24HBytes:   snapshot.Traffic24H,
@@ -215,6 +250,24 @@ func (s *GoSeaLightTelemetryService) push(ctx context.Context, settings goSeaTel
 		return fmt.Errorf("telemetry ingest returned %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
 	}
 	return nil
+}
+
+func detectXrayCoreVersion(binaryPath string) string {
+	binaryPath = strings.TrimSpace(binaryPath)
+	if binaryPath == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binaryPath, "version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(lines[0])
 }
 
 func firstNonEmptyTelemetry(values ...string) string {

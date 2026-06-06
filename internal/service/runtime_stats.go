@@ -208,6 +208,7 @@ type RuntimeStatsService struct {
 	xray *XrayManager
 
 	mu                   sync.Mutex
+	backgroundCaptureEnabled bool
 	rateLast             map[string]ioSample
 	cpuLast              cpuSample
 	lastCleanupAt        time.Time
@@ -219,10 +220,11 @@ type RuntimeStatsService struct {
 
 func NewRuntimeStatsService(db *gorm.DB, xray *XrayManager) *RuntimeStatsService {
 	svc := &RuntimeStatsService{
-		db:       db,
-		xray:     xray,
-		rateLast: map[string]ioSample{},
-		nowFn:    time.Now,
+		db:                       db,
+		xray:                     xray,
+		backgroundCaptureEnabled: true,
+		rateLast:                 map[string]ioSample{},
+		nowFn:                    time.Now,
 	}
 	if xray != nil {
 		svc.trafficProvider = xray.QueryUserTraffic
@@ -236,7 +238,19 @@ func NewRuntimeStatsService(db *gorm.DB, xray *XrayManager) *RuntimeStatsService
 	return svc
 }
 
+func (s *RuntimeStatsService) SetBackgroundCaptureEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.backgroundCaptureEnabled = enabled
+}
+
 func (s *RuntimeStatsService) Capture(ctx context.Context) error {
+	s.mu.Lock()
+	enabled := s.backgroundCaptureEnabled
+	s.mu.Unlock()
+	if !enabled {
+		return nil
+	}
 	_, err := s.capture(ctx, 30)
 	return err
 }

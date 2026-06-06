@@ -15,14 +15,26 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+const sqliteBusyTimeoutMs = 10000
+
 func Open(path string) (*gorm.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
-	database, err := gorm.Open(sqlite.Open(path), &gorm.Config{
+	database, err := gorm.Open(sqlite.Open(sqliteDSN(path)), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxLifetime(0)
+	if err := applySQLitePragmas(database); err != nil {
 		return nil, err
 	}
 	if err := database.AutoMigrate(
@@ -63,6 +75,28 @@ func Open(path string) (*gorm.DB, error) {
 		return nil, err
 	}
 	return database, nil
+}
+
+func sqliteDSN(path string) string {
+	return fmt.Sprintf(
+		"file:%s?_busy_timeout=%d&_foreign_keys=on&_journal_mode=WAL&_synchronous=NORMAL",
+		path,
+		sqliteBusyTimeoutMs,
+	)
+}
+
+func applySQLitePragmas(database *gorm.DB) error {
+	for _, stmt := range []string{
+		fmt.Sprintf("PRAGMA busy_timeout = %d", sqliteBusyTimeoutMs),
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+	} {
+		if err := database.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateOrderItemUsernameIndex(database *gorm.DB) error {

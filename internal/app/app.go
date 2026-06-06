@@ -81,6 +81,7 @@ func Run() error {
 	forwardSvc := service.NewForwardOutboundService(database)
 	barkSvc := service.NewBarkService(database)
 	runtimeSvc := service.NewRuntimeStatsService(database, xrayManager)
+	runtimeSvc.SetBackgroundCaptureEnabled(cfg.RuntimeCaptureEnabled)
 	telemetrySvc := service.NewGoSeaLightTelemetryService(st, runtimeSvc, cfg.GoSeaTelemetry, logger)
 	backupSvc := service.NewBackupService(cfg, database, logger)
 	scheduler := service.NewScheduler(database, orderSvc, barkSvc, runtimeSvc, telemetrySvc, logger, cfg.SchedulerInterval)

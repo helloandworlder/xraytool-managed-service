@@ -2,8 +2,11 @@ package service
 
 import (
 	"bufio"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,6 +123,13 @@ type DedicatedEgressGeoLine struct {
 	Region      string
 }
 
+type DedicatedVmessLinkLine struct {
+	Remark string
+	Domain string
+	Port   int
+	UUID   string
+}
+
 func parseDedicatedEgressLines(lines string) ([]DedicatedEgressLine, error) {
 	scanner := bufio.NewScanner(strings.NewReader(lines))
 	out := make([]DedicatedEgressLine, 0)
@@ -141,6 +151,69 @@ func parseDedicatedEgressLines(lines string) ([]DedicatedEgressLine, error) {
 		return nil, errors.New("no valid socks5 lines")
 	}
 	return out, nil
+}
+
+func parseDedicatedVmessLinkLines(lines string) ([]DedicatedVmessLinkLine, error) {
+	scanner := bufio.NewScanner(strings.NewReader(lines))
+	out := make([]DedicatedVmessLinkLine, 0)
+	for scanner.Scan() {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" {
+			continue
+		}
+		row, err := parseDedicatedVmessLinkLine(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no valid vmess links")
+	}
+	return out, nil
+}
+
+func parseDedicatedVmessLinkLine(raw string) (DedicatedVmessLinkLine, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !strings.EqualFold(u.Scheme, "vmess") {
+		return DedicatedVmessLinkLine{}, fmt.Errorf("invalid vmess link %q", raw)
+	}
+	payload := strings.TrimSpace(u.Host + u.Path)
+	payload = strings.TrimLeft(payload, "/")
+	if payload == "" {
+		return DedicatedVmessLinkLine{}, fmt.Errorf("invalid vmess link %q, payload is empty", raw)
+	}
+	if rem := len(payload) % 4; rem != 0 {
+		payload += strings.Repeat("=", 4-rem)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(strings.TrimRight(payload, "="))
+	}
+	if err != nil {
+		return DedicatedVmessLinkLine{}, fmt.Errorf("decode vmess link failed: %w", err)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(decoded, &body); err != nil {
+		return DedicatedVmessLinkLine{}, fmt.Errorf("parse vmess json failed: %w", err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(body["port"]))
+	if err != nil || port <= 0 || port > 65535 {
+		return DedicatedVmessLinkLine{}, fmt.Errorf("invalid vmess port in link %q", raw)
+	}
+	row := DedicatedVmessLinkLine{
+		Remark: strings.TrimSpace(body["ps"]),
+		Domain: strings.TrimSpace(body["add"]),
+		Port:   port,
+		UUID:   strings.TrimSpace(body["id"]),
+	}
+	if row.Domain == "" || row.UUID == "" {
+		return DedicatedVmessLinkLine{}, fmt.Errorf("invalid vmess link %q, add/id required", raw)
+	}
+	return row, nil
 }
 
 func parseDedicatedEgressGeoLines(lines string, defaultCountryCode string, defaultRegion string) ([]DedicatedEgressGeoLine, error) {

@@ -2509,6 +2509,7 @@ async function probeDedicatedCreateLines() {
 						region: String(event.region || ''),
 						error: String(event.error || '') || undefined
 					})
+					dedicatedProbeRows.value.sort((a, b) => a.index - b.index)
 					if (event.available) dedicatedProbeMeta.success += 1
 					else dedicatedProbeMeta.failed += 1
 					continue

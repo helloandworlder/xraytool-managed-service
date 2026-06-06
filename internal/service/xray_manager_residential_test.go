@@ -37,16 +37,19 @@ func TestRebuildConfigFileSplitsManagedMixedInboundsByListenIP(t *testing.T) {
 	}
 	items := []model.OrderItem{
 		{
-			OrderID:      order.ID,
-			IP:           "203.0.113.51",
-			Port:         residentialTestPort,
-			Username:     "dup-user",
-			Password:     "pass-a",
-			OutboundType: model.OutboundTypeDirect,
-			Managed:      true,
-			Status:       model.OrderItemStatusActive,
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			OrderID:          order.ID,
+			IP:               "203.0.113.51",
+			Port:             residentialTestPort,
+			Username:         "dup-user",
+			Password:         "pass-a",
+			OutboundType:     model.OutboundTypeDirect,
+			UplinkLimitBps:   1000000,
+			DownlinkLimitBps: 2000000,
+			MaxConnections:   2,
+			Managed:          true,
+			Status:           model.OrderItemStatusActive,
+			CreatedAt:        now,
+			UpdatedAt:        now,
 		},
 		{
 			OrderID:      order.ID,
@@ -88,8 +91,11 @@ func TestRebuildConfigFileSplitsManagedMixedInboundsByListenIP(t *testing.T) {
 			Protocol string `json:"protocol"`
 			Settings struct {
 				Accounts []struct {
-					User string `json:"user"`
-					Pass string `json:"pass"`
+					User             string `json:"user"`
+					Pass             string `json:"pass"`
+					UplinkLimitBps   int64  `json:"uplinkLimitBps"`
+					DownlinkLimitBps int64  `json:"downlinkLimitBps"`
+					MaxConnections   int64  `json:"maxConnections"`
 				} `json:"accounts"`
 			} `json:"settings"`
 		} `json:"inbounds"`
@@ -109,6 +115,12 @@ func TestRebuildConfigFileSplitsManagedMixedInboundsByListenIP(t *testing.T) {
 		listens[inbound.Listen] = inbound.Settings.Accounts[0].Pass
 		if inbound.Settings.Accounts[0].User != "dup-user" {
 			t.Fatalf("expected duplicated username on per-ip inbound, got %s", inbound.Settings.Accounts[0].User)
+		}
+		if inbound.Listen == "203.0.113.51" {
+			account := inbound.Settings.Accounts[0]
+			if account.UplinkLimitBps != 1000000 || account.DownlinkLimitBps != 2000000 || account.MaxConnections != 2 {
+				t.Fatalf("unexpected limit policy account fields: %#v", account)
+			}
 		}
 	}
 	if len(listens) != 2 {

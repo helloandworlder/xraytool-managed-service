@@ -14,5 +14,6 @@ func Capabilities() []string {
 		"TELEMETRY",
 		"CONNECTIVITY_REPORTING",
 		"VERSION_MANIFEST",
+		"LIMIT_POLICY_ACCOUNT_HARD_LIMIT",
 	}
 }

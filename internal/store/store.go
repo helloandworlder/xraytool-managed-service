@@ -2,7 +2,9 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"xraytool/internal/model"
@@ -13,6 +15,22 @@ import (
 
 type Store struct {
 	db *gorm.DB
+}
+
+const (
+	NodeLifecycleStatusActive         = "ACTIVE"
+	NodeLifecycleStatusDraining       = "DRAINING"
+	NodeLifecycleStatusRetired        = "RETIRED"
+	NodeLifecycleStatusDecommissioned = "DECOMMISSIONED"
+	nodeLifecycleStatusKey            = "node_lifecycle_status"
+	nodeLifecycleMessageKey           = "node_lifecycle_message"
+	nodeLifecycleUpdatedAtKey         = "node_lifecycle_updated_at"
+)
+
+type NodeLifecycleState struct {
+	Status    string `json:"status"`
+	Message   string `json:"message,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 func New(db *gorm.DB) *Store {
@@ -38,6 +56,9 @@ func (s *Store) EnsureDefaultSettings(defaultPort int, barkBase string, extraDef
 		"dedicated_vless_path":     "",
 		"dedicated_vless_host":     "",
 		"residential_name_prefix":  "家宽-Socks5",
+		nodeLifecycleStatusKey:     NodeLifecycleStatusActive,
+		nodeLifecycleMessageKey:    "",
+		nodeLifecycleUpdatedAtKey:  "",
 	}
 	for k, v := range extraDefaults {
 		defaults[k] = v
@@ -117,4 +138,52 @@ func (s *Store) ResetAdminPassword(username, passwordHash string) error {
 
 func (s *Store) AddTaskLog(level, msg, detail string) {
 	_ = s.db.Create(&model.TaskLog{Level: level, Message: msg, Detail: detail}).Error
+}
+
+func (s *Store) GetNodeLifecycle() (NodeLifecycleState, error) {
+	values, err := s.GetSettings()
+	if err != nil {
+		return NodeLifecycleState{}, err
+	}
+	status, err := normalizeNodeLifecycleStatus(values[nodeLifecycleStatusKey])
+	if err != nil {
+		status = NodeLifecycleStatusActive
+	}
+	return NodeLifecycleState{
+		Status:    status,
+		Message:   strings.TrimSpace(values[nodeLifecycleMessageKey]),
+		UpdatedAt: strings.TrimSpace(values[nodeLifecycleUpdatedAtKey]),
+	}, nil
+}
+
+func (s *Store) SetNodeLifecycle(status string, message string) (NodeLifecycleState, error) {
+	normalized, err := normalizeNodeLifecycleStatus(status)
+	if err != nil {
+		return NodeLifecycleState{}, err
+	}
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := s.SetSettings(map[string]string{
+		nodeLifecycleStatusKey:    normalized,
+		nodeLifecycleMessageKey:   strings.TrimSpace(message),
+		nodeLifecycleUpdatedAtKey: updatedAt,
+	}); err != nil {
+		return NodeLifecycleState{}, err
+	}
+	return NodeLifecycleState{
+		Status:    normalized,
+		Message:   strings.TrimSpace(message),
+		UpdatedAt: updatedAt,
+	}, nil
+}
+
+func normalizeNodeLifecycleStatus(status string) (string, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(status))
+	switch normalized {
+	case "", NodeLifecycleStatusActive:
+		return NodeLifecycleStatusActive, nil
+	case NodeLifecycleStatusDraining, NodeLifecycleStatusRetired, NodeLifecycleStatusDecommissioned:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid node lifecycle status %q", status)
+	}
 }

@@ -77,8 +77,11 @@ func (a *API) Router() *gin.Engine {
 
 	secure := api.Group("/")
 	secure.Use(a.authMiddleware())
+	secure.Use(a.nodeLifecycleMiddleware())
 	secure.GET("/auth/me", a.handleMe)
 	secure.POST("/auth/reset-password", a.handleResetPassword)
+	secure.GET("/node-lifecycle", a.getNodeLifecycle)
+	secure.PUT("/node-lifecycle", a.updateNodeLifecycle)
 
 	secure.GET("/customers", a.listCustomers)
 	secure.POST("/customers", a.createCustomer)
@@ -135,6 +138,7 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/dedicated/provision", a.provisionDedicated)
 	secure.POST("/dedicated/switch-protocol", a.switchDedicatedProtocol)
 	secure.POST("/dedicated/check", a.checkDedicated)
+	secure.POST("/orders/dedicated/supplement-vmess", a.createDedicatedVmessSupplement)
 
 	secure.GET("/orders", a.listOrders)
 	secure.POST("/orders/forward/reuse-warnings", a.forwardReuseWarnings)
@@ -180,6 +184,7 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/settings/bark/test", a.testBark)
 	secure.GET("/runtime/customers", a.customerRuntimeStats)
 	secure.GET("/runtime/overview", a.runtimeOverview)
+	secure.POST("/runtime/limit-policy/reapply", a.reapplyLimitPolicyRuntime)
 	secure.GET("/db/backups", a.listBackups)
 	secure.POST("/db/backups", a.createBackup)
 	secure.GET("/db/backup/export", a.exportBackup)
@@ -1585,6 +1590,42 @@ func (a *API) repairResidentialCredentialConflicts(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"results": results})
 }
 
+func (a *API) createDedicatedVmessSupplement(c *gin.Context) {
+	var req struct {
+		CustomerID  uint   `json:"customer_id"`
+		Name        string `json:"name"`
+		DurationDay int    `json:"duration_day"`
+		ExpiresAt   string `json:"expires_at"`
+		VmessLinks  string `json:"vmess_links"`
+		Socks5Lines string `json:"socks5_lines"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	input := service.DedicatedVmessSupplementInput{
+		CustomerID:  req.CustomerID,
+		Name:        req.Name,
+		DurationDay: req.DurationDay,
+		VmessLinks:  req.VmessLinks,
+		Socks5Lines: req.Socks5Lines,
+	}
+	if strings.TrimSpace(req.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
+		}
+		input.ExpiresAt = t
+	}
+	order, err := a.orders.CreateDedicatedVmessSupplement(c.Request.Context(), input)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"order": order})
+}
+
 func (a *API) probeDedicatedEgressStream(c *gin.Context) {
 	var req struct {
 		Lines string `json:"lines"`
@@ -2083,6 +2124,14 @@ func (a *API) batchResyncOrders(c *gin.Context) {
 	}
 	results := a.orders.BatchResync(c.Request.Context(), req.OrderIDs)
 	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+func (a *API) reapplyLimitPolicyRuntime(c *gin.Context) {
+	if err := a.orders.ReapplyLimitPolicyRuntime(c.Request.Context()); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (a *API) batchTestOrders(c *gin.Context) {

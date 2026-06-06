@@ -202,18 +202,21 @@ type OrderItem struct {
 	HostIPID        *uint `gorm:"index" json:"host_ip_id,omitempty"`
 	SocksOutboundID *uint `gorm:"index" json:"socks_outbound_id,omitempty"`
 
-	IP              string `gorm:"size:64;not null;index" json:"ip"`
-	Port            int    `gorm:"not null;index" json:"port"`
-	Username        string `gorm:"size:64;not null;index:idx_order_items_auth" json:"username"`
-	Password        string `gorm:"size:64;not null" json:"password"`
-	VmessUUID       string `gorm:"size:64;index" json:"vmess_uuid,omitempty"`
-	OutboundType    string `gorm:"size:16;not null;default:direct;index" json:"outbound_type"`
-	ForwardAddress  string `gorm:"size:128" json:"forward_address,omitempty"`
-	ForwardPort     int    `json:"forward_port,omitempty"`
-	ForwardUsername string `gorm:"size:128" json:"forward_username,omitempty"`
-	ForwardPassword string `gorm:"size:128" json:"forward_password,omitempty"`
-	Managed         bool   `gorm:"default:true" json:"managed"`
-	Status          string `gorm:"size:32;not null;index" json:"status"`
+	IP               string `gorm:"size:64;not null;index" json:"ip"`
+	Port             int    `gorm:"not null;index" json:"port"`
+	Username         string `gorm:"size:64;not null;index:idx_order_items_auth" json:"username"`
+	Password         string `gorm:"size:64;not null" json:"password"`
+	VmessUUID        string `gorm:"size:64;index" json:"vmess_uuid,omitempty"`
+	OutboundType     string `gorm:"size:16;not null;default:direct;index" json:"outbound_type"`
+	ForwardAddress   string `gorm:"size:128" json:"forward_address,omitempty"`
+	ForwardPort      int    `json:"forward_port,omitempty"`
+	ForwardUsername  string `gorm:"size:128" json:"forward_username,omitempty"`
+	ForwardPassword  string `gorm:"size:128" json:"forward_password,omitempty"`
+	UplinkLimitBps   int64  `gorm:"not null;default:0" json:"uplink_limit_bps,omitempty"`
+	DownlinkLimitBps int64  `gorm:"not null;default:0" json:"downlink_limit_bps,omitempty"`
+	MaxConnections   int64  `gorm:"not null;default:0" json:"max_connections,omitempty"`
+	Managed          bool   `gorm:"default:true" json:"managed"`
+	Status           string `gorm:"size:32;not null;index" json:"status"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

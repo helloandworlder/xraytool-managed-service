@@ -258,3 +258,38 @@ func TestRuntimeOverviewWarnsAndSkipsConflictedUsernames(t *testing.T) {
 		t.Fatalf("expected conflicted usernames to be skipped from attributed stats, got customers=%d orders=%d", len(overview.Customers), len(overview.Orders))
 	}
 }
+
+func TestRuntimeCaptureReturnsEarlyWhenBackgroundCaptureDisabled(t *testing.T) {
+	db := setupOrderServiceTestDB(t)
+	svc := NewRuntimeStatsService(db, nil)
+	svc.SetBackgroundCaptureEnabled(false)
+
+	providerCalled := false
+	svc.trafficProvider = func(context.Context) (map[string]int64, error) {
+		providerCalled = true
+		return map[string]int64{}, nil
+	}
+	svc.onlineListProvider = func(context.Context) ([]string, error) {
+		providerCalled = true
+		return []string{}, nil
+	}
+	svc.onlineCountsProvider = func(context.Context, []string) (map[string]int64, error) {
+		providerCalled = true
+		return map[string]int64{}, nil
+	}
+
+	if err := svc.Capture(context.Background()); err != nil {
+		t.Fatalf("capture failed: %v", err)
+	}
+	if providerCalled {
+		t.Fatal("expected capture providers to be skipped when background capture is disabled")
+	}
+
+	var count int64
+	if err := db.Model(&model.RuntimeTrafficSnapshot{}).Count(&count).Error; err != nil {
+		t.Fatalf("count snapshots failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no runtime snapshots to be persisted, got %d", count)
+	}
+}

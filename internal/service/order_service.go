@@ -79,6 +79,15 @@ type UpdateOrderInput struct {
 	RegenerateDedicatedCredentials bool      `json:"regenerate_dedicated_credentials"`
 }
 
+type DedicatedVmessSupplementInput struct {
+	CustomerID  uint      `json:"customer_id"`
+	Name        string    `json:"name"`
+	DurationDay int       `json:"duration_day"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	VmessLinks  string    `json:"vmess_links"`
+	Socks5Lines string    `json:"socks5_lines"`
+}
+
 type AllocationPreview struct {
 	PoolSize       int `json:"pool_size"`
 	UsedByCustomer int `json:"used_by_customer"`
@@ -148,15 +157,22 @@ type TestOrderStreamEvent struct {
 }
 
 type ImportPreviewRow struct {
-	Raw          string `json:"raw"`
-	SourceFile   string `json:"source_file,omitempty"`
-	IP           string `json:"ip"`
-	Port         int    `json:"port"`
-	Username     string `json:"username"`
-	Password     string `json:"password"`
-	IsLocalIP    bool   `json:"is_local_ip"`
-	PortOccupied bool   `json:"port_occupied"`
-	Error        string `json:"error,omitempty"`
+	Raw          string           `json:"raw"`
+	SourceFile   string           `json:"source_file,omitempty"`
+	IP           string           `json:"ip"`
+	Port         int              `json:"port"`
+	Username     string           `json:"username"`
+	Password     string           `json:"password"`
+	IsLocalIP    bool             `json:"is_local_ip"`
+	PortOccupied bool             `json:"port_occupied"`
+	Error        string           `json:"error,omitempty"`
+	LimitPolicy  LimitPolicyInput `json:"limitPolicy,omitempty"`
+}
+
+type LimitPolicyInput struct {
+	UplinkLimitBps   int64 `json:"uplinkLimitBps,omitempty"`
+	DownlinkLimitBps int64 `json:"downlinkLimitBps,omitempty"`
+	MaxConnections   int64 `json:"maxConnections,omitempty"`
 }
 
 func NewOrderService(db *gorm.DB, xray *XrayManager, log *zap.Logger) *OrderService {
@@ -522,6 +538,7 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	}
 
 	now := time.Now()
+	refreshTargets := []dedicatedEgressProbeTarget{}
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if order.Mode == model.OrderModeForward {
 			if err := s.syncForwardOrderItemsTx(tx, order, targetForwardOutboundIDs, targetPort, targetExpiresAt, now); err != nil {
@@ -630,7 +647,7 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 			orderStatus = model.OrderStatusExpired
 		}
 		if order.Mode == model.OrderModeDedicated && strings.TrimSpace(in.DedicatedEgressLines) != "" {
-			if err := s.updateDedicatedOrderEgressTx(tx, order, in.DedicatedEgressLines, now); err != nil {
+			if err := s.updateDedicatedOrderEgressTx(tx, order, in.DedicatedEgressLines, now, &refreshTargets); err != nil {
 				return err
 			}
 		}
@@ -665,6 +682,7 @@ func (s *OrderService) UpdateOrder(ctx context.Context, orderID uint, in UpdateO
 	}); err != nil {
 		return nil, err
 	}
+	s.scheduleDedicatedEgressRefresh(refreshTargets)
 
 	if !targetExpiresAt.After(now) {
 		if err := s.DeactivateOrder(ctx, order.ID, model.OrderStatusExpired); err != nil {
@@ -859,6 +877,10 @@ func (s *OrderService) SyncOrderRuntime(ctx context.Context, orderID uint) error
 	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
 		return err
 	}
+	return s.rebuildManagedRuntime(ctx)
+}
+
+func (s *OrderService) ReapplyLimitPolicyRuntime(ctx context.Context) error {
 	return s.rebuildManagedRuntime(ctx)
 }
 
@@ -1471,16 +1493,19 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 		for _, row := range validRows {
 			managed := false
 			item := model.OrderItem{
-				OrderID:      order.ID,
-				IP:           row.IP,
-				Port:         row.Port,
-				Username:     row.Username,
-				Password:     row.Password,
-				OutboundType: model.OutboundTypeDirect,
-				Managed:      false,
-				Status:       model.OrderItemStatusActive,
-				CreatedAt:    time.Now(),
-				UpdatedAt:    time.Now(),
+				OrderID:          order.ID,
+				IP:               row.IP,
+				Port:             row.Port,
+				Username:         row.Username,
+				Password:         row.Password,
+				OutboundType:     model.OutboundTypeDirect,
+				UplinkLimitBps:   nonNegativeInt64(row.LimitPolicy.UplinkLimitBps),
+				DownlinkLimitBps: nonNegativeInt64(row.LimitPolicy.DownlinkLimitBps),
+				MaxConnections:   nonNegativeInt64(row.LimitPolicy.MaxConnections),
+				Managed:          false,
+				Status:           model.OrderItemStatusActive,
+				CreatedAt:        time.Now(),
+				UpdatedAt:        time.Now(),
 			}
 			if host, ok := hostByIP[row.IP]; ok {
 				item.HostIPID = &host.ID
@@ -1762,6 +1787,13 @@ func normalizeResidentialCredentialStrategy(strategy string) string {
 		return ResidentialCredentialStrategyShared
 	}
 	return ResidentialCredentialStrategyPerLine
+}
+
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func parseResidentialCredentialLines(lines string) ([]ResidentialCredentialLine, error) {

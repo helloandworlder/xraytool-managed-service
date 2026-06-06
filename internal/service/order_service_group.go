@@ -68,6 +68,7 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 		DedicatedInboundID: uintPtrOrNil(inbound.ID),
 		DedicatedIngressID: uintPtrOrNil(ingress.ID),
 	}
+	refreshTargets := make([]dedicatedEgressProbeTarget, 0, len(egressRows))
 
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if err := s.ensureCustomerDedicatedEgressUniqueTx(tx, in.CustomerID, egressRows, nil); err != nil {
@@ -150,10 +151,11 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 				CreatedAt:   now,
 				UpdatedAt:   now,
 			}
-			fillDedicatedEgressProbe(&egress)
+			markDedicatedEgressProbePending(&egress)
 			if err := tx.Create(&egress).Error; err != nil {
 				return err
 			}
+			refreshTargets = append(refreshTargets, newDedicatedEgressProbeTarget(seq, egress.ID, child.ID, egress.Address, egress.Port, egress.Username, egress.Password))
 			country := normalizeCountryPrefix(egress.CountryCode)
 			childFinalName := fmt.Sprintf("%s-%s-%03d", head.Name, country, seq)
 			if err := tx.Model(&model.Order{}).Where("id = ?", child.ID).Updates(map[string]interface{}{"name": childFinalName, "updated_at": now}).Error; err != nil {
@@ -165,6 +167,7 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 	if err != nil {
 		return nil, err
 	}
+	s.scheduleDedicatedEgressRefresh(refreshTargets)
 
 	if err := s.rebuildManagedRuntime(ctx); err != nil {
 		s.log.Warn("sync runtime after dedicated create failed", zap.Error(err), zap.Uint("order_id", head.ID))
@@ -174,6 +177,88 @@ func (s *OrderService) createDedicatedOrder(ctx context.Context, in CreateOrderI
 		return nil, err
 	}
 	return head, nil
+}
+
+func (s *OrderService) CreateDedicatedVmessSupplement(ctx context.Context, in DedicatedVmessSupplementInput) (*model.Order, error) {
+	if in.CustomerID == 0 {
+		return nil, errors.New("customer_id is required")
+	}
+	vmessRows, err := parseDedicatedVmessLinkLines(in.VmessLinks)
+	if err != nil {
+		return nil, err
+	}
+	egressRows, err := parseDedicatedEgressLines(in.Socks5Lines)
+	if err != nil {
+		return nil, err
+	}
+	if len(vmessRows) != len(egressRows) {
+		return nil, fmt.Errorf("vmess link count %d not equal socks5 line count %d", len(vmessRows), len(egressRows))
+	}
+	first := vmessRows[0]
+	for i, row := range vmessRows {
+		if row.Port != first.Port {
+			return nil, fmt.Errorf("vmess link row %d port %d does not match first port %d", i+1, row.Port, first.Port)
+		}
+		if !strings.EqualFold(row.Domain, first.Domain) {
+			return nil, fmt.Errorf("vmess link row %d domain %s does not match first domain %s", i+1, row.Domain, first.Domain)
+		}
+	}
+
+	inbound := model.DedicatedInbound{}
+	if err := s.db.Where("protocol = ? and listen_port = ? and enabled = 1", model.DedicatedFeatureVmess, first.Port).First(&inbound).Error; err != nil {
+		return nil, fmt.Errorf("missing enabled vmess inbound for port %d: %w", first.Port, err)
+	}
+	ingress := model.DedicatedIngress{}
+	if err := s.db.Where("dedicated_inbound_id = ? and domain = ? and ingress_port = ?", inbound.ID, first.Domain, first.Port).First(&ingress).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		ingress = model.DedicatedIngress{
+			DedicatedInboundID: inbound.ID,
+			Name:               fmt.Sprintf("%s vmess %d", first.Domain, first.Port),
+			Domain:             first.Domain,
+			IngressPort:        first.Port,
+			CountryCode:        "us",
+			Region:             "United States",
+			Priority:           100,
+			Enabled:            true,
+			Notes:              "Auto-created from VMess supplement links",
+		}
+		if err := s.db.Create(&ingress).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	credentialLines := make([]string, 0, len(vmessRows))
+	for _, row := range vmessRows {
+		credentialLines = append(credentialLines, row.UUID)
+	}
+	egressLines := make([]string, 0, len(egressRows))
+	for _, row := range egressRows {
+		egressLines = append(egressLines, fmt.Sprintf("%s:%d:%s:%s", row.Address, row.Port, row.Username, row.Password))
+	}
+
+	order, err := s.CreateOrder(ctx, CreateOrderInput{
+		CustomerID:           in.CustomerID,
+		Name:                 in.Name,
+		DurationDay:          in.DurationDay,
+		ExpiresAt:            in.ExpiresAt,
+		Mode:                 model.OrderModeDedicated,
+		DedicatedProtocol:    model.DedicatedFeatureVmess,
+		DedicatedInboundID:   inbound.ID,
+		DedicatedIngressID:   ingress.ID,
+		DedicatedEgressLines: strings.Join(egressLines, "\n"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.UpdateGroupCredentials(ctx, order.ID, strings.Join(credentialLines, "\n"), false); err != nil {
+		return nil, err
+	}
+	if err := s.db.Preload("Customer").Preload("DedicatedEntry").Preload("DedicatedInbound").Preload("DedicatedIngress").Preload("Items").First(order, order.ID).Error; err != nil {
+		return nil, err
+	}
+	return order, nil
 }
 
 func uintPtrOrNil(v uint) *uint {
@@ -312,6 +397,7 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 		targetStatus = model.OrderStatusExpired
 		itemStatus = model.OrderItemStatusExpired
 	}
+	refreshTargets := []dedicatedEgressProbeTarget{}
 
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		children, err := s.loadGroupChildrenTx(tx, head.ID)
@@ -354,7 +440,7 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 		}
 
 		if strings.TrimSpace(in.DedicatedEgressLines) != "" {
-			if err := s.updateGroupSocks5Tx(tx, head, children, in.DedicatedEgressLines, now); err != nil {
+			if err := s.updateGroupSocks5Tx(tx, head, children, in.DedicatedEgressLines, now, &refreshTargets); err != nil {
 				return err
 			}
 		}
@@ -420,6 +506,7 @@ func (s *OrderService) updateOrderGroup(ctx context.Context, head model.Order, i
 	}); err != nil {
 		return err
 	}
+	s.scheduleDedicatedEgressRefresh(refreshTargets)
 	return s.rebuildManagedRuntime(ctx)
 }
 
@@ -600,6 +687,7 @@ func (s *OrderService) SplitOrder(ctx context.Context, orderID uint) ([]model.Or
 
 	now := time.Now()
 	children := []model.Order{}
+	refreshTargets := []dedicatedEgressProbeTarget{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		sort.Slice(head.Items, func(i, j int) bool { return head.Items[i].ID < head.Items[j].ID })
 		if err := tx.Model(&model.Order{}).Where("id = ?", head.ID).Updates(map[string]interface{}{
@@ -658,13 +746,14 @@ func (s *OrderService) SplitOrder(ctx context.Context, orderID uint) ([]model.Or
 					CreatedAt:   now,
 					UpdatedAt:   now,
 				}
-				fillDedicatedEgressProbe(&egress)
+				markDedicatedEgressProbePending(&egress)
 				if err := tx.Where("order_item_id = ?", item.ID).Delete(&model.DedicatedEgress{}).Error; err != nil {
 					return err
 				}
 				if err := tx.Create(&egress).Error; err != nil {
 					return err
 				}
+				refreshTargets = append(refreshTargets, newDedicatedEgressProbeTarget(i+1, egress.ID, child.ID, egress.Address, egress.Port, egress.Username, egress.Password))
 			}
 			children = append(children, child)
 			oldItemIDs = append(oldItemIDs, item.ID)
@@ -685,6 +774,7 @@ func (s *OrderService) SplitOrder(ctx context.Context, orderID uint) ([]model.Or
 	if err != nil {
 		return nil, err
 	}
+	s.scheduleDedicatedEgressRefresh(refreshTargets)
 	if err := s.rebuildManagedRuntime(ctx); err != nil {
 		s.log.Warn("sync runtime after split failed", zap.Error(err), zap.Uint("order_id", orderID))
 	}
@@ -704,15 +794,17 @@ func (s *OrderService) UpdateGroupSocks5(ctx context.Context, orderID uint, line
 		return errors.New("only group head order can batch update socks5")
 	}
 	now := time.Now()
+	refreshTargets := []dedicatedEgressProbeTarget{}
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		children, err := s.loadGroupChildrenTx(tx, head.ID)
 		if err != nil {
 			return err
 		}
-		return s.updateGroupSocks5Tx(tx, head, children, lines, now)
+		return s.updateGroupSocks5Tx(tx, head, children, lines, now, &refreshTargets)
 	}); err != nil {
 		return err
 	}
+	s.scheduleDedicatedEgressRefresh(refreshTargets)
 	return s.rebuildManagedRuntime(ctx)
 }
 
@@ -754,15 +846,17 @@ func (s *OrderService) UpdateGroupSocks5Selected(ctx context.Context, orderID ui
 		return errors.New("only group head order can batch update socks5")
 	}
 	now := time.Now()
+	refreshTargets := []dedicatedEgressProbeTarget{}
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		children, err := s.loadGroupChildrenByIDsTx(tx, head.ID, ids)
 		if err != nil {
 			return err
 		}
-		return s.updateGroupSocks5Tx(tx, head, children, lines, now)
+		return s.updateGroupSocks5Tx(tx, head, children, lines, now, &refreshTargets)
 	}); err != nil {
 		return err
 	}
+	s.scheduleDedicatedEgressRefresh(refreshTargets)
 	return s.rebuildManagedRuntime(ctx)
 }
 
@@ -1004,7 +1098,7 @@ func (s *OrderService) loadGroupChildrenByIDsTx(tx *gorm.DB, headID uint, childI
 	return rows, nil
 }
 
-func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, children []model.Order, lines string, now time.Time) error {
+func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, children []model.Order, lines string, now time.Time, refreshTargets *[]dedicatedEgressProbeTarget) error {
 	egRows, err := parseDedicatedEgressLines(lines)
 	if err != nil {
 		return err
@@ -1048,16 +1142,19 @@ func (s *OrderService) updateGroupSocks5Tx(tx *gorm.DB, head model.Order, childr
 		egress.Port = eg.Port
 		egress.Username = eg.Username
 		egress.Password = eg.Password
-		fillDedicatedEgressProbe(&egress)
+		markDedicatedEgressProbePending(&egress)
 		egress.UpdatedAt = now
 		if err := tx.Save(&egress).Error; err != nil {
 			return err
+		}
+		if refreshTargets != nil {
+			*refreshTargets = append(*refreshTargets, newDedicatedEgressProbeTarget(i+1, egress.ID, child.ID, egress.Address, egress.Port, egress.Username, egress.Password))
 		}
 	}
 	return nil
 }
 
-func (s *OrderService) updateDedicatedOrderEgressTx(tx *gorm.DB, order model.Order, lines string, now time.Time) error {
+func (s *OrderService) updateDedicatedOrderEgressTx(tx *gorm.DB, order model.Order, lines string, now time.Time, refreshTargets *[]dedicatedEgressProbeTarget) error {
 	if len(order.Items) == 0 {
 		return fmt.Errorf("order %d has no item", order.ID)
 	}
@@ -1096,10 +1193,13 @@ func (s *OrderService) updateDedicatedOrderEgressTx(tx *gorm.DB, order model.Ord
 		egress.Port = eg.Port
 		egress.Username = eg.Username
 		egress.Password = eg.Password
-		fillDedicatedEgressProbe(&egress)
+		markDedicatedEgressProbePending(&egress)
 		egress.UpdatedAt = now
 		if err := tx.Save(&egress).Error; err != nil {
 			return err
+		}
+		if refreshTargets != nil {
+			*refreshTargets = append(*refreshTargets, newDedicatedEgressProbeTarget(i+1, egress.ID, order.ID, egress.Address, egress.Port, egress.Username, egress.Password))
 		}
 	}
 	return nil
@@ -1258,26 +1358,4 @@ func generateDedicatedCredentialsByProtocol(protocol string) (string, string, st
 	default:
 		return username, password, uuid
 	}
-}
-
-func fillDedicatedEgressProbe(row *model.DedicatedEgress) {
-	if row == nil {
-		return
-	}
-	now := time.Now()
-	exitIP, country, region, err := probeSocksOutboundGeo(row.Address, row.Port, row.Username, row.Password)
-	row.LastProbedAt = &now
-	if err != nil {
-		row.ProbeStatus = "failed"
-		row.ProbeError = err.Error()
-		row.ExitIP = ""
-		row.CountryCode = ""
-		row.Region = ""
-		return
-	}
-	row.ProbeStatus = "ok"
-	row.ProbeError = ""
-	row.ExitIP = strings.TrimSpace(exitIP)
-	row.CountryCode = strings.ToLower(strings.TrimSpace(country))
-	row.Region = strings.TrimSpace(region)
 }

@@ -456,9 +456,9 @@ func (m *XrayManager) addInbound(ctx context.Context, client handlercmd.HandlerS
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	accs := make([]map[string]string, 0, len(keys))
+	accs := make([]map[string]interface{}, 0, len(keys))
 	for _, k := range keys {
-		accs = append(accs, map[string]string{"user": k, "pass": accounts[k]})
+		accs = append(accs, map[string]interface{}{"user": k, "pass": accounts[k]})
 	}
 
 	inboundObj := map[string]interface{}{
@@ -553,12 +553,15 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		ForwardPort        int
 		ForwardUsername    string
 		ForwardPassword    string
+		UplinkLimitBps     int64
+		DownlinkLimitBps   int64
+		MaxConnections     int64
 	}
 
 	var rows []activeRow
 	err := m.db.WithContext(ctx).
 		Table("order_items oi").
-		Select("oi.id as item_id, o.dedicated_inbound_id as dedicated_inbound_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, o.dedicated_protocol as order_protocol, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password").
+		Select("oi.id as item_id, o.dedicated_inbound_id as dedicated_inbound_id, oi.ip, oi.port, oi.username, oi.password, oi.vmess_uuid, oi.managed, o.mode as order_mode, o.dedicated_protocol as order_protocol, oi.outbound_type, oi.forward_address, oi.forward_port, oi.forward_username, oi.forward_password, oi.uplink_limit_bps, oi.downlink_limit_bps, oi.max_connections").
 		Joins("join orders o on o.id = oi.order_id").
 		Where("oi.status = ? and o.status = ? and o.expires_at > ?", model.OrderItemStatusActive, model.OrderStatusActive, time.Now()).
 		Scan(&rows).Error
@@ -593,6 +596,7 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 	vlessClientsByPort := map[int]map[string]string{}
 	vlessInboundByPort := map[int]model.DedicatedInbound{}
 	ssClientsByPort := map[int]map[string]string{}
+	limitPolicyByUser := map[string]limitPolicyFields{}
 	type managedItem struct {
 		itemID          uint
 		ip              string
@@ -612,6 +616,12 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		if !row.Managed {
 			continue
 		}
+		policy := limitPolicyFields{
+			UplinkLimitBps:   nonNegativeInt64(row.UplinkLimitBps),
+			DownlinkLimitBps: nonNegativeInt64(row.DownlinkLimitBps),
+			MaxConnections:   nonNegativeInt64(row.MaxConnections),
+		}
+		limitPolicyByUser[row.Username] = strictestLimitPolicy(limitPolicyByUser[row.Username], policy)
 		inboundTags := make([]string, 0, 4)
 		if strings.EqualFold(strings.TrimSpace(row.OrderMode), model.OrderModeDedicated) && row.Port > 0 {
 			protocol := strings.ToLower(strings.TrimSpace(row.OrderProtocol))
@@ -711,9 +721,11 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			users = append(users, u)
 		}
 		sort.Strings(users)
-		accs := make([]map[string]string, 0, len(users))
+		accs := make([]map[string]interface{}, 0, len(users))
 		for _, u := range users {
-			accs = append(accs, map[string]string{"user": u, "pass": accounts[u]})
+			acc := map[string]interface{}{"user": u, "pass": accounts[u]}
+			applyLimitPolicyToAccount(acc, limitPolicyByUser[u])
+			accs = append(accs, acc)
 		}
 		inbounds = append(inbounds, map[string]interface{}{
 			"tag":      managedMixedInboundTag(key.listen, key.port),
@@ -740,9 +752,11 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 			users = append(users, u)
 		}
 		sort.Strings(users)
-		accs := make([]map[string]string, 0, len(users))
+		accs := make([]map[string]interface{}, 0, len(users))
 		for _, u := range users {
-			accs = append(accs, map[string]string{"user": u, "pass": accounts[u]})
+			acc := map[string]interface{}{"user": u, "pass": accounts[u]}
+			applyLimitPolicyToAccount(acc, limitPolicyByUser[u])
+			accs = append(accs, acc)
 		}
 		inbounds = append(inbounds, map[string]interface{}{
 			"tag":      dedicatedInboundTag(model.DedicatedFeatureMixed, p),
@@ -771,11 +785,13 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		sort.Strings(users)
 		clients := make([]map[string]interface{}, 0, len(users))
 		for _, user := range users {
-			clients = append(clients, map[string]interface{}{
+			client := map[string]interface{}{
 				"id":    clientsMap[user],
 				"level": 0,
 				"email": user,
-			})
+			}
+			applyLimitPolicyToAccount(client, limitPolicyByUser[user])
+			clients = append(clients, client)
 		}
 		inbounds = append(inbounds, map[string]interface{}{
 			"tag":      dedicatedInboundTag(model.DedicatedFeatureVmess, p),
@@ -809,6 +825,7 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 				"email":      user,
 				"decryption": "none",
 			}
+			applyLimitPolicyToAccount(client, limitPolicyByUser[user])
 			if flow := strings.TrimSpace(inboundCfg.VlessFlow); flow != "" {
 				client["flow"] = flow
 			}
@@ -845,12 +862,14 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		sort.Strings(users)
 		clients := make([]map[string]interface{}, 0, len(users))
 		for _, user := range users {
-			clients = append(clients, map[string]interface{}{
+			client := map[string]interface{}{
 				"password": clientsMap[user],
 				"method":   DedicatedShadowsocksMethod,
 				"level":    0,
 				"email":    user,
-			})
+			}
+			applyLimitPolicyToAccount(client, limitPolicyByUser[user])
+			clients = append(clients, client)
 		}
 		inbounds = append(inbounds, map[string]interface{}{
 			"tag":      dedicatedInboundTag(model.DedicatedFeatureShadowsocks, p),
@@ -951,6 +970,42 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		return err
 	}
 	return os.WriteFile(m.cfg.XrayConfigPath, body, 0o644)
+}
+
+type limitPolicyFields struct {
+	UplinkLimitBps   int64
+	DownlinkLimitBps int64
+	MaxConnections   int64
+}
+
+func strictestLimitPolicy(current, candidate limitPolicyFields) limitPolicyFields {
+	return limitPolicyFields{
+		UplinkLimitBps:   strictestPositiveInt64(current.UplinkLimitBps, candidate.UplinkLimitBps),
+		DownlinkLimitBps: strictestPositiveInt64(current.DownlinkLimitBps, candidate.DownlinkLimitBps),
+		MaxConnections:   strictestPositiveInt64(current.MaxConnections, candidate.MaxConnections),
+	}
+}
+
+func strictestPositiveInt64(current, candidate int64) int64 {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
+}
+
+func applyLimitPolicyToAccount(account map[string]interface{}, policy limitPolicyFields) {
+	if policy.UplinkLimitBps > 0 {
+		account["uplinkLimitBps"] = policy.UplinkLimitBps
+	}
+	if policy.DownlinkLimitBps > 0 {
+		account["downlinkLimitBps"] = policy.DownlinkLimitBps
+	}
+	if policy.MaxConnections > 0 {
+		account["maxConnections"] = policy.MaxConnections
+	}
 }
 
 func isStatsUnsupportedErr(err error) bool {
