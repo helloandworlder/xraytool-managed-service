@@ -233,6 +233,20 @@ export interface RuntimeOverviewStat {
   updated_at: string
 }
 
+export interface RuntimeSyncTask {
+  id: number
+  status: 'pending' | 'running' | 'success' | 'failed'
+  reason: string
+  order_id?: number
+  attempts: number
+  error?: string
+  requested_at: string
+  started_at?: string
+  finished_at?: string
+  created_at: string
+  updated_at: string
+}
+
 export interface ResidentialCredentialConflictMember {
   order_id: number
   order_no: string

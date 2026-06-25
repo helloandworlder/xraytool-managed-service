@@ -96,6 +96,7 @@ func Run() error {
 	defer cancel()
 
 	go scheduler.Start(ctx)
+	orderSvc.StartRuntimeSyncWorker(ctx)
 
 	go func() {
 		<-ctx.Done()

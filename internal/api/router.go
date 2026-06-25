@@ -184,6 +184,8 @@ func (a *API) Router() *gin.Engine {
 	secure.POST("/settings/bark/test", a.testBark)
 	secure.GET("/runtime/customers", a.customerRuntimeStats)
 	secure.GET("/runtime/overview", a.runtimeOverview)
+	secure.GET("/runtime/sync-tasks", a.listRuntimeSyncTasks)
+	secure.POST("/runtime/sync-tasks/:id/retry", a.retryRuntimeSyncTask)
 	secure.POST("/runtime/limit-policy/reapply", a.reapplyLimitPolicyRuntime)
 	secure.GET("/db/backups", a.listBackups)
 	secure.POST("/db/backups", a.createBackup)
@@ -2326,9 +2328,11 @@ func (a *API) confirmImport(c *gin.Context) {
 	var exp time.Time
 	if req.ExpiresAt != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
-		if err == nil {
-			exp = t
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expires_at, expect RFC3339"})
+			return
 		}
+		exp = t
 	}
 	order, err := a.orders.ImportOrder(c.Request.Context(), customerID, req.OrderName, exp, req.Rows)
 	if err != nil {
@@ -2458,6 +2462,32 @@ func (a *API) taskLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) listRuntimeSyncTasks(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	rows, err := a.orders.ListRuntimeSyncTasks(service.ListRuntimeSyncTasksInput{
+		Status: strings.TrimSpace(c.Query("status")),
+		Limit:  limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) retryRuntimeSyncTask(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	task, err := a.orders.RetryRuntimeSyncTask(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, task)
 }
 
 func parseRuntimeLimit(raw string) int {

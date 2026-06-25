@@ -20,6 +20,11 @@ const (
 	OutboundTypeDirect = "direct"
 	OutboundTypeSocks5 = "socks5"
 
+	RuntimeSyncStatusPending = "pending"
+	RuntimeSyncStatusRunning = "running"
+	RuntimeSyncStatusSuccess = "success"
+	RuntimeSyncStatusFailed  = "failed"
+
 	DedicatedFeatureMixed       = "mixed"
 	DedicatedFeatureVmess       = "vmess"
 	DedicatedFeatureVless       = "vless"
@@ -273,6 +278,20 @@ type TaskLog struct {
 	Message   string    `gorm:"size:255" json:"message"`
 	Detail    string    `gorm:"type:text" json:"detail"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type RuntimeSyncTask struct {
+	ID          uint       `gorm:"primaryKey" json:"id"`
+	Status      string     `gorm:"size:32;not null;index" json:"status"`
+	Reason      string     `gorm:"size:128;not null;index" json:"reason"`
+	OrderID     *uint      `gorm:"index" json:"order_id,omitempty"`
+	Attempts    int        `gorm:"not null;default:0" json:"attempts"`
+	Error       string     `gorm:"type:text" json:"error,omitempty"`
+	RequestedAt time.Time  `gorm:"not null;index" json:"requested_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type RuntimeTrafficSnapshot struct {

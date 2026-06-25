@@ -378,6 +378,10 @@ func (s *OrderService) resolveDedicatedBindingForUpdateTx(tx *gorm.DB, protocol 
 }
 
 func (s *OrderService) rebuildManagedRuntime(ctx context.Context) error {
+	return s.enqueueRuntimeSyncTask("runtime_rebuild", nil)
+}
+
+func (s *OrderService) rebuildManagedRuntimeNow(ctx context.Context) error {
 	return s.xray.RebuildAndRestartManaged(ctx)
 }
 

@@ -873,11 +873,12 @@ func (s *OrderService) CreateOrder(ctx context.Context, in CreateOrderInput) (*m
 }
 
 func (s *OrderService) SyncOrderRuntime(ctx context.Context, orderID uint) error {
+	_ = ctx
 	var order model.Order
 	if err := s.db.Preload("Items").First(&order, orderID).Error; err != nil {
 		return err
 	}
-	return s.rebuildManagedRuntime(ctx)
+	return s.enqueueRuntimeSyncTask("order_sync", &orderID)
 }
 
 func (s *OrderService) ReapplyLimitPolicyRuntime(ctx context.Context) error {

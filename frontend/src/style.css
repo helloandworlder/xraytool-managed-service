@@ -1,39 +1,93 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+}
 
 body {
-  @apply bg-canvas text-ink;
-  background-image:
-    radial-gradient(circle at 8% 6%, rgba(3, 105, 161, 0.14), transparent 26%),
-    radial-gradient(circle at 84% 12%, rgba(15, 118, 110, 0.15), transparent 32%);
+  background: #f5f7fb;
+  color: #111827;
+}
+
+.app-layout {
   min-height: 100vh;
 }
 
-#app {
+.app-sider {
   min-height: 100vh;
 }
 
-.panel {
-  @apply rounded-2xl border border-slate-200/80 bg-white/90 shadow-panel backdrop-blur;
+.brand {
+  height: 72px;
+  padding: 16px 18px;
+  color: #fff;
 }
 
-.chip {
-  @apply inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold;
+.brand-title {
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
-.input {
-  @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition;
+.brand-subtitle {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
 }
 
-.input:focus {
-  @apply border-sea ring-2 ring-sea/20;
+.app-header {
+  height: 64px;
+  padding: 0 20px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.table-head {
-  @apply text-left text-xs font-semibold uppercase tracking-wide text-slate-500;
+.app-content {
+  padding: 20px;
 }
 
-.table-cell {
-  @apply border-t border-slate-100 py-2 text-sm;
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fb;
+}
+
+.login-card {
+  width: min(420px, calc(100vw - 32px));
+  border-radius: 8px;
+}
+
+.settings-descriptions {
+  margin-top: 16px;
+}
+
+.proxy-output {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #d9e3f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #111827;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+@media (max-width: 768px) {
+  .app-sider {
+    display: none;
+  }
+
+  .app-content {
+    padding: 12px;
+  }
 }

@@ -52,6 +52,7 @@ func Open(path string) (*gorm.DB, error) {
 		&model.XrayResource{},
 		&model.Setting{},
 		&model.TaskLog{},
+		&model.RuntimeSyncTask{},
 		&model.RuntimeTrafficSnapshot{},
 	); err != nil {
 		return nil, err
