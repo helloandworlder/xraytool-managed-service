@@ -1438,9 +1438,24 @@ func (s *OrderService) PreviewImportRows(rows []ImportPreviewRow) ([]ImportPrevi
 	return s.applyImportRowValidation(rows)
 }
 
-func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderName string, expiresAt time.Time, rows []ImportPreviewRow) (*model.Order, error) {
+func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderName string, expiresAt time.Time, externalReference string, rows []ImportPreviewRow) (*model.Order, error) {
 	if customerID == 0 {
 		return nil, errors.New("customer_id required")
+	}
+	externalReference = strings.TrimSpace(externalReference)
+	if len(externalReference) > 128 {
+		return nil, errors.New("external_reference too long")
+	}
+	if externalReference != "" {
+		var existing model.Order
+		if err := s.db.Where("external_reference = ?", externalReference).First(&existing).Error; err == nil {
+			if err := s.rebuildManagedRuntimeNow(ctx); err != nil {
+				return nil, fmt.Errorf("existing import runtime sync failed: %w", err)
+			}
+			return s.GetOrder(existing.ID)
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
 	}
 	rows, err := s.applyImportRowValidation(rows)
 	if err != nil {
@@ -1463,14 +1478,15 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 	}
 
 	order := &model.Order{
-		CustomerID: customerID,
-		Name:       orderName,
-		Mode:       model.OrderModeImport,
-		Status:     model.OrderStatusActive,
-		Quantity:   len(validRows),
-		Port:       validRows[0].Port,
-		StartsAt:   time.Now(),
-		ExpiresAt:  expiresAt,
+		CustomerID:        customerID,
+		Name:              orderName,
+		Mode:              model.OrderModeImport,
+		ExternalReference: externalReference,
+		Status:            model.OrderStatusActive,
+		Quantity:          len(validRows),
+		Port:              validRows[0].Port,
+		StartsAt:          time.Now(),
+		ExpiresAt:         expiresAt,
 	}
 
 	hostRows := []model.HostIP{}
@@ -1522,8 +1538,10 @@ func (s *OrderService) ImportOrder(ctx context.Context, customerID uint, orderNa
 		return nil, err
 	}
 
-	if err := s.SyncOrderRuntime(ctx, order.ID); err != nil {
-		s.log.Warn("sync runtime after import failed", zap.Error(err), zap.Uint("order_id", order.ID))
+	// The importer is used by the customer checkout path.  Do not report the
+	// order as confirmed until the generated Xray runtime has been rebuilt.
+	if err := s.rebuildManagedRuntimeNow(ctx); err != nil {
+		return nil, fmt.Errorf("import runtime sync failed: %w", err)
 	}
 	if err := s.db.Preload("Customer").Preload("Items").First(order, order.ID).Error; err != nil {
 		return nil, err

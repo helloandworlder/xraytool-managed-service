@@ -13,6 +13,7 @@ import (
 
 const runtimeSyncWorkerInterval = 2 * time.Second
 const runtimeSyncTaskTimeout = 2 * time.Minute
+const runtimeSyncMaxAttempts = 3
 
 type ListRuntimeSyncTasksInput struct {
 	Status string
@@ -21,6 +22,9 @@ type ListRuntimeSyncTasksInput struct {
 
 func (s *OrderService) StartRuntimeSyncWorker(ctx context.Context) {
 	go func() {
+		if err := s.recoverInterruptedRuntimeSyncTasks(); err != nil {
+			s.log.Warn("recover interrupted runtime sync tasks failed", zap.Error(err))
+		}
 		ticker := time.NewTicker(runtimeSyncWorkerInterval)
 		defer ticker.Stop()
 		for {
@@ -34,6 +38,18 @@ func (s *OrderService) StartRuntimeSyncWorker(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (s *OrderService) recoverInterruptedRuntimeSyncTasks() error {
+	now := time.Now()
+	return s.db.Model(&model.RuntimeSyncTask{}).
+		Where("status = ?", model.RuntimeSyncStatusRunning).
+		Updates(map[string]interface{}{
+			"status":     model.RuntimeSyncStatusPending,
+			"error":      "runtime sync interrupted by process restart; retrying",
+			"started_at": nil,
+			"updated_at": now,
+		}).Error
 }
 
 func (s *OrderService) ListRuntimeSyncTasks(in ListRuntimeSyncTasksInput) ([]model.RuntimeSyncTask, error) {
@@ -124,6 +140,16 @@ func (s *OrderService) processNextRuntimeSyncTask(ctx context.Context) error {
 	finishedAt := time.Now()
 	if err != nil {
 		s.log.Warn("runtime sync task failed", zap.Uint("task_id", task.ID), zap.Error(err))
+		if task.Attempts+1 < runtimeSyncMaxAttempts {
+			return s.db.Model(&model.RuntimeSyncTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+				"status":       model.RuntimeSyncStatusPending,
+				"error":        err.Error(),
+				"started_at":   nil,
+				"finished_at":  nil,
+				"requested_at": finishedAt,
+				"updated_at":   finishedAt,
+			}).Error
+		}
 		return s.db.Model(&model.RuntimeSyncTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
 			"status":      model.RuntimeSyncStatusFailed,
 			"error":       err.Error(),

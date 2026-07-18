@@ -2307,10 +2307,11 @@ func (a *API) previewImport(c *gin.Context) {
 
 func (a *API) confirmImport(c *gin.Context) {
 	var req struct {
-		CustomerID uint                       `json:"customer_id"`
-		OrderName  string                     `json:"order_name"`
-		ExpiresAt  string                     `json:"expires_at"`
-		Rows       []service.ImportPreviewRow `json:"rows"`
+		CustomerID        uint                       `json:"customer_id"`
+		OrderName         string                     `json:"order_name"`
+		ExpiresAt         string                     `json:"expires_at"`
+		ExternalReference string                     `json:"external_reference"`
+		Rows              []service.ImportPreviewRow `json:"rows"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2334,7 +2335,7 @@ func (a *API) confirmImport(c *gin.Context) {
 		}
 		exp = t
 	}
-	order, err := a.orders.ImportOrder(c.Request.Context(), customerID, req.OrderName, exp, req.Rows)
+	order, err := a.orders.ImportOrder(c.Request.Context(), customerID, req.OrderName, exp, req.ExternalReference, req.Rows)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

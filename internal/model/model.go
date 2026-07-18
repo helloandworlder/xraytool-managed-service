@@ -171,8 +171,11 @@ type DedicatedIngress struct {
 }
 
 type Order struct {
-	ID                 uint      `gorm:"primaryKey" json:"id"`
-	OrderNo            string    `gorm:"size:32;index" json:"order_no"`
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	OrderNo string `gorm:"size:32;index" json:"order_no"`
+	// ExternalReference is the caller supplied idempotency key for imports.
+	// It prevents a lost HTTP response from creating a second remote order.
+	ExternalReference  string    `gorm:"size:128;index" json:"external_reference,omitempty"`
 	CustomerID         uint      `gorm:"index;not null" json:"customer_id"`
 	GroupID            uint      `gorm:"index" json:"group_id"`
 	ParentOrderID      *uint     `gorm:"index" json:"parent_order_id,omitempty"`

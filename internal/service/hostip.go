@@ -59,6 +59,22 @@ func (s *HostIPService) ScanAndSync() ([]model.HostIP, error) {
 	}
 
 	now := time.Now()
+	// Do not keep addresses that disappeared from the host allocatable.  The
+	// GoSea-Light allocator consumes the enabled host-IP list directly; leaving
+	// stale rows enabled creates orders which Xray can no longer bind.
+	currentIPs := make([]string, 0, len(ipMap))
+	for ip := range ipMap {
+		currentIPs = append(currentIPs, ip)
+	}
+	if err := s.db.Model(&model.HostIP{}).
+		Where("is_local = ? and ip not in ?", true, currentIPs).
+		Updates(map[string]interface{}{
+			"is_local":   false,
+			"enabled":    false,
+			"updated_at": now,
+		}).Error; err != nil {
+		return nil, err
+	}
 	for _, row := range ipMap {
 		row.CreatedAt = now
 		row.UpdatedAt = now
@@ -67,6 +83,7 @@ func (s *HostIPService) ScanAndSync() ([]model.HostIP, error) {
 			DoUpdates: clause.Assignments(map[string]interface{}{
 				"is_public":  row.IsPublic,
 				"is_local":   row.IsLocal,
+				"enabled":    true,
 				"updated_at": row.UpdatedAt,
 			}),
 		}).Create(&row).Error; err != nil {

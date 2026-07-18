@@ -66,6 +66,9 @@ func Open(path string) (*gorm.DB, error) {
 	if err := migrateOrderNo(database); err != nil {
 		return nil, err
 	}
+	if err := migrateOrderExternalReferenceIndex(database); err != nil {
+		return nil, err
+	}
 	if err := migrateDedicatedEntryToInboundIngress(database); err != nil {
 		return nil, err
 	}
@@ -143,6 +146,13 @@ func migrateOrderNoIndex(database *gorm.DB) error {
 		return err
 	}
 	return database.Exec("CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no)").Error
+}
+
+func migrateOrderExternalReferenceIndex(database *gorm.DB) error {
+	if err := database.Exec("DROP INDEX IF EXISTS idx_orders_external_reference").Error; err != nil {
+		return err
+	}
+	return database.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_external_reference_nonempty ON orders(external_reference) WHERE external_reference <> ''").Error
 }
 
 func migrateRuntimeSnapshotIndex(database *gorm.DB) error {
