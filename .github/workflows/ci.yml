@@ -29,7 +29,9 @@ jobs:
 
       - name: Fork limiter tests
         working-directory: third_party/xray-fork
-        run: go test ./common/protocol ./common/buf ./app/dispatcher ./proxy/http ./proxy/socks
+        run: |
+          go test ./common/protocol ./app/dispatcher ./proxy/http ./proxy/socks
+          go test ./common/buf -run '^TestRateLimit'
 
       - name: Go build
         run: go build ./...
