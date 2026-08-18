@@ -71,8 +71,10 @@ jobs:
           fi
           echo "tag_name=${version}" >> "${GITHUB_OUTPUT}"
           echo "release_name=XrayTool ${version}" >> "${GITHUB_OUTPUT}"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
           echo "short_sha=$(git rev-parse --short HEAD)" >> "${GITHUB_OUTPUT}"
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+          echo "run_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >> "${GITHUB_OUTPUT}"
 
       - name: Run backend tests
         run: go test ./...
@@ -85,7 +87,7 @@ jobs:
 
       - name: Build backend binaries locally
         run: |
-          LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.short_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
+          LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.commit_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
           go build -ldflags "$LDFLAGS" ./...
 
       - name: Build binaries
@@ -98,7 +100,7 @@ jobs:
             curl -fsSL https://go.dev/dl/go${{ env.GO_VERSION }}.linux-amd64.tar.gz -o /tmp/go.tgz
             tar -C /usr/local -xzf /tmp/go.tgz
             export PATH=/usr/local/go/bin:$PATH
-            LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.short_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
+            LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.commit_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xraytool-linux-amd64 ./cmd/xraytool
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
           '
@@ -115,6 +117,17 @@ jobs:
             xraytool-linux-amd64.tar.gz \
             > checksums.txt
 
+      - name: Write release evidence manifest
+        run: |
+          {
+            printf 'release_version=%s\n' '${{ steps.meta.outputs.tag_name }}'
+            printf 'git_commit_sha=%s\n' '${{ steps.meta.outputs.commit_sha }}'
+            printf 'ci_run_url=%s\n' '${{ steps.meta.outputs.run_url }}'
+            printf 'build_time=%s\n' '${{ steps.meta.outputs.build_time }}'
+            printf 'artifact_sha256s=\n'
+            cat dist/checksums.txt
+          } > dist/release-manifest.txt
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -124,6 +137,7 @@ jobs:
             dist/xraytoolctl-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
             dist/checksums.txt
+            dist/release-manifest.txt
 
       - name: Create git tag for manual release
         if: github.event_name == 'workflow_dispatch'
@@ -151,5 +165,6 @@ jobs:
             dist/xraytoolctl-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
             dist/checksums.txt
+            dist/release-manifest.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

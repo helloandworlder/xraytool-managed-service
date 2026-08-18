@@ -881,10 +881,6 @@ func (s *OrderService) SyncOrderRuntime(ctx context.Context, orderID uint) error
 	return s.enqueueRuntimeSyncTask("order_sync", &orderID)
 }
 
-func (s *OrderService) ReapplyLimitPolicyRuntime(ctx context.Context) error {
-	return s.rebuildManagedRuntime(ctx)
-}
-
 func (s *OrderService) DeactivateOrder(ctx context.Context, orderID uint, status string) error {
 	if status == "" {
 		status = model.OrderStatusDisabled

@@ -95,7 +95,7 @@ func TestRebuildConfigFileSplitsManagedMixedInboundsByListenIP(t *testing.T) {
 					Pass             string `json:"pass"`
 					UplinkLimitBps   int64  `json:"uplinkLimitBps"`
 					DownlinkLimitBps int64  `json:"downlinkLimitBps"`
-					MaxConnections   int64  `json:"maxConnections"`
+					ConnLimit        int64  `json:"connLimit"`
 				} `json:"accounts"`
 			} `json:"settings"`
 		} `json:"inbounds"`
@@ -118,7 +118,7 @@ func TestRebuildConfigFileSplitsManagedMixedInboundsByListenIP(t *testing.T) {
 		}
 		if inbound.Listen == "203.0.113.51" {
 			account := inbound.Settings.Accounts[0]
-			if account.UplinkLimitBps != 1000000 || account.DownlinkLimitBps != 2000000 || account.MaxConnections != 2 {
+			if account.UplinkLimitBps != 1000000 || account.DownlinkLimitBps != 2000000 || account.ConnLimit != 2 {
 				t.Fatalf("unexpected limit policy account fields: %#v", account)
 			}
 		}

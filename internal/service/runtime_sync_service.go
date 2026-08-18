@@ -71,6 +71,14 @@ func (s *OrderService) ListRuntimeSyncTasks(in ListRuntimeSyncTasksInput) ([]mod
 	return rows, nil
 }
 
+func (s *OrderService) GetRuntimeSyncTask(id uint) (*model.RuntimeSyncTask, error) {
+	var task model.RuntimeSyncTask
+	if err := s.db.First(&task, id).Error; err != nil {
+		return nil, err
+	}
+	return &task, nil
+}
+
 func (s *OrderService) RetryRuntimeSyncTask(id uint) (*model.RuntimeSyncTask, error) {
 	var task model.RuntimeSyncTask
 	if err := s.db.First(&task, id).Error; err != nil {
@@ -83,6 +91,7 @@ func (s *OrderService) RetryRuntimeSyncTask(id uint) (*model.RuntimeSyncTask, er
 		"requested_at": now,
 		"started_at":   nil,
 		"finished_at":  nil,
+		"applied_at":   nil,
 		"updated_at":   now,
 	}).Error; err != nil {
 		return nil, err
@@ -162,6 +171,7 @@ func (s *OrderService) processNextRuntimeSyncTask(ctx context.Context) error {
 		"status":      model.RuntimeSyncStatusSuccess,
 		"error":       "",
 		"finished_at": finishedAt,
+		"applied_at":  finishedAt,
 		"updated_at":  finishedAt,
 	}).Error
 }

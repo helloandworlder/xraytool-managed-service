@@ -19,6 +19,7 @@ import (
 	"xraytool/internal/config"
 	"xraytool/internal/model"
 
+	fairsharecmd "github.com/xtls/xray-core/app/fairshare/command"
 	handlercmd "github.com/xtls/xray-core/app/proxyman/command"
 	routercmd "github.com/xtls/xray-core/app/router/command"
 	statscmd "github.com/xtls/xray-core/app/stats/command"
@@ -131,6 +132,9 @@ func (m *XrayManager) RestartManaged() error {
 	if _, err := os.Stat(m.cfg.XrayBinaryPath); err != nil {
 		return fmt.Errorf("xray binary not found: %w", err)
 	}
+	if err := m.validateManagedConfig(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(m.cfg.XrayConfigPath), 0o755); err != nil {
 		return err
 	}
@@ -149,6 +153,12 @@ func (m *XrayManager) RestartManaged() error {
 		return err
 	}
 	m.cmd = cmd
+	if err := m.waitForXrayAPI(context.Background()); err != nil {
+		_ = cmd.Process.Kill()
+		m.cmd = nil
+		_ = logFile.Close()
+		return fmt.Errorf("managed xray did not become ready: %w", err)
+	}
 
 	go func() {
 		err := cmd.Wait()
@@ -161,6 +171,34 @@ func (m *XrayManager) RestartManaged() error {
 	return nil
 }
 
+func (m *XrayManager) validateManagedConfig() error {
+	cmd := exec.Command(m.cfg.XrayBinaryPath, "run", "-test", "-c", m.cfg.XrayConfigPath)
+	cmd.Dir = m.cfg.XrayWorkDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("xray config validation failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func (m *XrayManager) waitForXrayAPI(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	var lastErr error
+	for {
+		conn, err := m.dial(ctx)
+		if err == nil {
+			return conn.Close()
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func (m *XrayManager) ApplyOrFallback(ctx context.Context, fn func(ctx context.Context) error) error {
 	err := fn(ctx)
 	if err == nil {
@@ -170,7 +208,7 @@ func (m *XrayManager) ApplyOrFallback(ctx context.Context, fn func(ctx context.C
 	if syncErr := m.RebuildAndRestartManaged(ctx); syncErr != nil {
 		return fmt.Errorf("grpc err: %w, runtime sync err: %v", err, syncErr)
 	}
-	return nil
+	return fmt.Errorf("grpc apply failed; config rebuild completed but dynamic apply was not confirmed: %w", err)
 }
 
 func (m *XrayManager) RebuildAndRestartManaged(ctx context.Context) error {
@@ -205,7 +243,10 @@ func (m *XrayManager) rebuildAndRestartManaged(ctx context.Context) error {
 	if err := m.RebuildConfigFile(ctx); err != nil {
 		return err
 	}
-	return m.RestartManaged()
+	if err := m.RestartManaged(); err != nil {
+		return err
+	}
+	return m.ApplyInstanceLimit(ctx)
 }
 
 func (m *XrayManager) dial(ctx context.Context) (*grpc.ClientConn, error) {
@@ -215,6 +256,41 @@ func (m *XrayManager) dial(ctx context.Context) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
 	)
+}
+
+func (m *XrayManager) ApplyInstanceLimit(ctx context.Context) error {
+	policy, err := loadRuntimeLimitPolicyValues(ctx, m.db, m.cfg.InstanceUplinkLimitBps, m.cfg.InstanceDownlinkLimitBps)
+	if err != nil {
+		return err
+	}
+	return m.ApplyInstanceLimitValues(ctx, policy.UplinkLimitBps, policy.DownlinkLimitBps)
+}
+
+func (m *XrayManager) ApplyInstanceLimitValues(ctx context.Context, uplinkLimitBps, downlinkLimitBps uint64) error {
+	conn, err := m.dial(ctx)
+	if err != nil {
+		m.log.Warn("instance limit apply dial failed", zap.Uint64("uplink_limit_bps", uplinkLimitBps), zap.Uint64("downlink_limit_bps", downlinkLimitBps), zap.Error(err))
+		return fmt.Errorf("dial xray fair-share service: %w", err)
+	}
+	defer conn.Close()
+
+	_, err = fairsharecmd.NewFairShareServiceClient(conn).SetNodeBandwidth(ctx, &fairsharecmd.SetNodeBandwidthRequest{
+		UplinkBps:   bitsToBytesPerSecond(uplinkLimitBps),
+		DownlinkBps: bitsToBytesPerSecond(downlinkLimitBps),
+	})
+	if err != nil {
+		m.log.Warn("instance limit apply failed", zap.Uint64("uplink_limit_bps", uplinkLimitBps), zap.Uint64("downlink_limit_bps", downlinkLimitBps), zap.Error(err))
+		return fmt.Errorf("apply instance limit uplink=%d downlink=%d bit/s: %w", uplinkLimitBps, downlinkLimitBps, err)
+	}
+	m.log.Info("instance limit applied", zap.Uint64("uplink_limit_bps", uplinkLimitBps), zap.Uint64("downlink_limit_bps", downlinkLimitBps), zap.Uint64("uplink_runtime_bytes_per_second", bitsToBytesPerSecond(uplinkLimitBps)), zap.Uint64("downlink_runtime_bytes_per_second", bitsToBytesPerSecond(downlinkLimitBps)))
+	return nil
+}
+
+func bitsToBytesPerSecond(bits uint64) uint64 {
+	if bits == 0 {
+		return 0
+	}
+	return (bits + 7) / 8
 }
 
 func (m *XrayManager) QueryUserTraffic(ctx context.Context) (map[string]int64, error) {
@@ -936,7 +1012,7 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 		},
 		"api": map[string]interface{}{
 			"tag":      "api",
-			"services": []string{"HandlerService", "RoutingService", "StatsService"},
+			"services": []string{"HandlerService", "RoutingService", "StatsService", "FairShareService"},
 		},
 		"stats": map[string]interface{}{},
 		"policy": map[string]interface{}{
@@ -969,7 +1045,28 @@ func (m *XrayManager) RebuildConfigFile(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(m.cfg.XrayConfigPath), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(m.cfg.XrayConfigPath, body, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(m.cfg.XrayConfigPath), ".config.json.tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, m.cfg.XrayConfigPath)
 }
 
 type limitPolicyFields struct {
@@ -1004,7 +1101,7 @@ func applyLimitPolicyToAccount(account map[string]interface{}, policy limitPolic
 		account["downlinkLimitBps"] = policy.DownlinkLimitBps
 	}
 	if policy.MaxConnections > 0 {
-		account["maxConnections"] = policy.MaxConnections
+		account["connLimit"] = policy.MaxConnections
 	}
 }
 
