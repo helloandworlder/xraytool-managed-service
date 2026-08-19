@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"xraytool/internal/config"
 	"xraytool/internal/model"
 
 	"gorm.io/gorm"
@@ -39,6 +40,13 @@ type RuntimeLimitPolicyValues struct {
 	PolicyVersion    uint64 `json:"policyVersion"`
 }
 
+func normalizeRuntimeLimitBps(value uint64) uint64 {
+	if value == 0 {
+		return config.DefaultLimitBps
+	}
+	return value
+}
+
 // ReapplyLimitPolicyRuntime persists the desired instance policy before
 // enqueueing work. The worker later marks the task applied only after Xray's
 // fork accepts the direction-specific runtime command.
@@ -53,10 +61,10 @@ func (s *OrderService) ReapplyLimitPolicyRuntime(ctx context.Context, in Runtime
 		}
 		desired = current
 		if in.UplinkLimitBps != nil {
-			desired.UplinkLimitBps = *in.UplinkLimitBps
+			desired.UplinkLimitBps = normalizeRuntimeLimitBps(*in.UplinkLimitBps)
 		}
 		if in.DownlinkLimitBps != nil {
-			desired.DownlinkLimitBps = *in.DownlinkLimitBps
+			desired.DownlinkLimitBps = normalizeRuntimeLimitBps(*in.DownlinkLimitBps)
 		}
 		desired.PolicyVersion++
 		for key, value := range map[string]string{
@@ -112,6 +120,8 @@ func normalizeRuntimeUserPolicies(input []RuntimeUserLimitPolicy) []RuntimeUserL
 			continue
 		}
 		item.Username = username
+		item.UplinkLimitBps = normalizeRuntimeLimitBps(item.UplinkLimitBps)
+		item.DownlinkLimitBps = normalizeRuntimeLimitBps(item.DownlinkLimitBps)
 		current, ok := byUsername[username]
 		if !ok {
 			byUsername[username] = item
@@ -142,8 +152,8 @@ func strictestPositiveUint64(current, candidate uint64) uint64 {
 
 func loadRuntimeLimitPolicyValues(ctx context.Context, db *gorm.DB, fallbackUplink, fallbackDownlink uint64) (RuntimeLimitPolicyValues, error) {
 	values := RuntimeLimitPolicyValues{
-		UplinkLimitBps:   fallbackUplink,
-		DownlinkLimitBps: fallbackDownlink,
+		UplinkLimitBps:   normalizeRuntimeLimitBps(fallbackUplink),
+		DownlinkLimitBps: normalizeRuntimeLimitBps(fallbackDownlink),
 	}
 	if db == nil {
 		return values, nil
@@ -163,9 +173,9 @@ func loadRuntimeLimitPolicyValues(ctx context.Context, db *gorm.DB, fallbackUpli
 		}
 		switch row.Key {
 		case runtimeInstanceUplinkLimitKey:
-			values.UplinkLimitBps = n
+			values.UplinkLimitBps = normalizeRuntimeLimitBps(n)
 		case runtimeInstanceDownlinkLimitKey:
-			values.DownlinkLimitBps = n
+			values.DownlinkLimitBps = normalizeRuntimeLimitBps(n)
 		case runtimeLimitPolicyVersionKey:
 			values.PolicyVersion = n
 		}

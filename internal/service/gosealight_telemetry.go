@@ -270,8 +270,8 @@ func (s *GoSeaLightTelemetryService) runtimeLimitPolicyTelemetry() goSeaTelemetr
 		state.LastApplyError = err.Error()
 		return state
 	}
-	state.TargetUplinkLimitBPS = parseTelemetryUint(settings["runtime_instance_uplink_limit_bps"])
-	state.TargetDownlinkLimitBPS = parseTelemetryUint(settings["runtime_instance_downlink_limit_bps"])
+	state.TargetUplinkLimitBPS = normalizeRuntimeLimitBps(parseTelemetryUint(settings["runtime_instance_uplink_limit_bps"]))
+	state.TargetDownlinkLimitBPS = normalizeRuntimeLimitBps(parseTelemetryUint(settings["runtime_instance_downlink_limit_bps"]))
 	state.PolicyVersion = parseTelemetryUint(settings["runtime_limit_policy_version"])
 
 	var latest model.RuntimeSyncTask

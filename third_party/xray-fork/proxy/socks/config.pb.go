@@ -128,7 +128,8 @@ func (x *Account) GetPassword() string {
 // UserAccount carries one boot-time user with protocol-agnostic per-user runtime
 // limits, so a mixed/socks inbound enforces bandwidth + connection caps for users
 // baked in at startup (the runtime AddUser path carries the same limits on the
-// top-level protocol.User). 0 means unlimited.
+// top-level protocol.User). A zero bandwidth value uses the managed
+// 30,000,000 bit/s default.
 type UserAccount struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Username         string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`

@@ -11,7 +11,7 @@ the dispatcher, stable per-account user objects, node fair-share scheduling,
 and regression tests for upload/download direction mapping and splice bypass.
 
 GoSea-Light policy values use bit/s. The first default is exactly
-15,000,000 bit/s, which is 1,875,000 bytes/s for the byte-oriented limiter.
+30,000,000 bit/s, which is 3,750,000 bytes/s for the byte-oriented limiter.
 
 ## Decision
 

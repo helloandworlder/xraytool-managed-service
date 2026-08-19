@@ -131,6 +131,17 @@ func TestRebuildConfigFileSplitsManagedMixedInboundsByListenIP(t *testing.T) {
 	}
 }
 
+func TestApplyLimitPolicyToAccountDefaultsMissingSpeedTo30Mbps(t *testing.T) {
+	account := map[string]interface{}{}
+	applyLimitPolicyToAccount(account, limitPolicyFields{})
+	if got := account["uplinkLimitBps"]; got != int64(30_000_000) {
+		t.Fatalf("default uplink limit = %#v, want 30000000", got)
+	}
+	if got := account["downlinkLimitBps"]; got != int64(30_000_000) {
+		t.Fatalf("default downlink limit = %#v, want 30000000", got)
+	}
+}
+
 func TestRebuildConfigFileRejectsDuplicateDedicatedMixedUsernameOnSharedPort(t *testing.T) {
 	db := setupOrderServiceTestDB(t)
 	now := time.Now()

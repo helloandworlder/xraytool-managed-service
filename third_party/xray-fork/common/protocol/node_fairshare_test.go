@@ -57,11 +57,11 @@ func TestRecomputeFairShareSplit(t *testing.T) {
 	}
 }
 
-// unlimited 用户（own=0）也纳入公平：eff=share，不绕过节点公平。
-func TestRecomputeUnlimitedUserCappedByShare(t *testing.T) {
+// 默认 30Mbps 用户也纳入公平：拥挤时 eff=share，不绕过节点公平。
+func TestRecomputeDefaultSpeedUserCappedByShare(t *testing.T) {
 	s := newSched(60_000_000)
-	a := memberFor(s, "a", 0) // unlimited
-	b := memberFor(s, "b", 0) // unlimited
+	a := memberFor(s, "a", 400_000_000) // own=50MB/s > share
+	b := memberFor(s, "b", 400_000_000) // own=50MB/s > share
 	a.bytes.Store(1 << 20)
 	b.bytes.Store(1 << 20)
 	s.recompute()
@@ -147,7 +147,7 @@ func TestMemberConvertsOwnLimitBitsToRuntimeBytes(t *testing.T) {
 func TestFairShareCongestionPhysicalSplit(t *testing.T) {
 	s := newSched(1_000_000) // 1MB/s
 	for i := 0; i < 20; i++ {
-		m := memberFor(s, string(rune('a'+i)), 0)
+		m := memberFor(s, string(rune('a'+i)), 400_000_000)
 		addDelta(m, 1<<20)
 	}
 	s.recompute()
@@ -163,7 +163,7 @@ func TestFairShareCongestionPhysicalSplit(t *testing.T) {
 func TestFairShareHardFloor(t *testing.T) {
 	s := newSched(160_000) // 160KB/s
 	for i := 0; i < 50; i++ {
-		m := memberFor(s, "u"+string(rune('0'+i%10))+string(rune('a'+i/10)), 0)
+		m := memberFor(s, "u"+string(rune('0'+i%10))+string(rune('a'+i/10)), 400_000_000)
 		addDelta(m, 1<<20)
 	}
 	s.recompute()
@@ -206,8 +206,8 @@ func TestSetFloorsOverride(t *testing.T) {
 // 退出需连续 3 tick 增量 < 1KB，中间带 [1KB,4KB) 保持活跃。
 func TestActiveHysteresis(t *testing.T) {
 	s := newSched(8_000_000)
-	a := memberFor(s, "steady", 0)
-	b := memberFor(s, "bursty", 0)
+	a := memberFor(s, "steady", 400_000_000)
+	b := memberFor(s, "bursty", 400_000_000)
 
 	tick := func(aDelta, bDelta uint64) {
 		addDelta(a, aDelta)
@@ -231,7 +231,7 @@ func TestActiveHysteresis(t *testing.T) {
 	if got := limitB(); got != 4_000_000 {
 		t.Errorf("tick4 (mid-band): want still 4000000, got %d", got)
 	}
-	// 连续 3 tick < 1KB → 退出活跃 → 还原（own=0 → avail=8MB）
+	// 连续 3 tick < 1KB → 退出活跃 → 还原到节点上限（8MB/s）
 	tick(1<<20, 0)
 	tick(1<<20, 0)
 	tick(1<<20, 0)
@@ -239,7 +239,7 @@ func TestActiveHysteresis(t *testing.T) {
 		t.Errorf("after 3 idle ticks: want restored 8000000, got %d", got)
 	}
 	if got := int(a.upLimiter.Limit()); got != 8_000_000 {
-		t.Errorf("steady alone: want full avail 8000000, got %d", got)
+		t.Errorf("steady alone: want node ceiling 8000000, got %d", got)
 	}
 }
 
@@ -275,8 +275,8 @@ func TestMemberLazyCleanup(t *testing.T) {
 // recompute 同步更新 burst = 1/8 秒配额（floor 到单缓冲），防低速时段积累整秒突发。
 func TestSetLimitUpdatesBurst(t *testing.T) {
 	s := newSched(1_000_000)
-	a := memberFor(s, "a", 0)
-	b := memberFor(s, "b", 0)
+	a := memberFor(s, "a", 400_000_000)
+	b := memberFor(s, "b", 400_000_000)
 	addDelta(a, 1<<20)
 	addDelta(b, 1<<20)
 	s.recompute() // share = 500_000 → burst 62_500

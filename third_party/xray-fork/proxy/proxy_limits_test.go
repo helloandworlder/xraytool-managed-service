@@ -13,7 +13,7 @@ func TestRequiresBufferedCopyForGovernedUser(t *testing.T) {
 		want bool
 	}{
 		{name: "anonymous user", want: false},
-		{name: "unlimited user", user: &protocol.MemoryUser{}, want: false},
+		{name: "default-speed user", user: &protocol.MemoryUser{Email: "default@example.test"}, want: true},
 		{name: "bandwidth limited user", user: &protocol.MemoryUser{BandwidthBps: 10_000_000}, want: true},
 		{name: "connection limited user", user: &protocol.MemoryUser{ConnLimit: 200}, want: true},
 	}

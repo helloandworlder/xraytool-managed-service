@@ -17,9 +17,8 @@ import (
 //   - 活跃判定走字节增量（限速 wrapper 自己累加，无需耦合 stats）。
 //
 // 与 per-user 限速共存：节点公平是【正交的第二层桶】，套在 per-user 桶之外（双向）。
-// 这样天然处理两个 caveat：
-//   - unlimited 用户（BandwidthBps==0）：per-user 桶为 nil，但节点公平仍给它挂桶纳入公平，
-//     own_limit 视为 ∞ → eff = share，不会绕过节点公平打满节点。
+// 账号缺省速度由 MemoryUser 解析为 30Mbps，因此不会因遗漏配置而绕过用户桶；
+// 节点公平仍会把它纳入活跃用户分配。
 //   - 双向出口：per-user 限速只在 uplink(Reader)；节点公平 Reader+Writer 都挂，
 //     使「节点总出口」按双向合计语义生效。
 //
@@ -90,7 +89,8 @@ const (
 	fairBurstFloorB = 8 * 1024
 )
 
-// SetNodeBandwidth 设置节点总出口上限（字节/秒，已含 headroom 折算）。0=关闭节点级公平。
+// SetNodeBandwidth 设置节点总出口上限（字节/秒，已含 headroom 折算）。底层测试/调用
+// 仍可用 0 关闭调度器；XrayTool 控制面在未配置时会下发 30Mbps 默认值。
 // 由 node-agent 收到 NodeConfig 后经 SetNodeBandwidth command API 调用。
 func (s *NodeFairScheduler) SetNodeBandwidth(availBps uint64) {
 	s.SetNodeBandwidthDirections(availBps, availBps)
@@ -234,7 +234,7 @@ func (s *NodeFairScheduler) Member(user *MemoryUser) (up, down *rate.Limiter) {
 	defer s.mu.Unlock()
 	m := s.members[user.Email]
 	if m == nil {
-		// 初始速率：min(own, avail)。own=0(unlimited) → avail。下一轮 recompute 收敛到 share。
+		// 初始速率：min(own, avail)。账号速度缺省已在 MemoryUser 上解析为 30Mbps。
 		uplinkInit, downlinkInit := s.directionBps()
 		if own := fairOwnLimitBytesPerSecond(user, true); own > 0 && (uplinkInit == 0 || own < uplinkInit) {
 			uplinkInit = own
@@ -320,7 +320,7 @@ func (s *NodeFairScheduler) run() {
 //	active := 滞回判定（进 4KB/tick、退 <1KB 连续 3 tick）
 //	share := fairShare(avail, len(active))   // 软地板 0.5Mbps 护栏 + 绝对硬地板 16KB/s
 //	活跃: SetLimit(max(min(own_or_inf, share), hard))；非活跃: 还原 own_limit
-//	（own=0 → 还原到 avail，不压制）。顺带惰性清理长期无流量无连接的成员。
+//	（own=0 仅作为内部无限值兜底；正常账号缺省为 30Mbps）。顺带惰性清理长期无流量无连接的成员。
 func (s *NodeFairScheduler) recompute() {
 	uplinkAvail, downlinkAvail := s.directionBps()
 
@@ -424,7 +424,7 @@ func fairDirectionLimit(share, own, hard uint64) uint64 {
 	return eff
 }
 
-// applyOwn 把成员还原到个人上限（own=0 unlimited → 还原到 avail，不压制但仍受节点顶约束）。
+// applyOwn 把成员还原到个人上限（内部 own=0 还原到 avail；正常账号缺省为 30Mbps）。
 func (s *NodeFairScheduler) applyOwn(m *fairMember, uplinkAvail, downlinkAvail uint64) {
 	uplinkOwn := fairOwnLimitBytesPerSecond(m.user, true)
 	downlinkOwn := fairOwnLimitBytesPerSecond(m.user, false)

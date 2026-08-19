@@ -36,9 +36,10 @@ func accountUsername(u *protocol.MemoryUser) string {
 // UserStore is an in-memory, concurrency-safe username->user table shared by the
 // http and (via embedding) mixed/socks inbounds. It is the per-user limit carrier
 // those static proxies historically lacked: authentication returns a single
-// stable *protocol.MemoryUser per username, so the dispatcher's bandwidth, fair-
-// share and connection-cap enforcement (all keyed off the *MemoryUser instance)
-// apply to mixed exactly as they do to vless. It also backs proxy.UserManager so
+// stable *protocol.MemoryUser per username, so connection handling remains
+// consistent across every protocol. Bandwidth and fair-share state are keyed
+// by account email, while connection-cap state follows the active user object.
+// This applies to mixed exactly as it does to vless. It also backs proxy.UserManager so
 // users can be added/removed at runtime without rebuilding the inbound.
 type UserStore struct {
 	mu       sync.RWMutex
@@ -104,8 +105,8 @@ func (s *UserStore) Empty() bool {
 }
 
 // Authenticate verifies username/password and returns the shared *MemoryUser for
-// that username. The same pointer is returned for every connection of a user, so
-// fair-share bandwidth and connection counting stay per-user, not per-connection.
+// that username. The same pointer is returned for every connection of a user,
+// and the runtime speed limiter also shares state by the account email.
 func (s *UserStore) Authenticate(username, password string) (*protocol.MemoryUser, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -145,8 +146,8 @@ func (s *UserStore) Add(u *protocol.MemoryUser) error {
 // credentials and per-user limits. It is the UpdateUser path: a single atomic
 // swap that avoids the remove+add round trip and the transient window in which
 // the email has no user. The old *MemoryUser's runtime limiter and connection
-// counter are reset because both maps are keyed by the user pointer and Update
-// installs a fresh pointer; without the reset the old map entries would leak.
+// counter are reset while Update installs a fresh pointer; the speed limiter is
+// keyed by email and the connection counter follows the active pointer.
 // The new MemoryUser carries the new bandwidth_bps / conn_limit, so the
 // dispatcher's per-user enforcement picks up the new caps for subsequent
 // connections. Returns an error if the email is not already present so callers

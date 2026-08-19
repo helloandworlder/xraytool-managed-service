@@ -9,7 +9,9 @@ option java_package = "com.xray.app.fairshare.command";
 option java_multiple_files = true;
 
 service FairShareService {
-  // SetNodeBandwidth 设置节点总出口上限（avail_bps，已含 headroom 折算）。0=关闭节点级公平。
+  // SetNodeBandwidth 设置节点总出口上限（avail_bps，已含 headroom 折算）。
+  // Directional zero values use the managed 30,000,000 bit/s default; a legacy
+  // non-zero avail_bps request remains supported for compatibility.
   rpc SetNodeBandwidth(SetNodeBandwidthRequest) returns (SetNodeBandwidthResponse) {}
 }
 

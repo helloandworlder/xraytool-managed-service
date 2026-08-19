@@ -18,9 +18,15 @@ func (s *fairShareServer) SetNodeBandwidth(ctx context.Context, req *SetNodeBand
 	// 该字段 → 向后兼容默认 0.5Mbps 软地板 / 16KB/s 硬地板）。
 	protocol.FairScheduler().SetFloors(req.GetSoftFloorBps(), req.GetHardFloorBps())
 	uplink, downlink := req.GetUplinkBps(), req.GetDownlinkBps()
-	if uplink == 0 && downlink == 0 {
+	if uplink == 0 && downlink == 0 && req.GetAvailBps() > 0 {
 		protocol.FairScheduler().SetNodeBandwidth(req.GetAvailBps())
 	} else {
+		if uplink == 0 {
+			uplink = protocol.DefaultLimitBytesPerSecond
+		}
+		if downlink == 0 {
+			downlink = protocol.DefaultLimitBytesPerSecond
+		}
 		protocol.FairScheduler().SetNodeBandwidthDirections(uplink, downlink)
 	}
 	return &SetNodeBandwidthResponse{}, nil

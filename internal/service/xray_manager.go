@@ -270,6 +270,8 @@ func (m *XrayManager) ApplyInstanceLimit(ctx context.Context) error {
 }
 
 func (m *XrayManager) ApplyInstanceLimitValues(ctx context.Context, uplinkLimitBps, downlinkLimitBps uint64) error {
+	uplinkLimitBps = normalizeRuntimeLimitBps(uplinkLimitBps)
+	downlinkLimitBps = normalizeRuntimeLimitBps(downlinkLimitBps)
 	conn, err := m.dial(ctx)
 	if err != nil {
 		m.log.Warn("instance limit apply dial failed", zap.Uint64("uplink_limit_bps", uplinkLimitBps), zap.Uint64("downlink_limit_bps", downlinkLimitBps), zap.Error(err))
@@ -1097,12 +1099,16 @@ func strictestPositiveInt64(current, candidate int64) int64 {
 }
 
 func applyLimitPolicyToAccount(account map[string]interface{}, policy limitPolicyFields) {
-	if policy.UplinkLimitBps > 0 {
-		account["uplinkLimitBps"] = policy.UplinkLimitBps
+	uplink := policy.UplinkLimitBps
+	if uplink <= 0 {
+		uplink = int64(config.DefaultLimitBps)
 	}
-	if policy.DownlinkLimitBps > 0 {
-		account["downlinkLimitBps"] = policy.DownlinkLimitBps
+	downlink := policy.DownlinkLimitBps
+	if downlink <= 0 {
+		downlink = int64(config.DefaultLimitBps)
 	}
+	account["uplinkLimitBps"] = uplink
+	account["downlinkLimitBps"] = downlink
 	if policy.MaxConnections > 0 {
 		account["connLimit"] = policy.MaxConnections
 	}

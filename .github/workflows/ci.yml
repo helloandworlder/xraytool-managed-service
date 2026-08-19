@@ -49,6 +49,9 @@ jobs:
             COMMIT_SHA=${{ github.sha }}
             BUILD_TIME=${{ github.run_started_at }}
 
+      - name: Rolling upgrade contract
+        run: bash scripts/test_rolling_upgrade_contract.sh
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

@@ -75,8 +75,9 @@ func (x *Account) GetPassword() string {
 }
 
 // UserAccount carries one boot-time user with protocol-agnostic per-user runtime
-// limits (bandwidth + connection caps). 0 means unlimited. The runtime AddUser
-// path carries the same limits on the top-level protocol.User instead.
+// limits (bandwidth + connection caps). A zero bandwidth value uses the
+// managed 30,000,000 bit/s default. The runtime AddUser path carries the same
+// limits on the top-level protocol.User instead.
 type UserAccount struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	Username         string                 `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`

@@ -519,12 +519,16 @@ install_runtime_files() {
 }
 
 write_systemd_and_env() {
-  local unit_template unit_target env_file jwt_secret backup_file
+  local unit_template unit_target env_file jwt_secret backup_file instance_uplink instance_downlink
   unit_template="${INSTALL_DIR}/deploy/systemd/xraytool.service"
   unit_target="/etc/systemd/system/${SERVICE_NAME}.service"
   env_file="/etc/default/${SERVICE_NAME}"
   jwt_secret="$(read_existing_env XTOOL_JWT_SECRET || true)"
   [[ -n "${jwt_secret}" ]] || jwt_secret="$(random_alnum 40)"
+  instance_uplink="$(read_existing_env XTOOL_INSTANCE_UPLINK_LIMIT_BPS || true)"
+  instance_downlink="$(read_existing_env XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS || true)"
+  [[ "${instance_uplink}" =~ ^[0-9]+$ ]] && (( instance_uplink > 0 )) || instance_uplink=30000000
+  [[ "${instance_downlink}" =~ ^[0-9]+$ ]] && (( instance_downlink > 0 )) || instance_downlink=30000000
 
   sed -e "s#/opt/xraytool#${INSTALL_DIR}#g" -e "s#/etc/default/xraytool#${env_file}#g" "$unit_template" > "$unit_target"
 
@@ -549,6 +553,8 @@ XTOOL_XRAY_BIN=${INSTALL_DIR}/data/xray/xray
 XTOOL_XRAY_CONFIG=${INSTALL_DIR}/data/xray/config.json
 XTOOL_XRAY_API=${XRAY_API_ADDR}
 XTOOL_DEFAULT_PORT=23457
+XTOOL_INSTANCE_UPLINK_LIMIT_BPS=${instance_uplink}
+XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS=${instance_downlink}
 XTOOL_SCHEDULER_SECONDS=30
 EOF
   chmod 600 "$env_file"

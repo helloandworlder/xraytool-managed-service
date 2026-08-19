@@ -87,7 +87,7 @@ type Account struct {
 	Reverse    *Reverse `protobuf:"bytes,7,opt,name=reverse,proto3" json:"reverse,omitempty"`
 	Testpre    uint32   `protobuf:"varint,8,opt,name=testpre,proto3" json:"testpre,omitempty"`
 	Testseed   []uint32 `protobuf:"varint,9,rep,packed,name=testseed,proto3" json:"testseed,omitempty"`
-	// LayerX fork: per-user runtime limit. 0 means unlimited.
+	// LayerX fork: per-user runtime limit. 0 uses the managed 30,000,000 bit/s default.
 	BandwidthBps uint64 `protobuf:"varint,10,opt,name=bandwidth_bps,json=bandwidthBps,proto3" json:"bandwidth_bps,omitempty"`
 	// LayerX fork: per-user concurrent connection cap. 0 means unlimited.
 	ConnLimit     uint32 `protobuf:"varint,11,opt,name=conn_limit,json=connLimit,proto3" json:"conn_limit,omitempty"`

@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// DefaultLimitBps is the enforced fallback for both instance and account
+// bandwidth when no directional limit is configured. Zero is not unlimited
+// for speed limits; only non-speed fields keep their own zero semantics.
+const DefaultLimitBps uint64 = 30_000_000
+
 type Config struct {
 	ListenAddr               string
 	DataDir                  string
@@ -59,8 +64,8 @@ func Load() Config {
 		XrayConfigPath:           getEnv("XTOOL_XRAY_CONFIG", filepath.Join(xrayDir, "config.json")),
 		XrayAPIServer:            getEnv("XTOOL_XRAY_API", "127.0.0.1:10085"),
 		XrayCommandTag:           "api",
-		InstanceUplinkLimitBps:   getEnvUint64("XTOOL_INSTANCE_UPLINK_LIMIT_BPS", 0),
-		InstanceDownlinkLimitBps: getEnvUint64("XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS", 0),
+		InstanceUplinkLimitBps:   getEnvLimitBps("XTOOL_INSTANCE_UPLINK_LIMIT_BPS"),
+		InstanceDownlinkLimitBps: getEnvLimitBps("XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS"),
 		RuntimeCaptureEnabled:    getEnvBool("XTOOL_RUNTIME_CAPTURE_ENABLED", false),
 		SchedulerInterval:        time.Duration(getEnvInt("XTOOL_SCHEDULER_SECONDS", 30)) * time.Second,
 		BarkBaseURLFallback:      getEnv("XTOOL_BARK_BASE_URL", ""),
@@ -119,6 +124,14 @@ func getEnvUint64(key string, fallback uint64) uint64 {
 		return fallback
 	}
 	return n
+}
+
+func getEnvLimitBps(key string) uint64 {
+	value := getEnvUint64(key, 0)
+	if value == 0 {
+		return DefaultLimitBps
+	}
+	return value
 }
 
 func getEnvBool(key string, fallback bool) bool {

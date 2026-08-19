@@ -10,6 +10,8 @@ RELEASE_VERSION=""
 PASSWORD_DIR=""
 SSH_KEY=""
 DRY_RUN=false
+EXPECTED_HOST_COUNT=21
+EVIDENCE_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -17,14 +19,16 @@ Usage:
   bash deploy/rolling-upgrade.sh --inventory inventory.csv \
     --package xraytool-linux-amd64.tar.gz --package-sha256 <sha256> \
     --version <immutable-tag> [--password-dir ./passwords | --ssh-key <file>] \
-    [--dry-run]
+    [--evidence-dir ./deploy-evidence] [--dry-run]
 
 Inventory format (header required, no passwords):
   host,port,user
 
 Password mode reads <password-dir>/<host>. Each password file must be mode 0600
 or 0400. Hosts are processed in file order. The first failed host stops the
-rollout; a failed service is rolled back from its new snapshot first.
+rollout; a failed service is rolled back from its new snapshot first. Production
+rollout requires exactly 21 unique hosts; the script refuses a 20-host or
+otherwise incomplete inventory before opening SSH connections.
 EOF
 }
 
@@ -60,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --version) RELEASE_VERSION="$2"; shift 2 ;;
     --password-dir) PASSWORD_DIR="$2"; shift 2 ;;
     --ssh-key) SSH_KEY="$2"; shift 2 ;;
+    --evidence-dir) EVIDENCE_DIR="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; fail "unknown argument: $1" ;;
@@ -69,7 +74,7 @@ done
 [[ -f "${INVENTORY}" ]] || fail "inventory not found: ${INVENTORY}"
 [[ -f "${PACKAGE}" ]] || fail "package not found: ${PACKAGE}"
 [[ "${PACKAGE_SHA256}" =~ ^[[:xdigit:]]{64}$ ]] || fail "invalid package SHA256"
-[[ -n "${RELEASE_VERSION}" && "${RELEASE_VERSION}" != latest ]] || fail "immutable --version is required"
+[[ "${RELEASE_VERSION}" =~ ^v[A-Za-z0-9._-]+$ ]] || fail "immutable --version must look like v0.2.0"
 [[ -n "${SSH_KEY}" || -n "${PASSWORD_DIR}" ]] || fail "provide --ssh-key or --password-dir"
 [[ -z "${SSH_KEY}" || -r "${SSH_KEY}" ]] || fail "SSH key is not readable"
 [[ -z "${PASSWORD_DIR}" || -d "${PASSWORD_DIR}" ]] || fail "password directory not found"
@@ -80,34 +85,51 @@ fi
 actual_sha256="$(sha256_file "${PACKAGE}")"
 [[ "${actual_sha256}" == "${PACKAGE_SHA256}" ]] || fail "local package SHA256 mismatch"
 
-declare -A SEEN_HOSTS=()
+SEEN_HOSTS_TEXT=""
 inventory_lines=0
 while IFS=, read -r host port user extra; do
   host="$(trim "${host:-}")"
   port="$(trim "${port:-}")"
   user="$(trim "${user:-}")"
+  extra="$(trim "${extra:-}")"
   [[ -z "${host}" || "${host}" == \#* || "${host}" == host ]] && continue
   [[ "${host}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid host: ${host}"
   [[ "${port}" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || fail "invalid port for ${host}"
   [[ "${user}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid user for ${host}"
-  [[ -z "${SEEN_HOSTS[${host}]+x}" ]] || fail "duplicate host: ${host}"
-  SEEN_HOSTS["${host}"]=1
+  [[ -z "${extra}" ]] || fail "inventory must contain exactly host,port,user columns: ${host}"
+  case $'\n'"${SEEN_HOSTS_TEXT}"$'\n' in
+    *$'\n'"${host}"$'\n'*) fail "duplicate host: ${host}" ;;
+  esac
+  SEEN_HOSTS_TEXT+="${host}"$'\n'
   inventory_lines=$((inventory_lines + 1))
 done < "${INVENTORY}"
-(( inventory_lines > 0 )) || fail "inventory has no usable hosts"
+(( inventory_lines == EXPECTED_HOST_COUNT )) || fail "production inventory must contain exactly ${EXPECTED_HOST_COUNT} unique hosts; got ${inventory_lines}"
 
 if [[ -n "${PASSWORD_DIR}" ]]; then
-  for host in "${!SEEN_HOSTS[@]}"; do
+  while IFS= read -r host; do
+    [[ -n "${host}" ]] || continue
     password_file="${PASSWORD_DIR}/${host}"
     [[ -f "${password_file}" ]] || fail "password file missing for ${host}"
     mode="$(stat -f '%Lp' "${password_file}" 2>/dev/null || stat -c '%a' "${password_file}")"
     [[ "${mode}" == 600 || "${mode}" == 400 ]] || fail "password file must be 0600 or 0400: ${password_file}"
-  done
+  done <<< "${SEEN_HOSTS_TEXT}"
 fi
 
 TMP_DIR="$(mktemp -d -t xraytool-rollout.XXXXXX)"
 KNOWN_HOSTS="${TMP_DIR}/known_hosts"
 REMOTE_PACKAGE="/var/tmp/xraytool-release-${PACKAGE_SHA256}.tar.gz"
+if [[ -z "${EVIDENCE_DIR}" ]]; then
+  EVIDENCE_DIR="./deploy-evidence/rolling-${RELEASE_VERSION}-${PACKAGE_SHA256:0:16}"
+fi
+mkdir -p "${EVIDENCE_DIR}"
+command -v flock >/dev/null 2>&1 || fail "flock is required to prevent concurrent rollouts"
+LOCK_FILE="${EVIDENCE_DIR}/.rolling.lock"
+exec 9>"${LOCK_FILE}"
+flock -n 9 || fail "another rolling upgrade is already running for ${EVIDENCE_DIR}"
+printf 'release_version=%s\npackage_sha256=%s\nexpected_hosts=%s\nstarted_at=%s\n' \
+  "${RELEASE_VERSION}" "${PACKAGE_SHA256}" "${EXPECTED_HOST_COUNT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > "${EVIDENCE_DIR}/release-evidence.txt"
+exec > >(tee -a "${EVIDENCE_DIR}/rolling.log") 2>&1
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 SSH_OPTIONS=(
@@ -230,3 +252,4 @@ while IFS=, read -r host port user extra; do
 done < "${INVENTORY}"
 
 echo "ROLLING_UPGRADE_OK hosts=${completed} package_sha256=${PACKAGE_SHA256} version=${RELEASE_VERSION}"
+printf 'completed_at=%s\nstatus=success\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${EVIDENCE_DIR}/release-evidence.txt"

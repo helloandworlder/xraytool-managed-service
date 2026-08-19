@@ -104,6 +104,22 @@ func TestRuntimeRateLimiterConvertsBitsToBytes(t *testing.T) {
 	}
 }
 
+func TestRuntimeRateLimiterDefaultsMissingSpeedTo30Mbps(t *testing.T) {
+	user := &MemoryUser{Email: "default@example.test"}
+	defer user.ResetRuntimeLimiter()
+
+	limits := user.RuntimeRateLimiters(buf.NewRateLimiter)
+	if limits.Uplink == nil || limits.Downlink == nil {
+		t.Fatal("missing speed policy must still create both directional limiters")
+	}
+	if got := limits.Uplink.Limit(); got != rate.Limit(DefaultLimitBytesPerSecond) {
+		t.Fatalf("default uplink bytes/sec = %v, want %d", got, DefaultLimitBytesPerSecond)
+	}
+	if got := limits.Downlink.Limit(); got != rate.Limit(DefaultLimitBytesPerSecond) {
+		t.Fatalf("default downlink bytes/sec = %v, want %d", got, DefaultLimitBytesPerSecond)
+	}
+}
+
 func TestRuntimeRateLimitersSeparateDirectionsAndSharePerUser(t *testing.T) {
 	user := &MemoryUser{
 		Email:            "alice@example.test",

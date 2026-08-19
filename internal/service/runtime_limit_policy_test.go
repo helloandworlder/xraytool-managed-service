@@ -74,6 +74,49 @@ func TestReapplyLimitPolicyRuntimePersistsDirectionalPolicyAndStrictestUsers(t *
 	require.Len(t, tasks, 2)
 }
 
+func TestReapplyLimitPolicyRuntimeDefaultsMissingUserSpeedTo30Mbps(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "xraytool.db"))
+	require.NoError(t, err)
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	customer := model.Customer{Name: "default-limit-customer", Code: "default-limit"}
+	require.NoError(t, database.Create(&customer).Error)
+	order := model.Order{
+		CustomerID: customer.ID,
+		Name:       "default-limit-order",
+		Mode:       model.OrderModeAuto,
+		Status:     model.OrderStatusActive,
+		Quantity:   1,
+		Port:       1081,
+		StartsAt:   time.Now().Add(-time.Hour),
+		ExpiresAt:  time.Now().Add(time.Hour),
+	}
+	require.NoError(t, database.Create(&order).Error)
+	require.NoError(t, database.Create(&model.OrderItem{
+		OrderID:  order.ID,
+		IP:       "127.0.0.1",
+		Port:     1081,
+		Username: "default-user",
+		Password: "secret",
+		Status:   model.OrderItemStatusActive,
+	}).Error)
+
+	service := NewOrderService(database, nil, zap.NewNop())
+	task, err := service.ReapplyLimitPolicyRuntime(t.Context(), RuntimeLimitPolicyInput{
+		Users: []RuntimeUserLimitPolicy{{Username: "default-user"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(30_000_000), task.DesiredUplinkLimitBps)
+	require.Equal(t, uint64(30_000_000), task.DesiredDownlinkLimitBps)
+
+	var item model.OrderItem
+	require.NoError(t, database.First(&item, "username = ?", "default-user").Error)
+	require.Equal(t, int64(30_000_000), item.UplinkLimitBps)
+	require.Equal(t, int64(30_000_000), item.DownlinkLimitBps)
+}
+
 func uint64Ptr(value uint64) *uint64 {
 	return &value
 }

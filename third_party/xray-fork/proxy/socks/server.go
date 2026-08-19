@@ -48,8 +48,8 @@ func NewServer(ctx context.Context, config *ServerConfig) (*Server, error) {
 	}
 	s.httpServer, _ = http.NewServer(ctx, httpConfig)
 	// Share one user store so a mixed inbound resolves SOCKS5 and HTTP auth to the
-	// same *MemoryUser, keeping per-user bandwidth / connection / fair-share limits
-	// consistent across both protocols on the same listener.
+	// same *MemoryUser, keeping per-user connection state while bandwidth and
+	// fair-share state also remain keyed by the account email.
 	s.httpServer.SetUserStore(s.users)
 	return s, nil
 }

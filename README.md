@@ -262,12 +262,29 @@ sudo bash deploy/rollback.sh \
   --backup-dir /opt/xraytool/upgrade-backups/canary-v0.2.0
 ```
 
-### 两台服务器滚动升级
+### 21 台服务器滚动升级
 
 `deploy/rolling-upgrade.sh` 只接受不含密码的 `host,port,user` 清单；密码放在
 外部目录中，每个文件名为主机 IP，权限必须是 `0600` 或 `0400`。它按清单顺序
-一次只连接一台服务器，单台服务器内再逐个升级所有 `xraytool-*.service`。任一
-服务失败会先回滚该服务，任一主机失败则停止后续主机。
+一次只连接一台服务器，单台服务器内再逐个升级所有 `xraytool-*.service`。脚本
+要求清单必须正好包含 21 台唯一主机，20 台或缺失主机会在 SSH 前直接拒绝。任一
+服务失败会先回滚该服务，任一主机失败则停止后续主机；本地 `flock` 防止两个滚动
+发布同时运行，并在 `--evidence-dir` 保存版本、制品 SHA、开始/完成时间和完整日志。
+
+示例：
+
+```bash
+bash deploy/rolling-upgrade.sh \
+  --inventory /secure/production-21.csv \
+  --package /secure/xraytool-linux-amd64.tar.gz \
+  --package-sha256 <sha256> \
+  --version v0.3.0 \
+  --ssh-key /secure/production-rollout_ed25519 \
+  --evidence-dir /secure/deploy-evidence/v0.3.0
+```
+
+用户和实例上下行速度单位均为十进制 bit/s；没有配置或填写 0 时，默认都是
+`30,000,000 bit/s`，不是“不限制”。
 
 ### 单独运行线上回归脚本
 

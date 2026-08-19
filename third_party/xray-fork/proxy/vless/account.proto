@@ -29,7 +29,7 @@ message Account {
   uint32 testpre = 8;
   repeated uint32 testseed = 9;
 
-  // LayerX fork: per-user runtime limit. 0 means unlimited.
+  // LayerX fork: per-user runtime limit. 0 uses the managed 30,000,000 bit/s default.
   uint64 bandwidth_bps = 10;
   // LayerX fork: per-user concurrent connection cap. 0 means unlimited.
   uint32 conn_limit = 11;

@@ -78,14 +78,26 @@ type MemoryUser struct {
 	ConnLimit        uint32
 }
 
+// DefaultLimitBps is the enforced per-account fallback when a directional
+// bandwidth value is absent or zero. Speed limits are never unlimited by
+// omission; connection and byte-count limits keep their own zero semantics.
+const DefaultLimitBps uint64 = 30_000_000
+const DefaultLimitBytesPerSecond uint64 = (DefaultLimitBps + 7) / 8
+
 func (u *MemoryUser) EffectiveUplinkLimitBps() uint64 {
 	if u == nil {
 		return 0
 	}
 	if u.UplinkLimitBps > 0 || u.DownlinkLimitBps > 0 {
-		return u.UplinkLimitBps
+		if u.UplinkLimitBps > 0 {
+			return u.UplinkLimitBps
+		}
+		return DefaultLimitBps
 	}
-	return u.BandwidthBps
+	if u.BandwidthBps > 0 {
+		return u.BandwidthBps
+	}
+	return DefaultLimitBps
 }
 
 func (u *MemoryUser) EffectiveDownlinkLimitBps() uint64 {
@@ -93,7 +105,13 @@ func (u *MemoryUser) EffectiveDownlinkLimitBps() uint64 {
 		return 0
 	}
 	if u.UplinkLimitBps > 0 || u.DownlinkLimitBps > 0 {
-		return u.DownlinkLimitBps
+		if u.DownlinkLimitBps > 0 {
+			return u.DownlinkLimitBps
+		}
+		return DefaultLimitBps
 	}
-	return u.BandwidthBps
+	if u.BandwidthBps > 0 {
+		return u.BandwidthBps
+	}
+	return DefaultLimitBps
 }

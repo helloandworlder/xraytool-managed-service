@@ -14,8 +14,8 @@ func TestRequiresBufferedCopyWhenFairShareEnabled(t *testing.T) {
 	defer sched.SetNodeBandwidth(old)
 
 	sched.SetNodeBandwidth(0) // 公平关闭
-	if requiresBufferedCopy(&protocol.MemoryUser{}) {
-		t.Error("fair disabled + no per-user limits: splice must stay available")
+	if !requiresBufferedCopy(&protocol.MemoryUser{Email: "default@example.test"}) {
+		t.Error("fair disabled + default 30Mbps account: buffered copy is required")
 	}
 	if !requiresBufferedCopy(&protocol.MemoryUser{BandwidthBps: 1000}) {
 		t.Error("per-user bandwidth limit must force buffered copy")
@@ -25,8 +25,8 @@ func TestRequiresBufferedCopyWhenFairShareEnabled(t *testing.T) {
 	}
 
 	sched.SetNodeBandwidth(1_000_000) // 公平开启
-	if !requiresBufferedCopy(&protocol.MemoryUser{}) {
-		t.Error("fair enabled: unlimited user must also take buffered path (no splice bypass)")
+	if !requiresBufferedCopy(&protocol.MemoryUser{Email: "default@example.test"}) {
+		t.Error("fair enabled: default-speed user must also take buffered path (no splice bypass)")
 	}
 	if !requiresBufferedCopy(nil) {
 		t.Error("fair enabled: nil user must also take buffered path")

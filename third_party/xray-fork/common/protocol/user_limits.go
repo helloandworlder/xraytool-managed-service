@@ -32,7 +32,8 @@ type RuntimeRateLimiters struct {
 }
 
 // RuntimeLimits returns the LayerX per-user runtime limits carried in memory.
-// Zero values mean unlimited and preserve upstream behavior.
+// Directional speed zero values resolve to DefaultLimitBps. ConnLimit zero
+// remains unlimited because it is a separate connection-cap field.
 func (u *MemoryUser) RuntimeLimits() (bandwidthBps uint64, connLimit uint32) {
 	if u == nil {
 		return 0, 0

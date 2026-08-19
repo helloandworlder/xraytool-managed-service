@@ -29,7 +29,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type FairShareServiceClient interface {
-	// SetNodeBandwidth 设置节点总出口上限（avail_bps，已含 headroom 折算）。0=关闭节点级公平。
+	// SetNodeBandwidth 设置节点总出口上限（avail_bps，已含 headroom 折算）。方向字段为 0
+	// 时使用受管 30,000,000 bit/s 默认值；非零 avail_bps 旧请求保持兼容。
 	SetNodeBandwidth(ctx context.Context, in *SetNodeBandwidthRequest, opts ...grpc.CallOption) (*SetNodeBandwidthResponse, error)
 }
 
@@ -55,7 +56,8 @@ func (c *fairShareServiceClient) SetNodeBandwidth(ctx context.Context, in *SetNo
 // All implementations must embed UnimplementedFairShareServiceServer
 // for forward compatibility.
 type FairShareServiceServer interface {
-	// SetNodeBandwidth 设置节点总出口上限（avail_bps，已含 headroom 折算）。0=关闭节点级公平。
+	// SetNodeBandwidth 设置节点总出口上限（avail_bps，已含 headroom 折算）。方向字段为 0
+	// 时使用受管 30,000,000 bit/s 默认值；非零 avail_bps 旧请求保持兼容。
 	SetNodeBandwidth(context.Context, *SetNodeBandwidthRequest) (*SetNodeBandwidthResponse, error)
 	mustEmbedUnimplementedFairShareServiceServer()
 }

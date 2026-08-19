@@ -34,8 +34,9 @@ type User struct {
 	// inside the protocol account) so EVERY inbound — mixed/socks/http, vless,
 	// shadowsocks, trojan — gets the same limits uniformly through ToMemoryUser,
 	// instead of each protocol re-implementing a RuntimeLimits() account method.
-	// 0 means unlimited. Bandwidth + connection cap + fair-share all key off the
-	// resulting *MemoryUser, so the dispatcher enforces them with no protocol code.
+	// A zero bandwidth value falls back to the managed 30,000,000 bit/s default.
+	// Bandwidth + connection cap + fair-share all key off the resulting
+	// *MemoryUser, so the dispatcher enforces them with no protocol code.
 	BandwidthBps uint64 `protobuf:"varint,4,opt,name=bandwidth_bps,json=bandwidthBps,proto3" json:"bandwidth_bps,omitempty"`
 	ConnLimit    uint32 `protobuf:"varint,5,opt,name=conn_limit,json=connLimit,proto3" json:"conn_limit,omitempty"`
 	// Direction-specific limits in bit/s. When either is non-zero, these take
