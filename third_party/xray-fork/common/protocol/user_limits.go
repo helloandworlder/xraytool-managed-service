@@ -16,7 +16,13 @@ type runtimeLimiterState struct {
 	downBurst   int
 }
 
-var runtimeLimiters sync.Map
+// runtimeLimiters is scoped to one managed Xray process and keyed by the
+// account email. A single account can be present in multiple inbounds (or be
+// represented by more than one MemoryUser after a config update), so pointer
+// identity would incorrectly create one bucket per inbound/connection. A
+// process-local map deliberately does not aggregate the same account across
+// separate XrayTool processes.
+var runtimeLimiters sync.Map // string -> *runtimeLimiterState
 
 type RuntimeRateLimiters struct {
 	Uplink      *rate.Limiter
@@ -40,15 +46,15 @@ func (u *MemoryUser) RuntimeLimits() (bandwidthBps uint64, connLimit uint32) {
 }
 
 // RuntimeRateLimiters returns shared direction-specific buckets. All concurrent
-// links for one MemoryUser share a direction bucket, while uplink and downlink
-// never consume each other's budget.
+// links for one account in this Xray process share a direction bucket, while
+// uplink and downlink never consume each other's budget.
 func (u *MemoryUser) RuntimeRateLimiters(newLimiter func(uint64) (*rate.Limiter, int)) RuntimeRateLimiters {
-	if u == nil {
+	if u == nil || u.Email == "" {
 		return RuntimeRateLimiters{}
 	}
-	raw, ok := runtimeLimiters.Load(u)
+	raw, ok := runtimeLimiters.Load(u.Email)
 	if !ok {
-		raw, _ = runtimeLimiters.LoadOrStore(u, new(runtimeLimiterState))
+		raw, _ = runtimeLimiters.LoadOrStore(u.Email, new(runtimeLimiterState))
 	}
 	state := raw.(*runtimeLimiterState)
 	uplinkBps := u.EffectiveUplinkLimitBps()
@@ -93,8 +99,8 @@ func bitsPerSecondToRuntimeBytesPerSecond(bitsPerSecond uint64) uint64 {
 }
 
 func (u *MemoryUser) ResetRuntimeLimiter() {
-	if u == nil {
+	if u == nil || u.Email == "" {
 		return
 	}
-	runtimeLimiters.Delete(u)
+	runtimeLimiters.Delete(u.Email)
 }

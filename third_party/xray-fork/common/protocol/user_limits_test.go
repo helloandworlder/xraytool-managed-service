@@ -14,6 +14,7 @@ func TestRuntimeRateLimiterSharedPerUser(t *testing.T) {
 		Email:        "alice@example.test",
 		BandwidthBps: uint64(buf.Size),
 	}
+	defer user.ResetRuntimeLimiter()
 
 	limiter1, burst1 := user.RuntimeRateLimiter(buf.NewRateLimiter)
 	limiter2, burst2 := user.RuntimeRateLimiter(buf.NewRateLimiter)
@@ -43,6 +44,8 @@ func TestRuntimeRateLimiterIsolatedBetweenUsers(t *testing.T) {
 		Email:        "bob@example.test",
 		BandwidthBps: uint64(buf.Size),
 	}
+	defer alice.ResetRuntimeLimiter()
+	defer bob.ResetRuntimeLimiter()
 
 	aliceLimiter, aliceBurst := alice.RuntimeRateLimiter(buf.NewRateLimiter)
 	bobLimiter, bobBurst := bob.RuntimeRateLimiter(buf.NewRateLimiter)
@@ -57,6 +60,32 @@ func TestRuntimeRateLimiterIsolatedBetweenUsers(t *testing.T) {
 	}
 	if !bobLimiter.AllowN(time.Now(), bobBurst) {
 		t.Fatal("bob bucket should be independent from alice")
+	}
+}
+
+func TestRuntimeRateLimitersSharedAcrossMemoryUsersForSameAccount(t *testing.T) {
+	first := &MemoryUser{
+		Email:            "alice@example.test",
+		UplinkLimitBps:   uint64(buf.Size * 8),
+		DownlinkLimitBps: uint64(buf.Size * 16),
+	}
+	second := &MemoryUser{
+		Email:            "alice@example.test",
+		UplinkLimitBps:   uint64(buf.Size * 8),
+		DownlinkLimitBps: uint64(buf.Size * 16),
+	}
+	defer first.ResetRuntimeLimiter()
+
+	firstLimits := first.RuntimeRateLimiters(buf.NewRateLimiter)
+	secondLimits := second.RuntimeRateLimiters(buf.NewRateLimiter)
+	if firstLimits.Uplink != secondLimits.Uplink || firstLimits.Downlink != secondLimits.Downlink {
+		t.Fatal("same account across inbounds must share direction buckets")
+	}
+	if !firstLimits.Uplink.AllowN(time.Now(), firstLimits.UplinkBurst) {
+		t.Fatal("expected initial account uplink burst to be available")
+	}
+	if secondLimits.Uplink.Allow() {
+		t.Fatal("second MemoryUser for the same account must consume the shared uplink bucket")
 	}
 }
 
