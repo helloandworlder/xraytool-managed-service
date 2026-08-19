@@ -122,15 +122,21 @@ if [[ -z "${EVIDENCE_DIR}" ]]; then
   EVIDENCE_DIR="./deploy-evidence/rolling-${RELEASE_VERSION}-${PACKAGE_SHA256:0:16}"
 fi
 mkdir -p "${EVIDENCE_DIR}"
-command -v flock >/dev/null 2>&1 || fail "flock is required to prevent concurrent rollouts"
-LOCK_FILE="${EVIDENCE_DIR}/.rolling.lock"
-exec 9>"${LOCK_FILE}"
-flock -n 9 || fail "another rolling upgrade is already running for ${EVIDENCE_DIR}"
+LOCK_DIR="${EVIDENCE_DIR}/.rolling.lock"
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  fail "another rolling upgrade is already running for ${EVIDENCE_DIR}; remove ${LOCK_DIR} only after confirming no rollout is active"
+fi
+printf 'pid=%s\nstarted_at=%s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${LOCK_DIR}/owner"
 printf 'release_version=%s\npackage_sha256=%s\nexpected_hosts=%s\nstarted_at=%s\n' \
   "${RELEASE_VERSION}" "${PACKAGE_SHA256}" "${EXPECTED_HOST_COUNT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   > "${EVIDENCE_DIR}/release-evidence.txt"
 exec > >(tee -a "${EVIDENCE_DIR}/rolling.log") 2>&1
-trap 'rm -rf "${TMP_DIR}"' EXIT
+cleanup() {
+  rm -rf "${TMP_DIR}"
+  rm -f "${LOCK_DIR}/owner"
+  rmdir "${LOCK_DIR}" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 SSH_OPTIONS=(
   -o StrictHostKeyChecking=accept-new
