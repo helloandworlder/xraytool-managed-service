@@ -107,7 +107,7 @@ docker run --rm --platform "linux/${ORB_GOARCH}" \
   -v "${PROJECT_ROOT}:/work" \
   -w /work \
   golang:1.26-bookworm \
-  bash -lc "/usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/dist/xraytool-linux-${ORB_GOARCH}' ./cmd/xraytool && /usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/dist/xraytoolctl-linux-${ORB_GOARCH}' ./cmd/xtoolctl"
+  bash -lc "/usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/dist/xraytool-linux-${ORB_GOARCH}' ./cmd/xraytool && /usr/local/go/bin/go build -o '/work/${TMP_DIR_REL}/dist/xraytoolctl-linux-${ORB_GOARCH}' ./cmd/xtoolctl && cd third_party/xray-fork && /usr/local/go/bin/go build -buildvcs=false -o '../../${TMP_DIR_REL}/dist/xray-linux-${ORB_GOARCH}' ./main"
 
 echo "==> packaging local release tarball"
 DIST_DIR="${DIST_DIR}" bash "${PROJECT_ROOT}/scripts/package_release.sh" "${ORB_GOARCH}"

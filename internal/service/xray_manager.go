@@ -124,17 +124,20 @@ func (m *XrayManager) RestartManaged() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Kill()
-		m.cmd = nil
-	}
-
+	// Validate the replacement while the current process is still serving. A
+	// malformed generated config must not take down the healthy old process.
 	if _, err := os.Stat(m.cfg.XrayBinaryPath); err != nil {
 		return fmt.Errorf("xray binary not found: %w", err)
 	}
 	if err := m.validateManagedConfig(); err != nil {
 		return err
 	}
+
+	if m.cmd != nil && m.cmd.Process != nil {
+		_ = m.cmd.Process.Kill()
+		m.cmd = nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(m.cfg.XrayConfigPath), 0o755); err != nil {
 		return err
 	}

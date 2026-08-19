@@ -202,9 +202,9 @@ git push origin v0.2.0
 
 - 运行后端测试 `go test ./...`
 - 构建前端 `frontend -> web/dist`
-- 编译 Linux `amd64`
+- 编译 Linux `amd64` 的 XrayTool、xtoolctl 和受管 Xray Fork
 - 打包 release tar.gz
-- 生成 `checksums.txt`
+- 生成包含 Fork 的 `checksums.txt` 和 release manifest
 - 发布到 GitHub Releases
 
 ### 手动发版
@@ -221,6 +221,7 @@ git push origin v0.2.0
 
 - `xraytool-linux-amd64`
 - `xraytoolctl-linux-amd64`
+- `xray-linux-amd64`（受管 Xray Fork）
 - `xraytool-linux-amd64.tar.gz`
 - `checksums.txt`
 
@@ -230,15 +231,17 @@ git push origin v0.2.0
 
 ## 线上升级与回归
 
-### 一键线上升级（保留端口/账号/Xray API 端口）
+### 固定版本线上升级（保留端口/账号/Xray API 端口）
 
 ```bash
-sudo bash deploy/online-upgrade.sh --version latest
+sudo bash deploy/online-upgrade.sh --version v0.2.0
 ```
 
 可选参数：
 
-- `--version v0.1.8` 指定版本
+- `--version v0.1.8` 指定不可变版本
+- `--package-path /path/xraytool-linux-amd64.tar.gz --package-sha256 <sha256>` 使用已审查的本地制品
+- `--backup-dir /opt/xraytool/upgrade-backups/canary-v0.2.0` 指定回滚快照目录
 - `--skip-regression` 跳过升级后自动回归
 - `--skip-backup` 跳过升级前数据库备份
 
@@ -246,8 +249,25 @@ sudo bash deploy/online-upgrade.sh --version latest
 
 - 基于当前 `/etc/default/xraytool` 保留关键配置
 - 执行升级前数据库备份
+- 备份旧的 XrayTool、Fork、Xray 配置和前端静态文件
 - 执行升级后健康检查
 - 自动运行 `scripts/online_regression.py`
+
+升级失败时使用同一快照回滚：
+
+```bash
+sudo bash deploy/rollback.sh \
+  --service-name xraytool \
+  --install-dir /opt/xraytool \
+  --backup-dir /opt/xraytool/upgrade-backups/canary-v0.2.0
+```
+
+### 两台服务器滚动升级
+
+`deploy/rolling-upgrade.sh` 只接受不含密码的 `host,port,user` 清单；密码放在
+外部目录中，每个文件名为主机 IP，权限必须是 `0600` 或 `0400`。它按清单顺序
+一次只连接一台服务器，单台服务器内再逐个升级所有 `xraytool-*.service`。任一
+服务失败会先回滚该服务，任一主机失败则停止后续主机。
 
 ### 单独运行线上回归脚本
 

@@ -103,10 +103,14 @@ jobs:
             LDFLAGS="-X xraytool/internal/buildinfo.Version=${{ steps.meta.outputs.tag_name }} -X xraytool/internal/buildinfo.Commit=${{ steps.meta.outputs.commit_sha }} -X xraytool/internal/buildinfo.BuildTime=${{ steps.meta.outputs.build_time }} -X xraytool/internal/buildinfo.ProtocolVersion=1"
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xraytool-linux-amd64 ./cmd/xraytool
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/xraytoolctl-linux-amd64 ./cmd/xtoolctl
+            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go -C third_party/xray-fork build -buildvcs=false -o ../../dist/xray-linux-amd64 ./main
           '
 
       - name: Package release bundles
         run: bash scripts/package_release.sh amd64
+
+      - name: Verify release contains the managed Xray Fork
+        run: bash scripts/test_release_package.sh dist/xraytool-linux-amd64.tar.gz
 
       - name: Generate checksums
         run: |
@@ -114,6 +118,7 @@ jobs:
           sha256sum \
             xraytool-linux-amd64 \
             xraytoolctl-linux-amd64 \
+            xray-linux-amd64 \
             xraytool-linux-amd64.tar.gz \
             > checksums.txt
 
@@ -124,6 +129,7 @@ jobs:
             printf 'git_commit_sha=%s\n' '${{ steps.meta.outputs.commit_sha }}'
             printf 'ci_run_url=%s\n' '${{ steps.meta.outputs.run_url }}'
             printf 'build_time=%s\n' '${{ steps.meta.outputs.build_time }}'
+            printf 'xray_fork_tree_sha=%s\n' "$(git rev-parse HEAD:third_party/xray-fork)"
             printf 'artifact_sha256s=\n'
             cat dist/checksums.txt
           } > dist/release-manifest.txt
@@ -135,6 +141,7 @@ jobs:
           path: |
             dist/xraytool-linux-amd64
             dist/xraytoolctl-linux-amd64
+            dist/xray-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
             dist/checksums.txt
             dist/release-manifest.txt
@@ -163,6 +170,7 @@ jobs:
           files: |
             dist/xraytool-linux-amd64
             dist/xraytoolctl-linux-amd64
+            dist/xray-linux-amd64
             dist/xraytool-linux-amd64.tar.gz
             dist/checksums.txt
             dist/release-manifest.txt
