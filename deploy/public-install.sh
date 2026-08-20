@@ -491,7 +491,6 @@ install_runtime_files() {
   [[ -f "${RELEASE_ROOT}/deploy/systemd/xraytool.service" ]] || fail "systemd unit template missing"
   [[ -f "${RELEASE_ROOT}/deploy/online-upgrade.sh" ]] || fail "online upgrade script missing in package"
   [[ -f "${RELEASE_ROOT}/deploy/rollback.sh" ]] || fail "rollback script missing in package"
-  [[ -f "${RELEASE_ROOT}/scripts/online_regression.py" ]] || fail "online regression script missing in package"
 
   log "installing files into ${INSTALL_DIR}"
   mkdir -p "${INSTALL_DIR}" "${INSTALL_DIR}/deploy" "${INSTALL_DIR}/web" "${INSTALL_DIR}/data/xray" "${INSTALL_DIR}/data/backups"
@@ -505,8 +504,6 @@ install_runtime_files() {
 
   rm -rf "${INSTALL_DIR}/web/dist"
   cp -R "${RELEASE_ROOT}/web-dist" "${INSTALL_DIR}/web/dist"
-  rm -rf "${INSTALL_DIR}/scripts"
-  cp -R "${RELEASE_ROOT}/scripts" "${INSTALL_DIR}/scripts"
 
   if [[ -f "${RELEASE_ROOT}/.env.example" ]]; then
     install -m 0644 "${RELEASE_ROOT}/.env.example" "${INSTALL_DIR}/.env.example"

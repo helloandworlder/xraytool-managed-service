@@ -23,7 +23,6 @@ required_entries=(
   release/deploy/online-upgrade.sh
   release/deploy/rollback.sh
   release/deploy/rolling-upgrade.sh
-  release/scripts/online_regression.py
 )
 
 for entry in "${required_entries[@]}"; do
@@ -36,6 +35,5 @@ tar -xzf "${PACKAGE_PATH}" -C "${TMP_DIR}"
 [[ -x "${TMP_DIR}/release/deploy/online-upgrade.sh" ]] || fail "online-upgrade.sh is not executable"
 [[ -x "${TMP_DIR}/release/deploy/rollback.sh" ]] || fail "rollback.sh is not executable"
 [[ -x "${TMP_DIR}/release/deploy/rolling-upgrade.sh" ]] || fail "rolling-upgrade.sh is not executable"
-[[ -s "${TMP_DIR}/release/scripts/online_regression.py" ]] || fail "online regression script is empty"
 
 echo "Release package contract passed: ${PACKAGE_PATH}"
