@@ -11,6 +11,11 @@ fail() {
 
 [[ -f "${PACKAGE_PATH}" ]] || fail "release package not found: ${PACKAGE_PATH}"
 
+TMP_DIR="$(mktemp -d -t xraytool-release-contract.XXXXXX)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+PACKAGE_ENTRIES="${TMP_DIR}/entries.txt"
+tar -tzf "${PACKAGE_PATH}" > "${PACKAGE_ENTRIES}"
+
 required_entries=(
   release/xray
   release/xraytool
@@ -22,11 +27,9 @@ required_entries=(
 )
 
 for entry in "${required_entries[@]}"; do
-  tar -tzf "${PACKAGE_PATH}" | grep -Fxq "${entry}" || fail "release entry missing: ${entry}"
+  grep -Fxq "${entry}" "${PACKAGE_ENTRIES}" || fail "release entry missing: ${entry}"
 done
 
-TMP_DIR="$(mktemp -d -t xraytool-release-contract.XXXXXX)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
 tar -xzf "${PACKAGE_PATH}" -C "${TMP_DIR}"
 
 [[ -s "${TMP_DIR}/release/xray" ]] || fail "managed Xray Fork is empty"
