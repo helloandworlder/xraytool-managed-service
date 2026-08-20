@@ -52,6 +52,9 @@ jobs:
       - name: Rolling upgrade contract
         run: bash scripts/test_rolling_upgrade_contract.sh
 
+      - name: Online upgrade environment contract
+        run: bash scripts/test_online_upgrade_env_contract.sh
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

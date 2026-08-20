@@ -145,12 +145,9 @@ ensure_cmd systemctl
 ensure_cmd curl
 ensure_cmd python3
 
-if [[ -f "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "${ENV_FILE}"
-  set +a
-fi
+# Read only the specific values needed below with read_env_var. Do not source
+# an existing /etc/default file: legacy deployments may contain passwords or
+# other values that are not valid shell syntax, and sourcing would execute them.
 
 if [[ -n "${INSTALL_DIR_INPUT}" ]]; then
   INSTALL_DIR="${INSTALL_DIR_INPUT}"
