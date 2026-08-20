@@ -28,7 +28,9 @@ XRAY_API_PORT_INPUT="${XTOOL_INSTALL_XRAY_API_PORT:-}"
 INSTANCE_ID_INPUT="${XTOOL_INSTALL_INSTANCE_ID:-}"
 SERVICE_NAME_INPUT="${XTOOL_INSTALL_SERVICE_NAME:-}"
 PACKAGE_PATH="${XTOOL_PACKAGE_PATH:-}"
+PACKAGE_SHA256_EXPECTED="${XTOOL_PACKAGE_SHA256:-}"
 XRAY_BIN_PATH="${XTOOL_XRAY_BIN_PATH:-}"
+PRESERVE_EXISTING_ENV="${XTOOL_PRESERVE_EXISTING_ENV:-false}"
 INSTANCE_ID=""
 
 usage() {
@@ -45,13 +47,18 @@ Options:
   --admin-user <name>    Admin username
   --admin-pass <pass>    Admin password
   --xray-bin-path <path> Local xray binary path
+  --package-path <file>  Local xraytool package tar.gz path
+  --package-sha256 <sha256> Expected SHA256 for the local package
   --xray-api-port <p|random>  Managed Xray API port (default: auto-choose)
+  --preserve-existing-env  Reuse credentials and ports from the existing service
   -y, --non-interactive  Skip prompts and use provided/random values
   -h, --help             Show help
 
 Env overrides (for testing):
   XTOOL_PACKAGE_PATH     Local xraytool package tar.gz path
+  XTOOL_PACKAGE_SHA256   Expected SHA256 for XTOOL_PACKAGE_PATH
   XTOOL_XRAY_BIN_PATH    Local xray binary path
+  XTOOL_PRESERVE_EXISTING_ENV  Reuse existing service values when true
   XTOOL_INSTALL_PORT     Same as --port
   XTOOL_INSTALL_ADMIN_USER  Same as --admin-user
   XTOOL_INSTALL_ADMIN_PASS  Same as --admin-pass
@@ -96,9 +103,21 @@ while [[ $# -gt 0 ]]; do
       XRAY_BIN_PATH="$2"
       shift 2
       ;;
+    --package-path)
+      PACKAGE_PATH="$2"
+      shift 2
+      ;;
+    --package-sha256)
+      PACKAGE_SHA256_EXPECTED="$2"
+      shift 2
+      ;;
     --xray-api-port)
       XRAY_API_PORT_INPUT="$2"
       shift 2
+      ;;
+    --preserve-existing-env)
+      PRESERVE_EXISTING_ENV=true
+      shift
       ;;
     -y|--non-interactive)
       NON_INTERACTIVE=true
@@ -293,11 +312,9 @@ detect_arch() {
   case "$machine" in
     x86_64|amd64)
       ARCH="amd64"
-      XRAY_ARCHIVE="Xray-linux-64.zip"
       ;;
     aarch64|arm64)
       ARCH="arm64"
-      XRAY_ARCHIVE="Xray-linux-arm64-v8a.zip"
       ;;
     *)
       fail "Unsupported architecture: $machine"
@@ -307,6 +324,12 @@ detect_arch() {
 
 resolve_runtime_values() {
   local suggested_port suggested_user suggested_pass answer
+  if [[ "${PRESERVE_EXISTING_ENV}" == true ]]; then
+    [[ -n "${LISTEN_PORT_INPUT}" ]] || LISTEN_PORT_INPUT="$(extract_port_from_addr "$(read_existing_env XTOOL_LISTEN || true)")"
+    [[ -n "${ADMIN_USER_INPUT}" ]] || ADMIN_USER_INPUT="$(read_existing_env XTOOL_ADMIN_USER || true)"
+    [[ -n "${ADMIN_PASS_INPUT}" ]] || ADMIN_PASS_INPUT="$(read_existing_env XTOOL_ADMIN_PASS || true)"
+    [[ -n "${XRAY_API_PORT_INPUT}" ]] || XRAY_API_PORT_INPUT="$(extract_port_from_addr "$(read_existing_env XTOOL_XRAY_API || true)")"
+  fi
   suggested_port="$(random_port)"
   suggested_user="admin$(random_alnum 4 | tr 'A-Z' 'a-z')"
   suggested_pass="$(random_alnum 18)"
@@ -413,17 +436,31 @@ build_release_url() {
 
 prepare_release_package() {
   PACKAGE_TARBALL="${TMP_DIR}/xraytool-package.tar.gz"
+  CHECKSUMS_FILE="${TMP_DIR}/checksums.txt"
   if [[ -n "$PACKAGE_PATH" ]]; then
     [[ -f "$PACKAGE_PATH" ]] || fail "Local package not found: $PACKAGE_PATH"
     cp "$PACKAGE_PATH" "$PACKAGE_TARBALL"
-    return
+  else
+    local asset url checksum_url
+    asset="xraytool-linux-${ARCH}.tar.gz"
+    url="$(build_release_url "$asset")"
+    log "downloading release package: $url"
+    curl -fL --retry 3 --connect-timeout 20 "$url" -o "$PACKAGE_TARBALL"
+    checksum_url="$(build_release_url checksums.txt)"
+    log "downloading release checksums: $checksum_url"
+    curl -fL --retry 3 --connect-timeout 20 "$checksum_url" -o "$CHECKSUMS_FILE"
   fi
 
-  local asset url
+  local expected actual asset
   asset="xraytool-linux-${ARCH}.tar.gz"
-  url="$(build_release_url "$asset")"
-  log "downloading release package: $url"
-  curl -fL --retry 3 --connect-timeout 20 "$url" -o "$PACKAGE_TARBALL"
+  expected="${PACKAGE_SHA256_EXPECTED}"
+  if [[ -z "${expected}" && -f "${CHECKSUMS_FILE}" ]]; then
+    expected="$(awk -v asset="$asset" '$2 == asset {print $1; exit}' "${CHECKSUMS_FILE}")"
+  fi
+  [[ "${expected}" =~ ^[[:xdigit:]]{64}$ ]] || fail "No valid SHA256 found for ${asset}; refusing unverified package"
+  actual="$(sha256sum "${PACKAGE_TARBALL}" | awk '{print $1}')"
+  [[ "${actual}" == "${expected}" ]] || fail "Package SHA256 mismatch: expected ${expected}, got ${actual}"
+  log "verified package SHA256: ${actual}"
 }
 
 prepare_xray_binary() {
@@ -435,57 +472,63 @@ prepare_xray_binary() {
     return
   fi
 
-  local url xray_zip
-  xray_zip="${TMP_DIR}/xray.zip"
-  url="https://github.com/XTLS/Xray-core/releases/latest/download/${XRAY_ARCHIVE}"
-  log "downloading xray core: $url"
-  curl -fL --retry 3 --connect-timeout 20 "$url" -o "$xray_zip"
-  unzip -q "$xray_zip" -d "${TMP_DIR}/xray"
-  [[ -f "${TMP_DIR}/xray/xray" ]] || fail "xray binary not found in archive"
-  cp "${TMP_DIR}/xray/xray" "$XRAY_BIN_FINAL"
+  [[ -f "${RELEASE_ROOT}/xray" ]] || fail "release package does not contain the managed Xray Fork binary"
+  cp "${RELEASE_ROOT}/xray" "$XRAY_BIN_FINAL"
   chmod +x "$XRAY_BIN_FINAL"
 }
 
-install_runtime_files() {
+extract_release_package() {
   tar -xzf "$PACKAGE_TARBALL" -C "$TMP_DIR"
-  local release_root
-  release_root="${TMP_DIR}/release"
-  [[ -d "$release_root" ]] || fail "Invalid package layout: release/ not found"
+  RELEASE_ROOT="${TMP_DIR}/release"
+  [[ -d "$RELEASE_ROOT" ]] || fail "Invalid package layout: release/ not found"
+}
 
-  [[ -f "${release_root}/xraytool" ]] || fail "xraytool binary missing in package"
-  [[ -f "${release_root}/xraytoolctl" ]] || fail "xraytoolctl binary missing in package"
-  [[ -d "${release_root}/web-dist" ]] || fail "web-dist missing in package"
-  [[ -f "${release_root}/deploy/systemd/xraytool.service" ]] || fail "systemd unit template missing"
+install_runtime_files() {
+  [[ -f "${RELEASE_ROOT}/xraytool" ]] || fail "xraytool binary missing in package"
+  [[ -f "${RELEASE_ROOT}/xraytoolctl" ]] || fail "xraytoolctl binary missing in package"
+  [[ -f "${RELEASE_ROOT}/xray" ]] || fail "managed Xray Fork binary missing in package"
+  [[ -d "${RELEASE_ROOT}/web-dist" ]] || fail "web-dist missing in package"
+  [[ -f "${RELEASE_ROOT}/deploy/systemd/xraytool.service" ]] || fail "systemd unit template missing"
+  [[ -f "${RELEASE_ROOT}/deploy/online-upgrade.sh" ]] || fail "online upgrade script missing in package"
+  [[ -f "${RELEASE_ROOT}/deploy/rollback.sh" ]] || fail "rollback script missing in package"
+  [[ -f "${RELEASE_ROOT}/scripts/online_regression.py" ]] || fail "online regression script missing in package"
 
   log "installing files into ${INSTALL_DIR}"
   mkdir -p "${INSTALL_DIR}" "${INSTALL_DIR}/deploy" "${INSTALL_DIR}/web" "${INSTALL_DIR}/data/xray" "${INSTALL_DIR}/data/backups"
-  install -m 0755 "${release_root}/xraytool" "${INSTALL_DIR}/xraytool"
-  install -m 0755 "${release_root}/xraytoolctl" "${INSTALL_DIR}/xraytoolctl"
-  install -m 0755 "${release_root}/deploy/xtool" "${INSTALL_DIR}/deploy/xtool"
-  if [[ -f "${release_root}/deploy/public-install.sh" ]]; then
-    install -m 0755 "${release_root}/deploy/public-install.sh" "${INSTALL_DIR}/deploy/public-install.sh"
-  fi
-  cp -R "${release_root}/deploy/systemd" "${INSTALL_DIR}/deploy/"
+  install -m 0755 "${RELEASE_ROOT}/xraytool" "${INSTALL_DIR}/xraytool"
+  install -m 0755 "${RELEASE_ROOT}/xraytoolctl" "${INSTALL_DIR}/xraytoolctl"
+  install -m 0755 "${RELEASE_ROOT}/deploy/xtool" "${INSTALL_DIR}/deploy/xtool"
+  install -m 0755 "${RELEASE_ROOT}/deploy/online-upgrade.sh" "${INSTALL_DIR}/deploy/online-upgrade.sh"
+  install -m 0755 "${RELEASE_ROOT}/deploy/public-install.sh" "${INSTALL_DIR}/deploy/public-install.sh"
+  install -m 0755 "${RELEASE_ROOT}/deploy/rollback.sh" "${INSTALL_DIR}/deploy/rollback.sh"
+  cp -R "${RELEASE_ROOT}/deploy/systemd" "${INSTALL_DIR}/deploy/"
 
   rm -rf "${INSTALL_DIR}/web/dist"
-  cp -R "${release_root}/web-dist" "${INSTALL_DIR}/web/dist"
+  cp -R "${RELEASE_ROOT}/web-dist" "${INSTALL_DIR}/web/dist"
+  rm -rf "${INSTALL_DIR}/scripts"
+  cp -R "${RELEASE_ROOT}/scripts" "${INSTALL_DIR}/scripts"
 
-  if [[ -f "${release_root}/.env.example" ]]; then
-    install -m 0644 "${release_root}/.env.example" "${INSTALL_DIR}/.env.example"
+  if [[ -f "${RELEASE_ROOT}/.env.example" ]]; then
+    install -m 0644 "${RELEASE_ROOT}/.env.example" "${INSTALL_DIR}/.env.example"
   fi
-  if [[ -f "${release_root}/README.md" ]]; then
-    install -m 0644 "${release_root}/README.md" "${INSTALL_DIR}/README.md"
+  if [[ -f "${RELEASE_ROOT}/README.md" ]]; then
+    install -m 0644 "${RELEASE_ROOT}/README.md" "${INSTALL_DIR}/README.md"
   fi
 
   install -m 0755 "$XRAY_BIN_FINAL" "${INSTALL_DIR}/data/xray/xray"
 }
 
 write_systemd_and_env() {
-  local unit_template unit_target env_file jwt_secret backup_file
+  local unit_template unit_target env_file jwt_secret backup_file instance_uplink instance_downlink
   unit_template="${INSTALL_DIR}/deploy/systemd/xraytool.service"
   unit_target="/etc/systemd/system/${SERVICE_NAME}.service"
   env_file="/etc/default/${SERVICE_NAME}"
-  jwt_secret="$(random_alnum 40)"
+  jwt_secret="$(read_existing_env XTOOL_JWT_SECRET || true)"
+  [[ -n "${jwt_secret}" ]] || jwt_secret="$(random_alnum 40)"
+  instance_uplink="$(read_existing_env XTOOL_INSTANCE_UPLINK_LIMIT_BPS || true)"
+  instance_downlink="$(read_existing_env XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS || true)"
+  [[ "${instance_uplink}" =~ ^[0-9]+$ ]] && (( instance_uplink > 0 )) || instance_uplink=30000000
+  [[ "${instance_downlink}" =~ ^[0-9]+$ ]] && (( instance_downlink > 0 )) || instance_downlink=30000000
 
   sed -e "s#/opt/xraytool#${INSTALL_DIR}#g" -e "s#/etc/default/xraytool#${env_file}#g" "$unit_template" > "$unit_target"
 
@@ -510,6 +553,8 @@ XTOOL_XRAY_BIN=${INSTALL_DIR}/data/xray/xray
 XTOOL_XRAY_CONFIG=${INSTALL_DIR}/data/xray/config.json
 XTOOL_XRAY_API=${XRAY_API_ADDR}
 XTOOL_DEFAULT_PORT=23457
+XTOOL_INSTANCE_UPLINK_LIMIT_BPS=${instance_uplink}
+XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS=${instance_downlink}
 XTOOL_SCHEDULER_SECONDS=30
 EOF
   chmod 600 "$env_file"
@@ -539,7 +584,6 @@ start_service_and_verify() {
 detect_pkg_manager
 ensure_cmd curl
 ensure_cmd tar
-ensure_cmd unzip
 ensure_cmd ss
 ensure_cmd systemctl
 
@@ -552,6 +596,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 prepare_release_package
+extract_release_package
 prepare_xray_binary
 install_runtime_files
 write_systemd_and_env

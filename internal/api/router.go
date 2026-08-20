@@ -185,6 +185,7 @@ func (a *API) Router() *gin.Engine {
 	secure.GET("/runtime/customers", a.customerRuntimeStats)
 	secure.GET("/runtime/overview", a.runtimeOverview)
 	secure.GET("/runtime/sync-tasks", a.listRuntimeSyncTasks)
+	secure.GET("/runtime/sync-tasks/:id", a.getRuntimeSyncTask)
 	secure.POST("/runtime/sync-tasks/:id/retry", a.retryRuntimeSyncTask)
 	secure.POST("/runtime/limit-policy/reapply", a.reapplyLimitPolicyRuntime)
 	secure.GET("/db/backups", a.listBackups)
@@ -2129,11 +2130,17 @@ func (a *API) batchResyncOrders(c *gin.Context) {
 }
 
 func (a *API) reapplyLimitPolicyRuntime(c *gin.Context) {
-	if err := a.orders.ReapplyLimitPolicyRuntime(c.Request.Context()); err != nil {
+	var req service.RuntimeLimitPolicyInput
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	task, err := a.orders.ReapplyLimitPolicyRuntime(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "status": "queued", "task": task})
 }
 
 func (a *API) batchTestOrders(c *gin.Context) {
@@ -2476,6 +2483,23 @@ func (a *API) listRuntimeSyncTasks(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, rows)
+}
+
+func (a *API) getRuntimeSyncTask(c *gin.Context) {
+	id, ok := parseUintParam(c, "id")
+	if !ok {
+		return
+	}
+	task, err := a.orders.GetRuntimeSyncTask(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "runtime sync task not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, task)
 }
 
 func (a *API) retryRuntimeSyncTask(c *gin.Context) {

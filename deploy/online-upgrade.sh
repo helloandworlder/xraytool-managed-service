@@ -15,8 +15,11 @@ ENV_FILE=""
 PUBLIC_INSTALLER="${SCRIPT_DIR}/public-install.sh"
 REGRESSION_SCRIPT="${ROOT_DIR}/scripts/online_regression.py"
 
-RELEASE_VERSION="latest"
+RELEASE_VERSION=""
 INSTALL_DIR_INPUT=""
+PACKAGE_PATH="${XTOOL_PACKAGE_PATH:-}"
+PACKAGE_SHA256="${XTOOL_PACKAGE_SHA256:-}"
+BACKUP_DIR_INPUT=""
 SKIP_REGRESSION=false
 SKIP_BACKUP=false
 
@@ -26,9 +29,12 @@ Usage:
   sudo bash deploy/online-upgrade.sh [options]
 
 Options:
-  --version <tag|latest>      Upgrade target version (default: latest)
+  --version <tag>             Upgrade target immutable release tag (required)
   --install-dir <dir>         Install directory (default: inferred from env)
   --service-name <name>       systemd service name (default: xraytool)
+  --package-path <file>       Use a local release package instead of downloading
+  --package-sha256 <sha256>   Expected SHA256 for the local release package
+  --backup-dir <dir>          Explicit snapshot directory for rollback
   --skip-regression           Skip post-upgrade regression script
   --skip-backup               Skip pre-upgrade database backup
   -h, --help                  Show help
@@ -48,6 +54,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --install-dir)
       INSTALL_DIR_INPUT="$2"
+      shift 2
+      ;;
+    --package-path)
+      PACKAGE_PATH="$2"
+      shift 2
+      ;;
+    --package-sha256)
+      PACKAGE_SHA256="$2"
+      shift 2
+      ;;
+    --backup-dir)
+      BACKUP_DIR_INPUT="$2"
       shift 2
       ;;
     --service-name)
@@ -82,6 +100,8 @@ fail() {
   echo "[ERROR] $*" >&2
   exit 1
 }
+
+[[ -n "${RELEASE_VERSION}" && "${RELEASE_VERSION}" != "latest" ]] || fail "--version <immutable-tag> is required; latest is not allowed for upgrades"
 
 is_valid_service_name() {
   local name="$1"
@@ -125,12 +145,9 @@ ensure_cmd systemctl
 ensure_cmd curl
 ensure_cmd python3
 
-if [[ -f "${ENV_FILE}" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "${ENV_FILE}"
-  set +a
-fi
+# Read only the specific values needed below with read_env_var. Do not source
+# an existing /etc/default file: legacy deployments may contain passwords or
+# other values that are not valid shell syntax, and sourcing would execute them.
 
 if [[ -n "${INSTALL_DIR_INPUT}" ]]; then
   INSTALL_DIR="${INSTALL_DIR_INPUT}"
@@ -168,10 +185,22 @@ DB_PATH="$(read_env_var XTOOL_DB_PATH || true)"
 if [[ -z "${DB_PATH}" ]]; then
   DB_PATH="${INSTALL_DIR}/data/xraytool.db"
 fi
+XRAY_BIN_PATH="$(read_env_var XTOOL_XRAY_BIN || true)"
+if [[ -z "${XRAY_BIN_PATH}" ]]; then
+  XRAY_BIN_PATH="${INSTALL_DIR}/data/xray/xray"
+fi
+XRAY_CONFIG_PATH="$(read_env_var XTOOL_XRAY_CONFIG || true)"
+if [[ -z "${XRAY_CONFIG_PATH}" ]]; then
+  XRAY_CONFIG_PATH="${INSTALL_DIR}/data/xray/config.json"
+fi
 
 TS="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE=""
 ROLLBACK_DIR="${INSTALL_DIR}/upgrade-backups/${TS}"
+if [[ -n "${BACKUP_DIR_INPUT}" ]]; then
+  ROLLBACK_DIR="${BACKUP_DIR_INPUT}"
+fi
+[[ ! -e "${ROLLBACK_DIR}" ]] || fail "backup directory already exists: ${ROLLBACK_DIR}"
 
 if [[ "${SKIP_BACKUP}" != true ]]; then
   if [[ -f "${DB_PATH}" ]]; then
@@ -203,17 +232,36 @@ fi
 if [[ -f "${INSTALL_DIR}/xraytoolctl" ]]; then
   cp -f "${INSTALL_DIR}/xraytoolctl" "${ROLLBACK_DIR}/xraytoolctl.bin"
 fi
+if [[ -f "${XRAY_BIN_PATH}" ]]; then
+  cp -f "${XRAY_BIN_PATH}" "${ROLLBACK_DIR}/xray.bin"
+fi
+if [[ -f "${XRAY_CONFIG_PATH}" ]]; then
+  cp -f "${XRAY_CONFIG_PATH}" "${ROLLBACK_DIR}/xray.config.json"
+fi
+if [[ -d "${INSTALL_DIR}/web/dist" ]]; then
+  tar -czf "${ROLLBACK_DIR}/web-dist.tar.gz" -C "${INSTALL_DIR}/web" dist
+fi
 
 log "upgrading to ${RELEASE_VERSION}"
-bash "${PUBLIC_INSTALLER}" \
-  --non-interactive \
-  --service-name "${SERVICE_NAME}" \
-  --install-dir "${INSTALL_DIR}" \
-  --version "${RELEASE_VERSION}" \
-  --port "${LISTEN_PORT}" \
-  --xray-api-port "${XRAY_API_PORT}" \
-  --admin-user "${ADMIN_USER}" \
-  --admin-pass "${ADMIN_PASS}"
+if [[ -n "${PACKAGE_PATH}" ]]; then
+  [[ -f "${PACKAGE_PATH}" ]] || fail "local package not found: ${PACKAGE_PATH}"
+fi
+INSTALL_ARGS=(
+  --non-interactive
+  --preserve-existing-env
+  --service-name "${SERVICE_NAME}"
+  --install-dir "${INSTALL_DIR}"
+  --version "${RELEASE_VERSION}"
+)
+if [[ -n "${PACKAGE_PATH}" ]]; then
+  INSTALL_ARGS+=(--package-path "${PACKAGE_PATH}")
+fi
+if [[ -n "${PACKAGE_SHA256}" ]]; then
+  INSTALL_ARGS+=(--package-sha256 "${PACKAGE_SHA256}")
+fi
+XTOOL_PACKAGE_PATH="${PACKAGE_PATH}" \
+XTOOL_PACKAGE_SHA256="${PACKAGE_SHA256}" \
+bash "${PUBLIC_INSTALLER}" "${INSTALL_ARGS[@]}"
 
 if [[ -f "${ENV_FILE}" ]]; then
   LISTEN_RAW="$(read_env_var XTOOL_LISTEN || true)"

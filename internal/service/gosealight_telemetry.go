@@ -15,6 +15,7 @@ import (
 
 	"xraytool/internal/buildinfo"
 	"xraytool/internal/config"
+	"xraytool/internal/model"
 	"xraytool/internal/store"
 
 	"go.uber.org/zap"
@@ -59,8 +60,16 @@ type goSeaTelemetryPayload struct {
 }
 
 type goSeaTelemetryLimitPolicy struct {
-	AccountHardLimit bool     `json:"accountHardLimit"`
-	Fields           []string `json:"fields"`
+	AccountHardLimit        bool     `json:"accountHardLimit"`
+	InstanceDirectional     bool     `json:"instanceDirectional"`
+	Fields                  []string `json:"fields"`
+	TargetUplinkLimitBPS    uint64   `json:"targetUplinkLimitBps"`
+	TargetDownlinkLimitBPS  uint64   `json:"targetDownlinkLimitBps"`
+	AppliedUplinkLimitBPS   uint64   `json:"appliedUplinkLimitBps"`
+	AppliedDownlinkLimitBPS uint64   `json:"appliedDownlinkLimitBps"`
+	PolicyVersion           uint64   `json:"policyVersion"`
+	AppliedAt               string   `json:"appliedAt,omitempty"`
+	LastApplyError          string   `json:"lastApplyError,omitempty"`
 }
 
 type goSeaTelemetryXrayCore struct {
@@ -197,14 +206,7 @@ func (s *GoSeaLightTelemetryService) push(ctx context.Context, settings goSeaTel
 		ProtocolVersion: buildinfo.ProtocolVersion,
 		Version:         buildinfo.Version,
 		Capabilities:    buildinfo.Capabilities(),
-		LimitPolicy: goSeaTelemetryLimitPolicy{
-			AccountHardLimit: true,
-			Fields: []string{
-				"uplinkLimitBps",
-				"downlinkLimitBps",
-				"maxConnections",
-			},
-		},
+		LimitPolicy:     s.runtimeLimitPolicyTelemetry(),
 		XrayCore: goSeaTelemetryXrayCore{
 			BinaryPath: s.cfg.XrayBinaryPath,
 			Version:    detectXrayCoreVersion(s.cfg.XrayBinaryPath),
@@ -250,6 +252,51 @@ func (s *GoSeaLightTelemetryService) push(ctx context.Context, settings goSeaTel
 		return fmt.Errorf("telemetry ingest returned %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
 	}
 	return nil
+}
+
+func (s *GoSeaLightTelemetryService) runtimeLimitPolicyTelemetry() goSeaTelemetryLimitPolicy {
+	state := goSeaTelemetryLimitPolicy{
+		AccountHardLimit:    true,
+		InstanceDirectional: true,
+		Fields: []string{
+			"uplinkLimitBps",
+			"downlinkLimitBps",
+			"maxConnections",
+		},
+	}
+	settings, err := s.store.GetSettings()
+	if err != nil {
+		s.logger.Warn("load runtime limit telemetry settings failed", zap.Error(err))
+		state.LastApplyError = err.Error()
+		return state
+	}
+	state.TargetUplinkLimitBPS = normalizeRuntimeLimitBps(parseTelemetryUint(settings["runtime_instance_uplink_limit_bps"]))
+	state.TargetDownlinkLimitBPS = normalizeRuntimeLimitBps(parseTelemetryUint(settings["runtime_instance_downlink_limit_bps"]))
+	state.PolicyVersion = parseTelemetryUint(settings["runtime_limit_policy_version"])
+
+	var latest model.RuntimeSyncTask
+	if err := s.store.DB().Where("reason = ?", "limit_policy_reapply").Order("id desc").First(&latest).Error; err == nil {
+		if latest.Error != "" {
+			state.LastApplyError = latest.Error
+		}
+	}
+	var applied model.RuntimeSyncTask
+	if err := s.store.DB().Where("reason = ? and status = ?", "limit_policy_reapply", model.RuntimeSyncStatusSuccess).Order("id desc").First(&applied).Error; err == nil {
+		state.AppliedUplinkLimitBPS = applied.DesiredUplinkLimitBps
+		state.AppliedDownlinkLimitBPS = applied.DesiredDownlinkLimitBps
+		if applied.AppliedAt != nil {
+			state.AppliedAt = applied.AppliedAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return state
+}
+
+func parseTelemetryUint(raw string) uint64 {
+	value, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func detectXrayCoreVersion(binaryPath string) string {

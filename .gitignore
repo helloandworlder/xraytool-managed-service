@@ -20,3 +20,6 @@ web/dist/
 
 # macOS
 .DS_Store
+
+# Local CodeGraph index
+.codegraph/

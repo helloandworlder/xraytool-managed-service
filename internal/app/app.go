@@ -47,6 +47,9 @@ func Run() error {
 		"gosealight_node_username":              cfg.GoSeaTelemetry.Username,
 		"gosealight_node_password":              cfg.GoSeaTelemetry.Password,
 		"gosealight_telemetry_interval_seconds": strconv.Itoa(cfg.GoSeaTelemetry.IntervalSeconds),
+		"runtime_instance_uplink_limit_bps":     strconv.FormatUint(cfg.InstanceUplinkLimitBps, 10),
+		"runtime_instance_downlink_limit_bps":   strconv.FormatUint(cfg.InstanceDownlinkLimitBps, 10),
+		"runtime_limit_policy_version":          "0",
 	}); err != nil {
 		return err
 	}

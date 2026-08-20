@@ -21,8 +21,39 @@ jobs:
       - name: Go test
         run: go test ./...
 
+      - name: Go race test
+        run: go test -race ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Fork limiter tests
+        working-directory: third_party/xray-fork
+        run: |
+          go test ./common/protocol ./app/dispatcher ./proxy/http ./proxy/socks
+          go test ./common/buf -run '^TestRateLimit'
+          go test -race ./common/protocol ./app/dispatcher ./proxy/http ./proxy/socks
+
       - name: Go build
         run: go build ./...
+
+      - name: Docker build smoke
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: xraytool:ci-${{ github.sha }}
+          build-args: |
+            VERSION=ci
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ github.run_started_at }}
+
+      - name: Rolling upgrade contract
+        run: bash scripts/test_rolling_upgrade_contract.sh
+
+      - name: Online upgrade environment contract
+        run: bash scripts/test_online_upgrade_env_contract.sh
 
   frontend:
     runs-on: ubuntu-latest

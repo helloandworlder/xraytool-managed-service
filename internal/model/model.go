@@ -284,17 +284,22 @@ type TaskLog struct {
 }
 
 type RuntimeSyncTask struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	Status      string     `gorm:"size:32;not null;index" json:"status"`
-	Reason      string     `gorm:"size:128;not null;index" json:"reason"`
-	OrderID     *uint      `gorm:"index" json:"order_id,omitempty"`
-	Attempts    int        `gorm:"not null;default:0" json:"attempts"`
-	Error       string     `gorm:"type:text" json:"error,omitempty"`
-	RequestedAt time.Time  `gorm:"not null;index" json:"requested_at"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID                      uint       `gorm:"primaryKey" json:"id"`
+	Status                  string     `gorm:"size:32;not null;index" json:"status"`
+	Reason                  string     `gorm:"size:128;not null;index" json:"reason"`
+	Target                  string     `gorm:"size:128;not null;default:managed_xray" json:"target"`
+	OrderID                 *uint      `gorm:"index" json:"order_id,omitempty"`
+	PolicyVersion           uint64     `gorm:"not null;default:0;index" json:"policy_version"`
+	DesiredUplinkLimitBps   uint64     `gorm:"not null;default:0" json:"desired_uplink_limit_bps"`
+	DesiredDownlinkLimitBps uint64     `gorm:"not null;default:0" json:"desired_downlink_limit_bps"`
+	Attempts                int        `gorm:"not null;default:0" json:"attempts"`
+	Error                   string     `gorm:"type:text" json:"error,omitempty"`
+	RequestedAt             time.Time  `gorm:"not null;index" json:"requested_at"`
+	StartedAt               *time.Time `json:"started_at,omitempty"`
+	FinishedAt              *time.Time `json:"finished_at,omitempty"`
+	AppliedAt               *time.Time `json:"applied_at,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 type RuntimeTrafficSnapshot struct {
