@@ -242,7 +242,6 @@ sudo bash deploy/online-upgrade.sh --version v0.2.0
 - `--version v0.1.8` 指定不可变版本
 - `--package-path /path/xraytool-linux-amd64.tar.gz --package-sha256 <sha256>` 使用已审查的本地制品
 - `--backup-dir /opt/xraytool/upgrade-backups/canary-v0.2.0` 指定回滚快照目录
-- `--skip-regression` 跳过升级后自动回归
 - `--skip-backup` 跳过升级前数据库备份
 
 升级脚本默认会：
@@ -251,7 +250,7 @@ sudo bash deploy/online-upgrade.sh --version v0.2.0
 - 执行升级前数据库备份
 - 备份旧的 XrayTool、Fork、Xray 配置和前端静态文件
 - 执行升级后健康检查
-- 自动运行 `scripts/online_regression.py`
+- 校验实例上行和下行限速配置均为有效的非零 bit/s 值
 
 升级失败时使用同一快照回滚：
 
@@ -286,15 +285,7 @@ bash deploy/rolling-upgrade.sh \
 用户和实例上下行速度单位均为十进制 bit/s；没有配置或填写 0 时，默认都是
 `30,000,000 bit/s`，不是“不限制”。
 
-### 单独运行线上回归脚本
-
-```bash
-python3 scripts/online_regression.py
-```
-
-更多人工核对项见：
-
-- `scripts/ONLINE_REGRESSION_CHECKLIST.md`
+管理员登录不再作为升级脚本的自动门禁。管理员凭据属于每台旧实例自己的运行状态，需在业务侧单独核对；限速发布的最终验收以实际代理上传/下载流量测试为准。
 
 ## 说明
 

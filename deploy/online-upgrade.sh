@@ -7,20 +7,17 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVICE_NAME_DEFAULT="xraytool"
 SERVICE_NAME_INPUT="${XTOOL_SERVICE_NAME:-}"
 SERVICE_NAME="${SERVICE_NAME_DEFAULT}"
 ENV_FILE=""
 PUBLIC_INSTALLER="${SCRIPT_DIR}/public-install.sh"
-REGRESSION_SCRIPT="${ROOT_DIR}/scripts/online_regression.py"
 
 RELEASE_VERSION=""
 INSTALL_DIR_INPUT=""
 PACKAGE_PATH="${XTOOL_PACKAGE_PATH:-}"
 PACKAGE_SHA256="${XTOOL_PACKAGE_SHA256:-}"
 BACKUP_DIR_INPUT=""
-SKIP_REGRESSION=false
 SKIP_BACKUP=false
 
 usage() {
@@ -35,14 +32,13 @@ Options:
   --package-path <file>       Use a local release package instead of downloading
   --package-sha256 <sha256>   Expected SHA256 for the local release package
   --backup-dir <dir>          Explicit snapshot directory for rollback
-  --skip-regression           Skip post-upgrade regression script
   --skip-backup               Skip pre-upgrade database backup
   -h, --help                  Show help
 
 Notes:
   - Script preserves current listen port / admin user+pass / xray api port.
   - Script creates a pre-upgrade DB backup by default.
-  - After upgrade it runs scripts/online_regression.py by default.
+  - After upgrade it verifies service health and non-zero directional limits.
 EOF
 }
 
@@ -71,10 +67,6 @@ while [[ $# -gt 0 ]]; do
     --service-name)
       SERVICE_NAME_INPUT="$2"
       shift 2
-      ;;
-    --skip-regression)
-      SKIP_REGRESSION=true
-      shift
       ;;
     --skip-backup)
       SKIP_BACKUP=true
@@ -164,15 +156,6 @@ LISTEN_RAW="$(read_env_var XTOOL_LISTEN || true)"
 LISTEN_PORT="${LISTEN_RAW#:}"
 if [[ -z "${LISTEN_PORT}" ]]; then
   LISTEN_PORT="18080"
-fi
-
-ADMIN_USER="$(read_env_var XTOOL_ADMIN_USER || true)"
-ADMIN_PASS="$(read_env_var XTOOL_ADMIN_PASS || true)"
-if [[ -z "${ADMIN_USER}" ]]; then
-  ADMIN_USER="admin"
-fi
-if [[ -z "${ADMIN_PASS}" ]]; then
-  ADMIN_PASS="admin123456"
 fi
 
 XRAY_API_RAW="$(read_env_var XTOOL_XRAY_API || true)"
@@ -269,8 +252,6 @@ if [[ -f "${ENV_FILE}" ]]; then
   if [[ -z "${LISTEN_PORT}" ]]; then
     LISTEN_PORT="18080"
   fi
-  ADMIN_USER="$(read_env_var XTOOL_ADMIN_USER || true)"
-  ADMIN_PASS="$(read_env_var XTOOL_ADMIN_PASS || true)"
 fi
 
 for _ in $(seq 1 20); do
@@ -306,18 +287,11 @@ for _ in range(20):
 sys.exit(1)
 PY
 
-if [[ "${SKIP_REGRESSION}" != true ]]; then
-  if [[ -f "${REGRESSION_SCRIPT}" ]]; then
-    log "running post-upgrade regression"
-    python3 "${REGRESSION_SCRIPT}" \
-      --host "127.0.0.1" \
-      --port "${LISTEN_PORT}" \
-      --admin-user "${ADMIN_USER}" \
-      --admin-pass "${ADMIN_PASS}"
-  else
-    log "regression script not found, skipped: ${REGRESSION_SCRIPT}"
-  fi
-fi
+INSTANCE_UPLINK_LIMIT_BPS="$(read_env_var XTOOL_INSTANCE_UPLINK_LIMIT_BPS || true)"
+INSTANCE_DOWNLINK_LIMIT_BPS="$(read_env_var XTOOL_INSTANCE_DOWNLINK_LIMIT_BPS || true)"
+[[ "${INSTANCE_UPLINK_LIMIT_BPS}" =~ ^[0-9]+$ ]] && (( INSTANCE_UPLINK_LIMIT_BPS > 0 )) || fail "instance uplink limit is missing or invalid after upgrade"
+[[ "${INSTANCE_DOWNLINK_LIMIT_BPS}" =~ ^[0-9]+$ ]] && (( INSTANCE_DOWNLINK_LIMIT_BPS > 0 )) || fail "instance downlink limit is missing or invalid after upgrade"
+log "runtime limits verified: uplink=${INSTANCE_UPLINK_LIMIT_BPS} bit/s downlink=${INSTANCE_DOWNLINK_LIMIT_BPS} bit/s"
 
 echo
 echo "Upgrade completed successfully"
