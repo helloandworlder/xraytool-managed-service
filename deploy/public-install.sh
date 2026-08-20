@@ -325,7 +325,7 @@ detect_arch() {
 resolve_runtime_values() {
   local suggested_port suggested_user suggested_pass answer
   if [[ "${PRESERVE_EXISTING_ENV}" == true ]]; then
-    [[ -n "${LISTEN_PORT_INPUT}" ]] || LISTEN_PORT_INPUT="$(read_existing_env XTOOL_LISTEN || true)"
+    [[ -n "${LISTEN_PORT_INPUT}" ]] || LISTEN_PORT_INPUT="$(extract_port_from_addr "$(read_existing_env XTOOL_LISTEN || true)")"
     [[ -n "${ADMIN_USER_INPUT}" ]] || ADMIN_USER_INPUT="$(read_existing_env XTOOL_ADMIN_USER || true)"
     [[ -n "${ADMIN_PASS_INPUT}" ]] || ADMIN_PASS_INPUT="$(read_existing_env XTOOL_ADMIN_PASS || true)"
     [[ -n "${XRAY_API_PORT_INPUT}" ]] || XRAY_API_PORT_INPUT="$(extract_port_from_addr "$(read_existing_env XTOOL_XRAY_API || true)")"
